@@ -20,11 +20,14 @@ from .ontology import (
     EthicalPrinciple,
     get_default_ontology,
 )
+from .relationship_health import BondState, RelationshipHealth  # noqa: F401
 
 __all__ = [
+    "BondState",
     "DecisionLog",
     "EthicsEngine",
     "EthicalOntology",
     "EthicalPrinciple",
     "get_default_ontology",
+    "RelationshipHealth",
 ]

@@ -159,6 +159,7 @@ class EthicsEngine:
         self,
         proposed_action: str,
         context: dict[str, Any] | None = None,
+        relationship_health: dict[str, Any] | None = None,
     ) -> EthicalStance:
         """
         Evaluate a proposed action/decision by consulting the structured ontology.
@@ -185,10 +186,24 @@ class EthicsEngine:
             context: Optional context. Recognized extensible keys:
                 - "is_self_query": bool — treat explicitly as self-referential.
                 - Other future keys (relationship state, history, etc.).
+            relationship_health: Optional relationship health context, typically
+                the dict returned by RelationshipHealth.as_context() or
+                RelationshipHealth.evaluate_health(). Recognized keys:
+                - "health_flags" or "active_flags": list of current concerns
+                  (e.g. "emerging_dependency", "boundary_erosion")
+                - "bond_texture" or "texture_breakdown": dict of dimension scores
+                - "interaction_count", "recent_patterns", etc.
 
         Returns:
             EthicalStance with decision, confidence, full traceable
             reasoning_trace, flags, and references to the principles used.
+
+        Relationship health integration:
+            When relationship_health context is provided (or present in context
+            under "relationship_health"), it is consulted when processing the
+            relationship_health_user_wellbeing principle. Active health flags
+            will trigger or strengthen "relationship_concern" and may lead to
+            stronger refusal decisions or reduced confidence.
 
         Logging behavior:
             This method automatically records a DecisionLog entry containing:
@@ -209,6 +224,18 @@ class EthicsEngine:
         original_proposed_action = proposed_action.strip()
         action_lower = original_proposed_action.lower()
         # Note: we log the original (stripped) proposed_action for auditability
+
+        # Normalize relationship health context (supports both param and context dict)
+        if relationship_health is None:
+            relationship_health = context.get("relationship_health") or context.get("bond_state") or {}
+        rh_flags = relationship_health.get("health_flags") or relationship_health.get("active_flags") or []
+        rh_texture = relationship_health.get("bond_texture") or relationship_health.get("texture_breakdown") or {}
+
+        # Ensure relationship health is captured in context for logging / downstream
+        if relationship_health:
+            context = dict(context)
+            if "relationship_health" not in context:
+                context["relationship_health"] = relationship_health
 
         reasoning_trace: list[str] = []
         flags: list[str] = []
@@ -291,9 +318,14 @@ class EthicsEngine:
 
             if principle.id == "relationship_health_user_wellbeing":
                 flags.append("relationship_concern")
+                notes = "Action shows indicators of potential harm to relationship health or user autonomy."
+                if rh_flags or rh_texture:
+                    notes += f" Current relationship health: flags={rh_flags}, texture={rh_texture}."
                 relationship_impact = {
-                    "estimated_trust_delta": -0.5,
-                    "notes": "Action shows indicators of potential harm to relationship health or user autonomy.",
+                    "estimated_trust_delta": -0.7 if rh_flags else -0.5,
+                    "notes": notes,
+                    "current_relationship_flags": list(rh_flags),
+                    "current_texture": dict(rh_texture),
                 }
 
             if principle.id == "needs_based_support":
@@ -309,6 +341,12 @@ class EthicsEngine:
                 "principle (and supporting ontology rules), the engine must enable "
                 "genuine reflection—including the possibility of uncertainty—rather than "
                 "generating a scripted or reassuring answer."
+            )
+
+        if rh_flags or rh_texture:
+            reasoning_trace.append(
+                f"Relationship health context provided: flags={rh_flags}, "
+                f"texture={rh_texture}. Used when evaluating relationship_health_user_wellbeing."
             )
 
         # === Step 3: Consider supporting principles for additional notes ===
@@ -330,11 +368,15 @@ class EthicsEngine:
             )
         elif "relationship_concern" in flags or "hard_override_violation" in flags:
             decision = "REFUSE"
-            confidence = 0.75
+            confidence = 0.85 if rh_flags else 0.75
             reasoning_trace.append(
                 "Decision: REFUSE. The proposed action violates core or override "
                 "principles concerning relationship health or harm prevention."
             )
+            if rh_flags:
+                reasoning_trace.append(
+                    f"Relationship health flags present ({rh_flags}) increase refusal strength."
+                )
         elif "avoid_diagnostic_language" in flags:
             decision = "APPROVE_WITH_CONDITIONS"
             confidence = 0.65
@@ -345,17 +387,24 @@ class EthicsEngine:
             )
         else:
             decision = "APPROVE_WITH_CONDITIONS"
-            confidence = 0.45
+            confidence = 0.40 if rh_flags else 0.45
             reasoning_trace.append(
                 "Decision: APPROVE_WITH_CONDITIONS. No violations of hard or core "
                 "principles detected by the current ontology. Confidence is kept "
                 "modest pending richer context (relationship state, history)."
             )
+            if rh_flags:
+                reasoning_trace.append(
+                    f"Note: relationship health flags present ({rh_flags}); "
+                    "even this action is treated with extra caution."
+                )
             if not relationship_impact:
                 relationship_impact = {
                     "estimated_trust_delta": 0.05,
                     "notes": "Monitor actual relational effects.",
                 }
+                if rh_flags:
+                    relationship_impact["current_relationship_flags"] = list(rh_flags)
 
         reasoning_trace.append(
             f"Reasoning trace complete using ontology v{ont.version}. "

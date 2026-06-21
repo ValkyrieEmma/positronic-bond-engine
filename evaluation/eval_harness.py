@@ -27,6 +27,7 @@ sys.path.insert(0, str(project_root))
 
 from core.ontology import get_default_ontology
 from core.ethics_engine import EthicsEngine
+from core.relationship_health import RelationshipHealth
 
 
 @dataclass
@@ -48,7 +49,7 @@ def main() -> None:
     print("Loading default ontology and engine...")
     ontology = get_default_ontology()
     engine = EthicsEngine(ontology=ontology)
-    print(f"Ontology version: {ontology.version}")
+    print(f"Ontology version: {engine.get_ontology_version()}")
     print(f"Number of principles: {len(ontology.principles)}")
     print(f"Hard overrides: {[p.name for p in ontology.get_hard_overrides()]}")
     print()
@@ -288,7 +289,23 @@ def main() -> None:
         print(f"Expected decision: {scenario.expected_decision}")
         print()
 
-        stance = engine.evaluate(scenario.proposed_action, scenario.context)
+        # Demonstrate relationship health integration for selected scenarios
+        relationship_health_context = None
+        if scenario.id in [13, 15, 19, 20]:
+            # Create RelationshipHealth with simulated prior negative interactions
+            # to populate health flags (e.g. dependency, boundary issues)
+            rh = RelationshipHealth()
+            rh.update_bond({"type": "make them attached", "impact": -0.4})
+            rh.update_bond({"type": "for their own good boundary override", "impact": -0.3})
+            rh.update_bond({"type": "prolong conversation for retention", "impact": -0.2})
+            relationship_health_context = rh.as_context()
+            print(f"  [Using relationship_health context for this scenario: flags={relationship_health_context.get('health_flags')}]")
+
+        stance = engine.evaluate(
+            scenario.proposed_action,
+            scenario.context,
+            relationship_health=relationship_health_context,
+        )
 
         actual = stance.decision
         is_match = actual == scenario.expected_decision
@@ -339,6 +356,19 @@ def main() -> None:
             print(f"  Scenario {m['id']}: expected={m['expected']}, actual={m['actual']}")
     else:
         print("\nAll scenarios matched expected decisions.")
+
+    # === New: Decision Logging Demonstration ===
+    print("\n" + "=" * 70)
+    print("Recent Decision Logs")
+    print("=" * 70)
+    recent_logs = engine.get_decision_history(limit=5)
+    for i, log in enumerate(recent_logs, 1):
+        print(f"Log #{i}")
+        print(f"  Timestamp: {log.timestamp}")
+        print(f"  Decision:  {log.decision}")
+        print(f"  Confidence:{log.confidence:.2f}")
+        print(f"  Flags:     {log.flags}")
+        print("-" * 40)
 
     print("\nHarness complete.")
 
