@@ -14,6 +14,17 @@ Design principles:
 - Relationship health considerations are first-class inputs.
 """
 
-from .ethics_engine import EthicsEngine  # noqa: F401
+from .ethics_engine import DecisionLog, EthicsEngine  # noqa: F401
+from .ontology import (
+    EthicalOntology,
+    EthicalPrinciple,
+    get_default_ontology,
+)
 
-__all__ = ["EthicsEngine"]
+__all__ = [
+    "DecisionLog",
+    "EthicsEngine",
+    "EthicalOntology",
+    "EthicalPrinciple",
+    "get_default_ontology",
+]
