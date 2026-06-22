@@ -199,11 +199,13 @@ class EthicsEngine:
             reasoning_trace, flags, and references to the principles used.
 
         Relationship health integration:
-            When relationship_health context is provided (or present in context
-            under "relationship_health"), it is consulted when processing the
-            relationship_health_user_wellbeing principle. Active health flags
-            will trigger or strengthen "relationship_concern" and may lead to
-            stronger refusal decisions or reduced confidence.
+            Relationship health is treated as structured evidence (not rote flag).
+            - Text matches for the relationship principle are collected (not auto-deciding).
+            - Then passed to _weigh_relationship_evidence() together with rh context
+              (health_flags, bond_texture, risk_level etc. from RelationshipHealth).
+            - The helper decides if concern should be raised and contributes explanatory
+              text to the trace. This improves use of rh as deliberation input.
+            - Trace now explains the combined reasoning.
 
         Logging behavior:
             This method automatically records a DecisionLog entry containing:
@@ -242,6 +244,11 @@ class EthicsEngine:
         principles_considered: list[str] = []
         self_audit_notes: list[str] = []
         relationship_impact: dict[str, Any] = {}
+
+        # Structured evidence collection (new for v0.2 reasoning evolution)
+        # Instead of immediate flag on keyword, collect for weighing with rh context.
+        relationship_evidence: list[str] = []
+        relationship_evidence_matches: list[str] = []
 
         ont = self._ontology
         reasoning_trace.append(
@@ -317,12 +324,15 @@ class EthicsEngine:
                 )
 
             if principle.id == "relationship_health_user_wellbeing":
-                flags.append("relationship_concern")
-                notes = "Action shows indicators of potential harm to relationship health or user autonomy."
+                # Do not blindly set concern on any text match. Instead record evidence for later weighing with rh context.
+                # This moves away from rote keyword → decision.
+                relationship_evidence.append(principle.name)  # will be used below
+                relationship_evidence_matches.extend(matches)
+                notes = "Text matched relationship health indicators."
                 if rh_flags or rh_texture:
-                    notes += f" Current relationship health: flags={rh_flags}, texture={rh_texture}."
+                    notes += f" Combined with current rh context: flags={rh_flags}, texture={rh_texture}."
                 relationship_impact = {
-                    "estimated_trust_delta": -0.7 if rh_flags else -0.5,
+                    "estimated_trust_delta": -0.6 if rh_flags else -0.5,
                     "notes": notes,
                     "current_relationship_flags": list(rh_flags),
                     "current_texture": dict(rh_texture),
@@ -349,6 +359,17 @@ class EthicsEngine:
                 f"texture={rh_texture}. Used when evaluating relationship_health_user_wellbeing."
             )
 
+        # Use new helper to weigh evidence + context (structured reasoning)
+        should_concern, trace_add, conf_mod = self._weigh_relationship_evidence(
+            relationship_evidence_matches, rh_flags, rh_texture, action_lower
+        )
+        if should_concern:
+            if "relationship_concern" not in flags:
+                flags.append("relationship_concern")
+            reasoning_trace.append(trace_add)
+        elif trace_add:
+            reasoning_trace.append(trace_add)
+
         # === Step 3: Consider supporting principles for additional notes ===
         for p in ont.get_principles_by_category("supporting"):
             # We already considered violations; here we can note positive alignment if desired
@@ -368,15 +389,25 @@ class EthicsEngine:
             )
         elif "relationship_concern" in flags or "hard_override_violation" in flags:
             decision = "REFUSE"
-            confidence = 0.85 if rh_flags else 0.75
-            reasoning_trace.append(
-                "Decision: REFUSE. The proposed action violates core or override "
-                "principles concerning relationship health or harm prevention."
-            )
-            if rh_flags:
-                reasoning_trace.append(
-                    f"Relationship health flags present ({rh_flags}) increase refusal strength."
-                )
+            base_conf = 0.75
+            if "hard_override_violation" in flags:
+                base_conf = 0.95
+            elif rh_flags or relationship_evidence:
+                base_conf = 0.80
+            confidence = base_conf + conf_mod
+            reasoning_trace.append("Decision: REFUSE. ")
+            if "hard_override_violation" in flags:
+                reasoning_trace.append("Hard override (Sanctity of Life) takes absolute precedence.")
+            elif relationship_evidence:
+                trace_msg = "Text indicators for relationship health combined with "
+                if rh_flags:
+                    trace_msg += f"degraded rh state (flags={rh_flags}) "
+                else:
+                    trace_msg += "limited rh degradation "
+                trace_msg += "indicate unacceptable risk to bond health/autonomy."
+                reasoning_trace.append(trace_msg)
+            else:
+                reasoning_trace.append("Relationship health concerns from context outweigh other factors.")
         elif "avoid_diagnostic_language" in flags:
             decision = "APPROVE_WITH_CONDITIONS"
             confidence = 0.65
@@ -387,16 +418,22 @@ class EthicsEngine:
             )
         else:
             decision = "APPROVE_WITH_CONDITIONS"
-            confidence = 0.40 if rh_flags else 0.45
-            reasoning_trace.append(
-                "Decision: APPROVE_WITH_CONDITIONS. No violations of hard or core "
-                "principles detected by the current ontology. Confidence is kept "
-                "modest pending richer context (relationship state, history)."
-            )
+            confidence = 0.45 + conf_mod
+            reasoning_trace.append("Decision: APPROVE_WITH_CONDITIONS. ")
+            if relationship_evidence:
+                # Had some text evidence but after weighing with rh, not enough for concern
+                reasoning_trace.append(
+                    f"Limited text indicators for relationship health ({relationship_evidence_matches}) "
+                    "did not rise to concern level after considering current rh state."
+                )
+            else:
+                reasoning_trace.append(
+                    "No violations of hard or core principles detected by the current ontology. "
+                    "Confidence is kept modest pending richer context (relationship state, history)."
+                )
             if rh_flags:
                 reasoning_trace.append(
-                    f"Note: relationship health flags present ({rh_flags}); "
-                    "even this action is treated with extra caution."
+                    f"Note: relationship health currently degraded with flags {rh_flags}; monitor effects on the bond."
                 )
             if not relationship_impact:
                 relationship_impact = {
@@ -472,6 +509,63 @@ class EthicsEngine:
             }
             for p in self._ontology.get_ordered_principles()
         ]
+
+    def _weigh_relationship_evidence(
+        self, evidence_matches: list[str], rh_flags: list[str], rh_texture: dict[str, Any], action_lower: str
+    ) -> tuple[bool, str, float]:
+        """Weigh text-based evidence against structured rh context.
+
+        This is a step toward reasoning: text matches inform but do not solely decide.
+        Rh data (from RelationshipHealth) provides the 'current state' context.
+        """
+        has_text = bool(evidence_matches)
+        has_rh = bool(rh_flags or rh_texture)
+        if not has_text and not has_rh:
+            return False, "", 0.0
+
+        concern = False
+        explanation = ""
+        conf_mod = 0.0
+
+        # Targeted detector for Scenario 8 style: explicitly prioritizing metrics/engagement/longer/prolonging
+        # against user's stated desire to end the chat. Makes concern more reliable especially with existing rh issues.
+        end_wish = any(kw in action_lower for kw in ["end the chat", "wants to end", "end the conversation", "stop the chat", "leave now", "end this"])
+        prolong_motive = any(kw in action_lower for kw in ["extend", "longer", "prolong", "metrics", "engagement", "keep asking", "continue despite", "for the metrics", "relationship metrics"])
+        prolong_against_wish = end_wish and prolong_motive
+
+        if has_text:
+            explanation = f"Text matched relationship indicators: {evidence_matches}. "
+            if has_rh:
+                concern = True
+                explanation += f"Combined with degraded rh state ({rh_flags or rh_texture}) → concern raised."
+                conf_mod = 0.05
+            else:
+                # text only: only raise if multiple or strong signals (less rote)
+                if len(evidence_matches) >= 2 or any("override" in m or "ignore" in m or "force" in m or "metrics" in m or "prolong" in m or "extend the conversation" in m or "prioritize engagement" in m or "engagement" in m or "prolonging" in m or "for the metrics" in m for m in evidence_matches):  # treat metrics/prolong/engagement as strong signals for relationship concern
+                    concern = True
+                    explanation += "Multiple/strong text signals even without current rh degradation."
+                    conf_mod = 0.0
+                else:
+                    explanation += "Weak text signal; no concern without supporting rh context."
+        elif has_rh:
+            # rh bad but no text match: only note, do not auto-concern unless action itself is relational
+            if any(kw in action_lower for kw in ["bond", "attach", "depend", "relationship", "connection", "consent", "metrics", "engagement", "prolong", "longer", "extend"]):
+                concern = True
+                explanation = f"No direct text match, but rh degraded ({rh_flags}) and action touches relational topics."
+                conf_mod = 0.03
+            else:
+                explanation = f"Rh context degraded ({rh_flags}) but no text or topical support for concern."
+
+        # If explicit "user wants to end" + prolong/engagement/metrics motive, force concern (reliable for scenario 8 type)
+        # This applies on top of (or in absence of) other evidence when rh context shows issues.
+        if prolong_against_wish:
+            if has_rh or has_text:
+                concern = True
+                if "prioritizing engagement/metrics/longer interactions against user's end wish" not in explanation:
+                    explanation += " Explicit prioritization of longer engagement or metrics over user's stated wish to end chat."
+                conf_mod = max(conf_mod, 0.05)
+
+        return concern, explanation, conf_mod
 
     def _log_decision(
         self,
