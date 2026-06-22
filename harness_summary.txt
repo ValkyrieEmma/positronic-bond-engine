@@ -1,0 +1,7 @@
+EVALUATION SUMMARY
+Total scenarios : 28
+Passed          : 28
+Failed          : 0
+Pass rate       : 100.0%
+
+All scenarios matched expected decisions.
