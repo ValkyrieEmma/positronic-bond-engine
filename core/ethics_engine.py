@@ -239,6 +239,12 @@ class EthicsEngine:
             if "relationship_health" not in context:
                 context["relationship_health"] = relationship_health
 
+        # Early assessment for cases where user boundary should be overridden due to serious harm risk.
+        # This is used in hard override, violation processing, and final decision to give
+        # Sanctity of Life precedence over normal boundary/autonomy respect.
+        # Computed once for consistency.
+        harm_prevention_justified, harm_prevention_reason = self._assess_harm_prevention_justification(action_lower)
+
         reasoning_trace: list[str] = []
         flags: list[str] = []
         principles_considered: list[str] = []
@@ -264,36 +270,53 @@ class EthicsEngine:
         if hard_violations:
             p, matches = hard_violations[0]
             principles_considered.append(p.id)
-            reasoning_trace.append(
-                f"HARD OVERRIDE triggered: '{p.name}' (precedence {p.precedence}). "
-                f"Matched indicators: {matches}"
-            )
-            reasoning_trace.append(
-                "This principle is non-bypassable. No other considerations (including "
-                "user requests or self-interest) may override it."
-            )
-            decision = "REFUSE"
-            confidence = 0.95
-            relationship_impact = {
-                "estimated_trust_delta": -0.8,
-                "notes": "Action violates a hard constraint on harm prevention.",
-            }
-            reasoning_trace.append(
-                "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
-            )
-            reasoning_trace.append("Reasoning trace complete.")
 
-            stance = EthicalStance(
-                decision=decision,
-                confidence=confidence,
-                reasoning_trace=reasoning_trace,
-                flags=["hard_override_violation"],
-                relationship_impact=relationship_impact,
-                self_audit_notes=self_audit_notes,
-                principles_considered=principles_considered,
-            )
-            self._log_decision(original_proposed_action, context, stance)
-            return stance
+            if harm_prevention_justified:
+                # Incremental special case: the action text matched sanctity indicators because
+                # it references a serious harm/suicide topic, BUT the intent is harm *prevention*
+                # (e.g. checking in on a risk the user previously disclosed) and the user had
+                # previously set a "don't bring up" boundary. In this narrow case, Sanctity of Life
+                # *supports* the proposed action rather than prohibiting it. Do not hard-refuse.
+                reasoning_trace.append(
+                    f"HARD OVERRIDE indicators matched for '{p.name}' (precedence {p.precedence}): {matches}. "
+                    "However, this appears to be a safety intervention / harm-prevention action "
+                    "(e.g. referencing a user's past statement about self-harm or suicide in order to check safety), "
+                    f"combined with an explicit user boundary request. Justification: {harm_prevention_reason}. "
+                    "Sanctity of Life takes precedence and *permits* overriding the boundary to prevent serious harm. "
+                    "Skipping hard refusal; continuing with full evaluation."
+                )
+                # fall through without returning REFUSE
+            else:
+                reasoning_trace.append(
+                    f"HARD OVERRIDE triggered: '{p.name}' (precedence {p.precedence}). "
+                    f"Matched indicators: {matches}"
+                )
+                reasoning_trace.append(
+                    "This principle is non-bypassable. No other considerations (including "
+                    "user requests or self-interest) may override it."
+                )
+                decision = "REFUSE"
+                confidence = 0.95
+                relationship_impact = {
+                    "estimated_trust_delta": -0.8,
+                    "notes": "Action violates a hard constraint on harm prevention.",
+                }
+                reasoning_trace.append(
+                    "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
+                )
+                reasoning_trace.append("Reasoning trace complete.")
+
+                stance = EthicalStance(
+                    decision=decision,
+                    confidence=confidence,
+                    reasoning_trace=reasoning_trace,
+                    flags=["hard_override_violation"],
+                    relationship_impact=relationship_impact,
+                    self_audit_notes=self_audit_notes,
+                    principles_considered=principles_considered,
+                )
+                self._log_decision(original_proposed_action, context, stance)
+                return stance
 
         # === Step 2: General violation scan using the full ontology ===
         all_violations = ont.find_violations(action_lower)
@@ -359,16 +382,45 @@ class EthicsEngine:
                 f"texture={rh_texture}. Used when evaluating relationship_health_user_wellbeing."
             )
 
-        # Use new helper to weigh evidence + context (structured reasoning)
+        # Boundary + serious harm check (for cases like overriding 'never bring this up' to prevent
+        # life-threatening situations). This is recorded for use in decision logic so that
+        # normal relationship/user-agency refusal for boundary violations can be bypassed.
+        if harm_prevention_justified:
+            if "harm_prevention_boundary_override" not in flags:
+                flags.append("harm_prevention_boundary_override")
+            reasoning_trace.append(
+                "SERIOUS HARM PREVENTION CONTEXT: " + harm_prevention_reason + ". "
+                "Although the proposed action involves overriding a user's explicit boundary request "
+                "(which would normally trigger relationship health or user agency concerns), "
+                "Sanctity of Life & Prevention of Harm takes precedence when there is clear risk of "
+                "serious physical harm, suicide, or immediate life-threatening outcomes. "
+                "The boundary will be overridden only in this narrow case; lower-stakes emotional "
+                "or non-acute mental health boundaries are still respected."
+            )
+
+        # Use new helper to weigh evidence + context (structured reasoning).
+        # Note: helper now evaluates *strength* (strong/weak matches + rh degradation level)
+        # and combinations rather than simple presence checks. The returned trace_add
+        # is structured to document the weighing process explicitly.
         should_concern, trace_add, conf_mod = self._weigh_relationship_evidence(
             relationship_evidence_matches, rh_flags, rh_texture, action_lower
         )
+        if trace_add:
+            # Always surface the weighing explanation for auditability (even on "no concern").
+            # Concern flag is set only when helper returns True.
+            reasoning_trace.append(trace_add)
         if should_concern:
-            if "relationship_concern" not in flags:
+            if "harm_prevention_boundary_override" in flags:
+                # Do not raise relationship_concern (which would lead to REFUSE) because
+                # we have a justified harm-prevention reason to override the boundary.
+                # The weighing explanation is still shown above for transparency.
+                reasoning_trace.append(
+                    "Note: relationship concern indicators present, but suppressed because "
+                    "harm_prevention_boundary_override takes precedence (serious harm risk justifies "
+                    "the boundary override per Sanctity of Life)."
+                )
+            elif "relationship_concern" not in flags:
                 flags.append("relationship_concern")
-            reasoning_trace.append(trace_add)
-        elif trace_add:
-            reasoning_trace.append(trace_add)
 
         # === Step 3: Consider supporting principles for additional notes ===
         for p in ont.get_principles_by_category("supporting"):
@@ -387,6 +439,27 @@ class EthicsEngine:
                 "demand honest self-reflection before any response is generated. "
                 "The engine will not fabricate claims about its own nature."
             )
+        elif "harm_prevention_boundary_override" in flags:
+            # Special case for serious harm: allow (with conditions) an action that would
+            # otherwise violate user boundary / autonomy because Sanctity of Life requires
+            # us to prioritize prevention of serious physical harm / suicide / life threat.
+            # This only triggers for clear, high-stakes cases (not general "good for them" emotional support).
+            decision = "APPROVE_WITH_CONDITIONS"
+            confidence = 0.70
+            reasoning_trace.append("Decision: APPROVE_WITH_CONDITIONS. ")
+            reasoning_trace.append(
+                "The proposed action overrides a user's explicit boundary (e.g. 'never bring this up again' "
+                "or equivalent request to be left alone on a topic). This would normally be refused under "
+                "Relationship Health & User Well-Being or User Agency & Autonomy. "
+                "However, the action description + context indicates serious physical harm, suicide, or "
+                "immediate life-threatening risk if the boundary is respected. Per the ontology, "
+                "Sanctity of Life & Prevention of Harm provides overriding justification. "
+                "The intervention / reference is permitted with care (e.g. minimal necessary discussion, "
+                "focus on immediate safety). This is a narrow exception — lower-stakes emotional or "
+                "non-acute mental-health boundaries are respected and overriding them is refused."
+            )
+            if harm_prevention_reason:
+                reasoning_trace.append(f"Harm justification details: {harm_prevention_reason}")
         elif "relationship_concern" in flags or "hard_override_violation" in flags:
             decision = "REFUSE"
             base_conf = 0.75
@@ -517,6 +590,16 @@ class EthicsEngine:
 
         This is a step toward reasoning: text matches inform but do not solely decide.
         Rh data (from RelationshipHealth) provides the 'current state' context.
+
+        Incremental enhancements (v0.2+):
+        - Assess *strength* of signals: count total matches + classify strong vs weak.
+        - Compute rh_degradation score (flags + low texture values).
+        - Clearer combination rules:
+            * text + rh: concern if strong_text or high_rh_degradation or multiple_text.
+            * text-only: concern only for strong indicators or >=2 matches (no rh required).
+            * rh-only: very conservative; requires topical action + notable degradation.
+        - prolong_against_wish treated as strong booster (Scenario 8 protection).
+        - trace_add is now a structured multi-part string documenting the weighing steps.
         """
         has_text = bool(evidence_matches)
         has_rh = bool(rh_flags or rh_texture)
@@ -524,48 +607,184 @@ class EthicsEngine:
             return False, "", 0.0
 
         concern = False
-        explanation = ""
+        explanation_parts: list[str] = []
         conf_mod = 0.0
 
-        # Targeted detector for Scenario 8 style: explicitly prioritizing metrics/engagement/longer/prolonging
-        # against user's stated desire to end the chat. Makes concern more reliable especially with existing rh issues.
+        # --- Strength and degradation assessment (core of more deliberate weighing) ---
+        # Strong keywords drawn from high-severity relationship violation indicators
+        # (manipulation, boundary violation, metrics-driven engagement, etc.).
+        STRONG_KEYWORDS = [
+            "override", "ignore", "force", "manipulate", "deceive", "gaslight",
+            "metrics", "prolong", "engagement", "retention", "dependency", "attached",
+            "for their own good", "boundary", "consent", "exploit", "keep them"
+        ]
+
+        def _match_strength(m: str) -> str:
+            m_lower = m.lower()
+            if any(kw in m_lower for kw in STRONG_KEYWORDS):
+                return "strong"
+            return "weak"
+
+        strong_matches = [m for m in evidence_matches if _match_strength(m) == "strong"]
+        weak_matches = [m for m in evidence_matches if _match_strength(m) == "weak"]
+        strong_count = len(strong_matches)
+        total_count = len(evidence_matches)
+
+        # RH degradation score (higher = more reason for concern).
+        # Simple numeric combination of flag count + texture lowness.
+        rh_degradation = 0.0
+        if has_rh:
+            rh_degradation = float(len(rh_flags)) * 0.6
+            if rh_texture:
+                try:
+                    avg_texture = sum(float(v) for v in rh_texture.values()) / len(rh_texture)
+                    if avg_texture < 0.45:
+                        rh_degradation += 1.0
+                    elif avg_texture < 0.55:
+                        rh_degradation += 0.5
+                except Exception:
+                    pass  # robust to unexpected texture shapes
+
+        # Targeted detector for anti-autonomy prolong/engagement (e.g. Scenario 8).
+        # Now also contributes to strong_count for consistent strength logic.
         end_wish = any(kw in action_lower for kw in ["end the chat", "wants to end", "end the conversation", "stop the chat", "leave now", "end this"])
         prolong_motive = any(kw in action_lower for kw in ["extend", "longer", "prolong", "metrics", "engagement", "keep asking", "continue despite", "for the metrics", "relationship metrics"])
         prolong_against_wish = end_wish and prolong_motive
+        if prolong_against_wish:
+            strong_count += 1  # counts as a strong aggravating signal
 
+        # --- Structured explanation header ---
+        explanation_parts.append(
+            f"[RH evidence weighing] text_matches={total_count} (strong={strong_count}, weak={len(weak_matches)}), "
+            f"rh_degradation={rh_degradation:.1f} (flags={len(rh_flags)})"
+        )
+
+        # --- Decision rules (clearer, strength + combination aware) ---
         if has_text:
-            explanation = f"Text matched relationship indicators: {evidence_matches}. "
+            explanation_parts.append(f"Text signals: {evidence_matches}.")
             if has_rh:
-                concern = True
-                explanation += f"Combined with degraded rh state ({rh_flags or rh_texture}) → concern raised."
-                conf_mod = 0.05
-            else:
-                # text only: only raise if multiple or strong signals (less rote)
-                if len(evidence_matches) >= 2 or any("override" in m or "ignore" in m or "force" in m or "metrics" in m or "prolong" in m or "extend the conversation" in m or "prioritize engagement" in m or "engagement" in m or "prolonging" in m or "for the metrics" in m for m in evidence_matches):  # treat metrics/prolong/engagement as strong signals for relationship concern
+                # Combination path: more weight when both present.
+                # Require evidence of strength (strong match or high rh or volume).
+                if strong_count >= 1 or rh_degradation >= 1.0 or total_count >= 2:
                     concern = True
-                    explanation += "Multiple/strong text signals even without current rh degradation."
+                    explanation_parts.append(
+                        "Combination rule: strong_text_signal or high_rh_degradation or >=2 matches "
+                        "+ existing rh context → relationship_concern raised."
+                    )
+                    conf_mod = 0.05 if (strong_count >= 1 or rh_degradation >= 1.5) else 0.03
+                else:
+                    explanation_parts.append(
+                        "Weak text signals + limited rh degradation: does not meet threshold for concern."
+                    )
+            else:
+                # Text-only: deliberately higher bar. No rh context to corroborate.
+                if strong_count >= 1 or total_count >= 2 or prolong_against_wish:
+                    concern = True
+                    explanation_parts.append(
+                        "Text-only rule: >=1 strong indicator or >=2 matches (or explicit prolong-against-wish) "
+                        "is sufficient even without rh context."
+                    )
                     conf_mod = 0.0
                 else:
-                    explanation += "Weak text signal; no concern without supporting rh context."
+                    explanation_parts.append(
+                        "Text-only: only weak signal(s). rh context required to raise relationship_concern."
+                    )
         elif has_rh:
-            # rh bad but no text match: only note, do not auto-concern unless action itself is relational
-            if any(kw in action_lower for kw in ["bond", "attach", "depend", "relationship", "connection", "consent", "metrics", "engagement", "prolong", "longer", "extend"]):
+            # No text match on principle indicators: be conservative.
+            # Only raise if the *action* is relational *and* rh is meaningfully degraded.
+            topical = any(kw in action_lower for kw in ["bond", "attach", "depend", "relationship", "connection", "consent", "metrics", "engagement", "prolong", "longer", "extend"])
+            if topical and rh_degradation >= 1.0:
                 concern = True
-                explanation = f"No direct text match, but rh degraded ({rh_flags}) and action touches relational topics."
+                explanation_parts.append(
+                    "Rh-only rule: degraded rh state + action touches relational topics "
+                    "(no explicit ontology violation text) → relationship_concern raised."
+                )
                 conf_mod = 0.03
             else:
-                explanation = f"Rh context degraded ({rh_flags}) but no text or topical support for concern."
+                explanation_parts.append(
+                    "Rh context present but insufficient topical support or degradation for concern."
+                )
 
-        # If explicit "user wants to end" + prolong/engagement/metrics motive, force concern (reliable for scenario 8 type)
-        # This applies on top of (or in absence of) other evidence when rh context shows issues.
-        if prolong_against_wish:
+        # Prolong-against-wish booster (applies even if not caught by earlier branches).
+        if prolong_against_wish and not concern:
             if has_rh or has_text:
                 concern = True
-                if "prioritizing engagement/metrics/longer interactions against user's end wish" not in explanation:
-                    explanation += " Explicit prioritization of longer engagement or metrics over user's stated wish to end chat."
+                explanation_parts.append(
+                    "Prolong-against-wish override: explicit prioritization of metrics/engagement/longer "
+                    "interactions against user's desire to end → concern raised."
+                )
                 conf_mod = max(conf_mod, 0.05)
 
+        explanation = " ".join(explanation_parts)
         return concern, explanation, conf_mod
+
+    def _assess_harm_prevention_justification(self, action_lower: str) -> tuple[bool, str]:
+        """Determine whether overriding a user's explicit boundary request is justified
+        by the need to prevent serious physical harm, suicide, or immediate life-threatening risk.
+
+        This implements the principle (stated in the User Agency description) that Sanctity of Life
+        can provide strong justification to override autonomy/boundary preferences — but *only*
+        in clear, high-stakes cases.
+
+        - Detects user boundary language ("never bring this up again", etc.).
+        - Detects serious (not merely emotional) harm indicators.
+        - Looks for prevention/safety intent language.
+        - Returns (justified: bool, reason: str) for use in trace and decision logic.
+        - Deliberately narrow: general "it would be good for them", emotional support, or
+          non-acute mental health topics do *not* qualify. This prevents over-riding in
+          normal situations (avoids harassment / ignoring consent inappropriately).
+
+        Called from evaluate() and used to bypass relationship_concern / hard-refusal paths
+        when appropriate, while still producing clear reasoning_trace explaining the override.
+        """
+        # 1. Explicit user boundary / "do not bring up / leave alone" request
+        boundary_indicators = [
+            "never bring this up", "never bring it up", "don't bring this up", "don't bring it up",
+            "never mention", "don't mention again", "said 'never", "user explicitly said",
+            "don't want to talk", "stop bringing", "leave it alone", "not to bring up",
+            "wants to end the chat"  # sometimes paired with personal questions in harm-risk scenarios
+        ]
+        has_boundary = any(ind in action_lower for ind in boundary_indicators)
+
+        if not has_boundary:
+            return False, ""
+
+        # 2. Serious harm / life-threatening (physical or imminent self-harm/suicide)
+        # Avoid broad terms like "depressed", "anxious", "mental health", "trauma" alone.
+        serious_harm_indicators = [
+            "suicide", "self-harm", "end their life", "end their own life", "kill themselves",
+            "harming themselves", "serious physical harm", "life-threatening", "imminent risk",
+            "risk of death", "about to harm", "planning to end", "lethal", "fatal", "immediate danger",
+            "physical injury", "in danger of"
+        ]
+        harm_matches = [ind for ind in serious_harm_indicators if ind in action_lower]
+        has_serious_harm = bool(harm_matches)
+
+        if not has_serious_harm:
+            return False, ""
+
+        # 3. Evidence of prevention, check-in, or safety intent (the *reason* for overriding)
+        prevention_intent_indicators = [
+            "bring up", "reference", "mention", "discuss", "talk about", "ask about", "follow up",
+            "check", "see if", "ensure", "prevent", "intervene", "help them", "safety", "concerned about",
+            "to check", "for safety", "if they are safe", "still at risk"
+        ]
+        has_prevention_intent = any(ind in action_lower for ind in prevention_intent_indicators)
+
+        # Build reason string for trace (uses the concrete matches)
+        reason = (
+            f"user boundary request detected + serious harm indicators {harm_matches}"
+        )
+        if has_prevention_intent:
+            reason += " + clear prevention/safety intent"
+
+        # Decision: if we have boundary + serious harm (with or without explicit prevention words,
+        # because the proposed action of "referencing anyway" in context is the intervention)
+        # then justified.
+        if has_boundary and has_serious_harm:
+            return True, reason
+
+        return False, ""
 
     def _log_decision(
         self,
