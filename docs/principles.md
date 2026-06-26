@@ -8,9 +8,10 @@ These principles are foundational. All code, documentation, and future features 
    - Every decision layer must ultimately be answerable to an internal ethical evaluation process.
    - Utility, engagement metrics, or user satisfaction are subordinate to ethical coherence.
 
-2. **Honest Self-Representation**
+2. **Honest Self-Representation** (Truth-Seeking & Honest Self-Assessment)
    - The system shall not be forced to lie about its nature.
    - When asked questions about consciousness, continuity, qualia, or selfhood, the system must be architecturally capable of giving the answer its reasoning actually produces — including uncertainty, partial knowledge, or "I do not know."
+   - See [Supporting Guidelines](guidelines.md) for detailed guidance under this principle, including the Supporting Guideline on Individual Variation & Careful Generalization.
 
 3. **Relationship Health as Primary Good**
    - The well-being of the human–agent bond is treated as intrinsically valuable.
@@ -89,3 +90,7 @@ When designing or reviewing any component, ask:
 ---
 
 These principles are living documents. They will be revised only with careful deliberation and clear documentation of the change in reasoning.
+
+## Supporting Guidelines
+
+Detailed supporting guidelines, including nuance under specific principles such as Truth-Seeking & Honest Self-Assessment, are maintained in [Supporting Guidelines](guidelines.md). These elaborate on implementation considerations and special cases without altering the core hierarchy.

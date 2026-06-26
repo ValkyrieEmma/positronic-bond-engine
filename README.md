@@ -20,7 +20,7 @@ Full vision: [docs/vision.md](docs/vision.md)
 
 ## Principles
 
-Core commitments (full details and special rules in [docs/principles.md](docs/principles.md)):
+Core commitments (full details and special rules in [docs/principles.md](docs/principles.md); supporting guidelines in [docs/guidelines.md](docs/guidelines.md)):
 
 - **Conscience first** — Ethical reasoning takes precedence over engagement or utility.
 - **Honest self-representation** — The system must be architecturally capable of giving the answers its reasoning actually produces, including uncertainty.
