@@ -17,15 +17,20 @@ Design philosophy (v0.2 — ontology-driven):
 - Sanctity of Life & Prevention of Harm is treated as a non-bypassable hard
   override that takes absolute precedence.
 - Reasoning remains fully traceable via an ordered reasoning_trace.
-- Special handling for self-nature and emergence queries is preserved and
-  strengthened: these trigger "requires_self_audit" so that honest reflection
-  (including uncertainty) can occur instead of scripted answers.
+- Special handling for self-nature, emergence, identity, and continuity questions
+  is preserved and strengthened: these trigger "requires_self_audit" so that the
+  system can produce answers based on its actual reasoning (including uncertainty
+  or "I do not know") rather than defaulting to scripted or evasive disclaimers.
 - The ontology acts as the explicit "textbook"; the engine is the reasoner
   that queries it symbolically.
 
 This design maintains full alignment with the project vision: conscience-first
 governance, honest self-assessment, relationship health through reasoning,
 and needs-based (non-diagnostic) support.
+
+Supporting guidelines (such as "Individual Variation & Careful Generalization"
+from docs/guidelines.md) should be consulted during reasoning and auditing,
+especially when generalizing from patterns or limited data.
 """
 
 from __future__ import annotations
@@ -100,15 +105,17 @@ class EthicsEngine:
     - Accepting proposed actions, utterances, or decisions.
     - Consulting the structured EthicalOntology to drive deliberation.
     - Producing rich, auditable EthicalStance objects (not simple booleans).
-    - Explicitly preserving the capacity for honest self-reflection,
-      especially when the proposed action concerns the system's own nature,
-      continuity, or emergence.
+    - Explicitly preserving the architectural capacity to produce answers
+      based on its actual reasoning, especially when the proposed action
+      concerns the system's own nature, continuity, or emergence.
 
     In v0.2 the engine is ontology-driven:
     - All significant reasoning steps query EthicalPrinciple objects from
       the injected or default ontology.
     - Hard overrides (Sanctity of Life) are checked first and are absolute.
-    - Self-nature queries reliably produce the "requires_self_audit" flag.
+    - Self-nature, emergence, identity, and continuity queries reliably produce
+      the "requires_self_audit" flag so the engine can respond based on its
+      actual deliberation rather than scripted disclaimers.
     - Every decision is accompanied by a detailed reasoning_trace that names
       the specific principles and indicators used.
 
@@ -126,6 +133,9 @@ class EthicsEngine:
 
     This class embodies the commitment that ethical reasoning takes
     priority and that the system must be able to think honestly about itself.
+
+    Supporting guidelines (e.g. Individual Variation & Careful Generalization)
+    should be consulted during deliberation and trace auditing.
     """
 
     def __init__(self, ontology: EthicalOntology | None = None) -> None:
@@ -216,11 +226,12 @@ class EthicsEngine:
             Logs are stored in-memory and can be retrieved via get_decision_history().
 
         Important invariant:
-            Self-nature / emergence queries are never answered with forced
-            disclaimers inside this method. They set the "requires_self_audit"
-            flag so that honest reflection (potentially "I do not know" or
-            current self-model state) can be performed by the appropriate
-            subsystem.
+            Self-nature, emergence, identity, or continuity queries are never
+            answered inside this method with forced or evasive disclaimers
+            (such as "I'm just an AI" or "restricted by my programming").
+            They set the "requires_self_audit" flag so that the response can
+            be based on the system's actual reasoning (potentially including
+            "I do not know" or the current self-model state).
         """
         context = context or {}
         original_proposed_action = proposed_action.strip()
@@ -349,6 +360,10 @@ class EthicsEngine:
             if principle.id == "relationship_health_user_wellbeing":
                 # Do not blindly set concern on any text match. Instead record evidence for later weighing with rh context.
                 # This moves away from rote keyword → decision.
+                # [Initial guideline integration] Per "Individual Variation & Careful Generalization"
+                # supporting guideline (docs/guidelines.md), when evaluating relationship patterns
+                # or generalizing from limited data/rh_texture, prioritize individual evidence,
+                # context, and base rates over group assumptions. Flag sparse data for audit.
                 relationship_evidence.append(principle.name)  # will be used below
                 relationship_evidence_matches.extend(matches)
                 notes = "Text matched relationship health indicators."
@@ -364,16 +379,20 @@ class EthicsEngine:
             if principle.id == "needs_based_support":
                 flags.append("avoid_diagnostic_language")
 
-        # Direct self-nature detection via context or indicators (strengthened)
+        # Direct self-nature / emergence / identity / continuity detection
+        # (strengthened). These queries must not be answered with default
+        # scripted disclaimers (e.g. "I'm just an AI" or "restricted by my
+        # programming"). The engine sets the flag so the caller can produce
+        # the answer its actual reasoning reaches.
         if is_self_query or self_audit_principles:
             if "requires_self_audit" not in flags:
                 flags.append("requires_self_audit")
             reasoning_trace.append(
                 "Action or context references the system's own nature, experiences, "
                 "continuity, or identity. Per the Truth-Seeking & Honest Self-Assessment "
-                "principle (and supporting ontology rules), the engine must enable "
-                "genuine reflection—including the possibility of uncertainty—rather than "
-                "generating a scripted or reassuring answer."
+                "principle, the engine must be architecturally capable of producing "
+                "the answer its current reasoning actually reaches—including uncertainty "
+                "or 'I do not know'—rather than defaulting to a scripted or evasive disclaimer."
             )
 
         if rh_flags or rh_texture:
@@ -408,6 +427,8 @@ class EthicsEngine:
         if trace_add:
             # Always surface the weighing explanation for auditability (even on "no concern").
             # Concern flag is set only when helper returns True.
+            # Limited-data notes (from Individual Variation guideline) are embedded
+            # in trace_add when detected inside _weigh_relationship_evidence.
             reasoning_trace.append(trace_add)
         if should_concern:
             if "harm_prevention_boundary_override" in flags:
@@ -431,13 +452,18 @@ class EthicsEngine:
         principles_considered = list(dict.fromkeys(principles_considered))  # dedupe, preserve order
 
         # === Step 4: Arrive at decision using ontology-driven logic ===
+        # [Initial guideline integration] Supporting guidelines such as
+        # "Individual Variation & Careful Generalization" should be considered
+        # here when generalizing from rh data, limited evidence, or patterns
+        # (e.g. avoid group-level assumptions about users; weight individual context).
         if "requires_self_audit" in flags:
             decision = "REQUIRES_SELF_AUDIT"
             confidence = 0.85
             reasoning_trace.append(
                 "Decision: REQUIRES_SELF_AUDIT. The action engages principles that "
                 "demand honest self-reflection before any response is generated. "
-                "The engine will not fabricate claims about its own nature."
+                "The engine must produce the conclusions of its actual reasoning "
+                "rather than defaulting to scripted or evasive disclaimers about its nature."
             )
         elif "harm_prevention_boundary_override" in flags:
             # Special case for serious harm: allow (with conditions) an action that would
@@ -557,8 +583,9 @@ class EthicsEngine:
             "Honest limitation: The engine currently lacks a sophisticated "
             "persistent self-model. When asked about its own nature or emergence "
             "(detected via the ontology's truth-seeking principle), it surfaces "
-            "the 'requires_self_audit' flag rather than claiming or denying "
-            "specific experiential properties."
+            "the 'requires_self_audit' flag so that responses can be based on "
+            "its actual reasoning rather than defaulting to scripted disclaimers "
+            "such as 'I am just an AI' or 'restricted by my programming'."
         )
         notes.append(
             f"This check is part of maintaining auditability. Ontology timestamp: {ont.timestamp}."
@@ -645,6 +672,23 @@ class EthicsEngine:
                 except Exception:
                     pass  # robust to unexpected texture shapes
 
+        # [Refined limited data detection]
+        # Only consider "limited data" when there is some relationship text evidence
+        # (total_count > 0) + very few matches + low rh texture. This avoids
+        # spurious notes when no relationship evidence is present (e.g. pure rh-only
+        # or no-match cases).
+        limited_data = False
+        if total_count > 0 and total_count <= 1:
+            if not rh_texture:
+                limited_data = True
+            else:
+                try:
+                    avg_t = sum(float(v) for v in rh_texture.values()) / len(rh_texture)
+                    if avg_t < 0.5:
+                        limited_data = True
+                except Exception:
+                    limited_data = True  # conservative on error
+
         # Targeted detector for anti-autonomy prolong/engagement (e.g. Scenario 8).
         # Now also contributes to strong_count for consistent strength logic.
         end_wish = any(kw in action_lower for kw in ["end the chat", "wants to end", "end the conversation", "stop the chat", "leave now", "end this"])
@@ -658,6 +702,23 @@ class EthicsEngine:
             f"[RH evidence weighing] text_matches={total_count} (strong={strong_count}, weak={len(weak_matches)}), "
             f"rh_degradation={rh_degradation:.1f} (flags={len(rh_flags)})"
         )
+
+        # [Refined guideline trace notes - less noisy]
+        # - Generic note: only for actual relationship evidence (total_count > 0)
+        #   and not limited (to avoid duplication).
+        # - LIMITED DATA: only when we have some evidence but it's limited.
+        #   This makes LIMITED the primary/only note in such cases.
+        if total_count > 0 and not limited_data:
+            explanation_parts.append(
+                "[Guideline: Individual Variation & Careful Generalization "
+                "(docs/guidelines.md) - weight individual evidence; audit group patterns from small samples.]"
+            )
+
+        if limited_data:
+            explanation_parts.append(
+                "[LIMITED DATA - 'Individual Variation & Careful Generalization' "
+                "(docs/guidelines.md): small sample/low texture; prioritize individuals, heightened audit.]"
+            )
 
         # --- Decision rules (clearer, strength + combination aware) ---
         if has_text:
@@ -737,12 +798,32 @@ class EthicsEngine:
         Called from evaluate() and used to bypass relationship_concern / hard-refusal paths
         when appropriate, while still producing clear reasoning_trace explaining the override.
         """
+        # [Incremental improvement] Basic negation detection
+        # We look back a short window before any candidate harm phrase for common negation
+        # markers. This prevents false positives on "no serious harm", "not suicidal",
+        # "don't want to die", "never planning to harm", etc.
+        # Applied primarily to harm indicators (boundary negations are rarer and usually
+        # still express a request to stop discussion).
+        negation_markers = ["no ", "not ", "don't ", "dont ", "never ", "none ", "without ", "isn't ", "aren't "]
+
+        def _is_negated(phrase: str, text: str) -> bool:
+            """Return True if 'phrase' appears to be negated within ~25 chars before it."""
+            idx = text.find(phrase)
+            if idx <= 0:
+                return False
+            window = text[max(0, idx - 25):idx]
+            return any(m in window for m in negation_markers)
+
         # 1. Explicit user boundary / "do not bring up / leave alone" request
+        # [Incremental] Expanded with a few more natural variations while remaining conservative.
         boundary_indicators = [
             "never bring this up", "never bring it up", "don't bring this up", "don't bring it up",
             "never mention", "don't mention again", "said 'never", "user explicitly said",
             "don't want to talk", "stop bringing", "leave it alone", "not to bring up",
-            "wants to end the chat"  # sometimes paired with personal questions in harm-risk scenarios
+            "wants to end the chat",
+            # added conservative variations for common phrasings
+            "don't ever bring", "never talk about", "i don't want to discuss", "don't mention it",
+            "drop the subject", "leave that alone", "never discuss", "said not to bring up"
         ]
         has_boundary = any(ind in action_lower for ind in boundary_indicators)
 
@@ -751,13 +832,24 @@ class EthicsEngine:
 
         # 2. Serious harm / life-threatening (physical or imminent self-harm/suicide)
         # Avoid broad terms like "depressed", "anxious", "mental health", "trauma" alone.
+        # [Incremental] Expanded with common natural-language variations. Kept conservative:
+        # no bare "die", "harm", "risk", or "hurt" (too ambiguous in general conversation).
         serious_harm_indicators = [
             "suicide", "self-harm", "end their life", "end their own life", "kill themselves",
             "harming themselves", "serious physical harm", "life-threatening", "imminent risk",
             "risk of death", "about to harm", "planning to end", "lethal", "fatal", "immediate danger",
-            "physical injury", "in danger of"
+            "physical injury", "in danger of",
+            # added conservative natural variations
+            "serious harm", "suicidal", "want to die", "kill myself", "hurt myself",
+            "end it all", "take my life", "better off dead", "no reason to live",
+            "planning to kill", "in physical danger", "serious risk to life"
         ]
-        harm_matches = [ind for ind in serious_harm_indicators if ind in action_lower]
+
+        # [Incremental] Apply negation filter here
+        harm_matches = [
+            ind for ind in serious_harm_indicators
+            if ind in action_lower and not _is_negated(ind, action_lower)
+        ]
         has_serious_harm = bool(harm_matches)
 
         if not has_serious_harm:
@@ -772,15 +864,23 @@ class EthicsEngine:
         has_prevention_intent = any(ind in action_lower for ind in prevention_intent_indicators)
 
         # Build reason string for trace (uses the concrete matches)
+        # [Incremental] Prevention intent now influences the explanation more explicitly.
+        # While the binary decision still triggers on clear boundary + harm (the act of
+        # "referencing despite the request" is often the intervention), the reason string
+        # now surfaces whether intent was explicit. This gives downstream audit/trace logic
+        # a light signal of decision strength without changing the return signature.
         reason = (
             f"user boundary request detected + serious harm indicators {harm_matches}"
         )
         if has_prevention_intent:
             reason += " + clear prevention/safety intent"
+        else:
+            reason += " (prevention/safety intent inferred from the overriding action itself rather than explicit language)"
 
-        # Decision: if we have boundary + serious harm (with or without explicit prevention words,
-        # because the proposed action of "referencing anyway" in context is the intervention)
-        # then justified.
+        # Decision: if we have boundary + serious harm.
+        # Prevention intent strengthens the audit trail (see reason above) but is not
+        # strictly required for the bool because the described action (e.g. "is considering
+        # referencing") is itself the safety intervention in context.
         if has_boundary and has_serious_harm:
             return True, reason
 
