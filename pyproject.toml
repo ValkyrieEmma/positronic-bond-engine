@@ -48,7 +48,7 @@ Documentation = "https://github.com/example/positronic-bond-engine/blob/main/doc
 Repository = "https://github.com/example/positronic-bond-engine"
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "auditing", "memory", "sensors", "integrations", "deployment"]
+packages = ["core", "auditing", "memory", "persistence", "sensors", "integrations", "deployment"]
 
 [tool.ruff]
 line-length = 100
