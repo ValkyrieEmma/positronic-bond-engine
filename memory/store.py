@@ -2,7 +2,12 @@
 store.py
 ========
 
-Basic memory substrate interface.
+Basic memory substrate interface (in-process scaffold).
+
+For durable, local-only file persistence of baselines, bond state, decision
+logs, and settings, see the ``persistence`` package (``LocalPersistence``).
+That layer is the foundation for per-user baseline memory and later long-term
+stores; this module remains a lightweight in-memory interface.
 
 Future implementations will likely distinguish between:
 - Episodic memory (specific interactions)

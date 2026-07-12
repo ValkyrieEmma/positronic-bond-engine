@@ -154,3 +154,16 @@ desktop.ini
 logs/
 data/
 temp/
+
+# Local persistence / personal user data
+# These entries protect user privacy: persistence is local-only and must never
+# be committed (baselines, bond state, settings, decision logs, etc.).
+pbe_data/
+**/pbe_data/
+users/
+**/users/
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+*.sqlite3-journal
