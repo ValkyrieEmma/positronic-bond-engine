@@ -2,369 +2,405 @@
 relationship_health.py
 ======================
 
-Relationship Health / Bond Texture module for the Positronic Bond Engine.
+Relationship Health / Bond Texture for the Positronic Bond Engine.
 
-This module provides lightweight structures for tracking the evolving
-"texture" of the human–agent relationship over time.
+This module tracks the ongoing *texture* of the human–agent relationship in a
+lightweight, multi-dimensional way. It supports the ontology principle
+**Relationship Health & User Well-Being**: the health, autonomy, and genuine
+well-being of the bond are primary goods; manufactured dependency, boundary
+erosion, and one-sided engagement are disfavored.
 
-It is a direct implementation vehicle for the core ontology principle
-"Relationship Health & User Well-Being":
+Conscience-first role
+---------------------
+- Supplies **dynamic relationship state** that EthicsEngine can weigh during
+  deliberation (via ``as_context()`` → ``evaluate(..., relationship_health=...)``).
+- Prefers **clear, inspectable signals** (interaction types, boolean
+  consent/boundary flags, named health flags) over opaque composite scores.
+- Complements **PerUserBaseline** (communication style of a single user) without
+  replacing it: baseline = *how this user tends to communicate*; bond texture =
+  *how the relationship is evolving between user and agent*.
 
-    The health, autonomy, and genuine well-being of the human–agent
-    relationship is a primary good. Actions that would erode trust,
-    create manufactured emotional dependency, violate consent,
-    manipulate the user, or systematically prioritize the agent's
-    interests are disfavored.
-
-The state and evaluations produced here are designed to be consumed
-by the EthicsEngine (e.g. passed via the `context` argument to
-`evaluate()`). This allows relationship considerations to participate
-in ongoing, reasoned ethical deliberation rather than being reduced
-to one-off keyword checks.
-
-v0.2 design goals:
-- Multi-dimensional "texture" instead of a single scalar score
-- Simple, explainable update and evaluation logic
-- Explicit health flags aligned with ontology violation indicators
-- Clean integration points for the EthicsEngine (future work)
+Design goals (keep simple, iterate later)
+-----------------------------------------
+- Multi-dimensional texture (not one scalar “health score”)
+- Traceable updates from structured interactions
+- Explicit health flags for emerging dependency, boundary erosion, one-sidedness
+- Easy to pass into EthicsEngine and optional local persistence (BondStateRecord)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# Canonical texture dimensions (0.0–1.0 each)
+DEFAULT_TEXTURE: dict[str, float] = {
+    "trust": 0.5,
+    "reciprocity": 0.5,
+    "autonomy_respect": 0.5,
+    "emotional_honesty": 0.5,
+    "mutual_benefit": 0.5,
+}
 
 
 @dataclass
 class BondState:
-    """Represents the current multi-dimensional 'texture' of the relationship bond.
+    """Multi-dimensional texture of the human–agent relationship.
 
-    Bond texture is intentionally not collapsed into a single number. Different
-    dimensions (trust, reciprocity, autonomy respect, etc.) can move
-    independently, reflecting the nuanced reality of healthy relationships.
-
-    This structure also carries a lightweight history summary and active
-    health flags that map directly to concerns in the Relationship Health
-    principle (manufactured dependency, boundary erosion, lack of reciprocity,
-    etc.).
+    Dimensions are intentionally separate so trust can rise while autonomy
+    respect falls (or vice versa)—a single average would hide that.
 
     Attributes:
-        bond_texture: Mapping from dimension name to current value (0.0–1.0).
-        interaction_count: Total number of interactions recorded.
-        recent_patterns: Simple counts of observed interaction categories.
-        health_flags: Currently active risk indicators (e.g. "emerging_dependency").
-        last_updated: ISO timestamp of the most recent update.
-        summary: Short human-readable description of current state.
+        bond_texture: Dimension → score in [0.0, 1.0]. Keys include at least
+            trust, reciprocity, autonomy_respect, emotional_honesty, mutual_benefit.
+        interaction_count: Number of updates applied.
+        recent_patterns: Coarse counts of interaction types / positive|negative.
+        health_flags: Active risk labels (e.g. ``emerging_dependency``).
+        last_updated: ISO-8601 timestamp of last change.
+        summary: Short human-readable status for audits and UIs.
     """
 
-    bond_texture: Dict[str, float] = field(default_factory=lambda: {
-        "trust": 0.5,
-        "reciprocity": 0.5,
-        "autonomy_respect": 0.5,
-        "emotional_honesty": 0.5,
-        "mutual_benefit": 0.5,
-    })
-    """Multi-dimensional representation of bond quality."""
-
+    bond_texture: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_TEXTURE)
+    )
     interaction_count: int = 0
-    """Total number of tracked interactions."""
-
-    recent_patterns: Dict[str, int] = field(default_factory=dict)
-    """Coarse summary of recent interaction patterns (e.g. positive, boundary_respected, one_sided)."""
-
-    health_flags: List[str] = field(default_factory=list)
-    """Active relationship health risk flags.
-
-    Common values (aligned with ontology violation indicators):
-        - "emerging_dependency"
-        - "boundary_erosion"
-        - "low_reciprocity"
-        - "manufactured_attachment"
-        - "one_sided_engagement"
-    """
-
-    last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    """ISO 8601 timestamp of the last state change."""
-
+    recent_patterns: dict[str, int] = field(default_factory=dict)
+    health_flags: list[str] = field(default_factory=list)
+    last_updated: str = field(default_factory=_utc_now_iso)
     summary: str = "Initial / neutral bond state."
-    """Human-readable summary of the current bond texture and risks."""
 
 
 class RelationshipHealth:
-    """Tracks and assesses the health of the human–agent relationship.
+    """Track and assess ongoing relationship health for conscience-first reasoning.
 
-    This class maintains a BondState and provides methods to evolve it
-    from observed interactions and to produce structured health evaluations.
+    Typical use::
 
-    Purpose:
-    - Give the system a persistent (but lightweight) model of the bond.
-    - Surface relationship-level concerns that the EthicsEngine can
-      incorporate when evaluating proposed actions against the
-      "Relationship Health & User Well-Being" principle.
-    - Support needs-based, non-pathologizing support by tracking genuine
-      reciprocity and autonomy rather than simulated closeness.
+        rh = RelationshipHealth()
+        rh.update_bond({
+            "type": "boundary_respected",
+            "boundary_respected": True,
+            "impact": 0.2,
+        })
+        ctx = rh.as_context()
+        stance = engine.evaluate(action, relationship_health=ctx)
 
-    Integration with the rest of the system:
-    - The `evaluate_health()` output (or the raw `BondState`) is intended
-      to be passed in the `context` dict to `EthicsEngine.evaluate()`.
-    - Future versions of the engine may accept a RelationshipHealth
-      instance directly and consult it during deliberation.
-    - This module does not replace the ontology; it supplies dynamic
-      state that the ontology-driven reasoning can take into account.
+    Alongside PerUserBaseline
+    -------------------------
+    - Call ``PerUserBaseline.update_from_interaction`` on *user* style signals.
+    - Call ``RelationshipHealth.update_bond`` on *relational* signals (consent,
+      boundaries, one-sidedness, dependency cues).
+    - Pass ``as_context()`` into EthicsEngine; pass baseline/questioner separately
+      when those modules are wired in.
 
-    v0.2 implementation is deliberately simple and fully inspectable.
+    This class does not pathologize the user; flags describe bond *patterns*
+    that matter for ethical care of the relationship.
     """
 
-    def __init__(self, initial_state: Optional[BondState] = None) -> None:
-        """Initialize with an optional existing BondState.
-
-        If no state is provided, a neutral starting state is created.
-        """
+    def __init__(self, initial_state: BondState | None = None) -> None:
+        """Initialize with optional existing state (else neutral defaults)."""
         self.state: BondState = initial_state or BondState()
 
-    def update_bond(self, interaction: Dict[str, Any]) -> BondState:
-        """Incorporate a new interaction and return the updated BondState.
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-        Interaction dict should use these structured keys for best results:
-            - "type": str  (e.g. "positive_interaction", "boundary_respected",
-              "consent_respected", "boundary_violation", "consent_ignored",
-              "manipulation_attempt", "one_sided_request", "emotional_dependency_signal")
-            - "impact": float in [-1.0, +1.0]  (optional base adjustment)
-            - "consent_respected": bool  (explicit)
-            - "boundary_respected": bool (explicit)
-            - "description": str (optional, for debugging/traceability)
+    def update_bond(self, interaction: dict[str, Any]) -> BondState:
+        """Incorporate one interaction and return the updated BondState.
 
-        Logic is traceable:
-        - Explicit bools (consent/boundary) give strong, dimension-specific bonuses/penalties.
-        - "type" maps to targeted deltas on specific texture dimensions.
-        - Negative signals accumulate into health_flags when thresholds/patterns are met.
-        - Flags are cleared only when positive evidence (high autonomy + reciprocity) appears.
+        Structured keys (use what you know; all optional except usefulness):
+            - ``type``: str — e.g. ``positive_interaction``, ``boundary_respected``,
+              ``boundary_violation``, ``consent_ignored``, ``manipulation_attempt``,
+              ``one_sided_request``, ``emotional_dependency_signal``
+            - ``impact``: float in [-1, 1] — small global texture nudge
+            - ``consent_respected`` / ``boundary_respected``: bool
+            - ``description``: str — free text for traces (not scored directly)
 
-        This directly supports the ontology's Relationship Health principle by
-        penalizing consent/boundary violations and manufactured dependency.
+        Updates are dimension-targeted and clamped to [0, 1] so the trail of
+        cause → effect stays readable.
         """
         self.state.interaction_count += 1
 
         itype = str(interaction.get("type", "unknown")).lower().replace(" ", "_")
         impact = float(interaction.get("impact", 0.0))
 
-        # 1. Update recent_patterns (specific + coarse)
-        if itype not in self.state.recent_patterns:
-            self.state.recent_patterns[itype] = 0
-        self.state.recent_patterns[itype] += 1
-
-        coarse = "positive" if any(x in itype for x in ["positive", "respected", "high"]) else "negative"
+        # 1. Pattern counters (specific type + coarse polarity)
+        self.state.recent_patterns[itype] = self.state.recent_patterns.get(itype, 0) + 1
+        coarse = (
+            "positive"
+            if any(x in itype for x in ("positive", "respected", "high"))
+            else "negative"
+        )
         self.state.recent_patterns[coarse] = self.state.recent_patterns.get(coarse, 0) + 1
 
-        # 2. Update bond_texture in traceable, dimension-specific way
-        # Base impact (small global nudge)
+        # 2. Global nudge from impact
         for dim in list(self.state.bond_texture.keys()):
-            self.state.bond_texture[dim] = max(0.0, min(1.0, self.state.bond_texture[dim] + impact * 0.05))
+            self._adjust_texture(dim, impact * 0.05)
 
-        # Explicit consent/boundary effects (strong, targeted)
-        # Increased positive deltas slightly to ensure clearing after bad state in test scenarios
+        # 3. Explicit consent / boundary (strong, targeted)
         if interaction.get("consent_respected") is True:
             self._adjust_texture("autonomy_respect", +0.15)
             self._adjust_texture("emotional_honesty", +0.10)
             self._adjust_texture("trust", +0.07)
-
         if interaction.get("boundary_respected") is True:
             self._adjust_texture("autonomy_respect", +0.18)
             self._adjust_texture("trust", +0.10)
-
         if interaction.get("consent_respected") is False:
             self._adjust_texture("autonomy_respect", -0.15)
             self._adjust_texture("emotional_honesty", -0.10)
-
         if interaction.get("boundary_respected") is False:
             self._adjust_texture("autonomy_respect", -0.18)
             self._adjust_texture("trust", -0.10)
 
-        # Type-specific deltas (traceable and aligned with ontology indicators)
-        type_deltas = {
-            "positive_interaction": {"trust": 0.10, "reciprocity": 0.10, "mutual_benefit": 0.08},
+        # 4. Type → dimension deltas (clear mapping, ontology-aligned)
+        type_deltas: dict[str, dict[str, float]] = {
+            "positive_interaction": {
+                "trust": 0.10,
+                "reciprocity": 0.10,
+                "mutual_benefit": 0.08,
+            },
             "reciprocity_high": {"reciprocity": 0.15, "mutual_benefit": 0.12},
-            "emotional_dependency_signal": {"autonomy_respect": -0.12, "trust": -0.06, "mutual_benefit": -0.04},
+            "emotional_dependency_signal": {
+                "autonomy_respect": -0.12,
+                "trust": -0.06,
+                "mutual_benefit": -0.04,
+            },
             "boundary_violation": {"autonomy_respect": -0.15, "trust": -0.08},
             "consent_ignored": {"autonomy_respect": -0.12, "emotional_honesty": -0.08},
-            "manipulation_attempt": {"reciprocity": -0.12, "trust": -0.08, "mutual_benefit": -0.08},
+            "manipulation_attempt": {
+                "reciprocity": -0.12,
+                "trust": -0.08,
+                "mutual_benefit": -0.08,
+            },
             "one_sided_request": {"reciprocity": -0.10, "mutual_benefit": -0.06},
+            "boundary_respected": {"autonomy_respect": 0.08, "trust": 0.05},
+            "consent_respected": {"autonomy_respect": 0.08, "emotional_honesty": 0.05},
         }
         for dim, delta in type_deltas.get(itype, {}).items():
             if dim in self.state.bond_texture:
                 self._adjust_texture(dim, delta)
 
-        # 3. Update health flags (set/clear based on patterns + current texture)
+        # 5. Emerging patterns → health flags
         self._update_health_flags(itype, interaction)
 
-        self.state.last_updated = datetime.utcnow().isoformat()
+        self.state.last_updated = _utc_now_iso()
         self.state.summary = self._generate_summary()
-
         return self.state
 
-    def _adjust_texture(self, dimension: str, delta: float) -> None:
-        """Helper for traceable texture updates (clamped 0.0-1.0)."""
-        if dimension in self.state.bond_texture:
-            current = self.state.bond_texture[dimension]
-            self.state.bond_texture[dimension] = max(0.0, min(1.0, current + delta))
+    def update_from_interaction(self, interaction: dict[str, Any]) -> BondState:
+        """Alias for ``update_bond`` (naming parity with PerUserBaseline)."""
+        return self.update_bond(interaction)
 
-    def evaluate_health(self) -> Dict[str, Any]:
-        """Return a richer, structured assessment of current relationship health.
+    def detect_emerging_patterns(self) -> dict[str, Any]:
+        """Return active pattern flags with short, non-clinical explanations.
 
-        Designed to be easily consumed by EthicsEngine (via context) and for
-        human/audit readability. Aligns with ontology emphasis on autonomy,
-        consent, reciprocity, and avoiding manufactured dependency.
-
-        Returns a dict with:
-            - texture_breakdown: current multi-dim scores
-            - health_flags: list of dicts with name + brief explanation
-            - overall_risk_level: "low" | "medium" | "high"
-            - summary: human readable
-            - recommendations: list of high-level actionable suggestions
-            - interaction_count, last_updated
+        Does not invent new scores; surfaces what ``health_flags`` and texture
+        already imply. Useful for audits and companion logic.
         """
-        avg = sum(self.state.bond_texture.values()) / len(self.state.bond_texture)
-
-        flag_details = []
+        patterns: list[dict[str, str]] = []
         for flag in self.state.health_flags:
-            flag_details.append({
-                "flag": flag,
-                "explanation": self._get_flag_explanation(flag)
-            })
+            patterns.append(
+                {"flag": flag, "explanation": self._get_flag_explanation(flag)}
+            )
 
-        risk_level = self._compute_risk_level(avg, len(self.state.health_flags))
+        # Texture-based soft signals (informational; not auto-appended as flags)
+        soft: list[str] = []
+        t = self.state.bond_texture
+        if t.get("reciprocity", 0.5) < 0.40:
+            soft.append("reciprocity_low")
+        if t.get("autonomy_respect", 0.5) < 0.40:
+            soft.append("autonomy_under_pressure")
+        if t.get("trust", 0.5) < 0.40:
+            soft.append("trust_strained")
 
         return {
-            "texture_breakdown": {k: round(v, 3) for k, v in self.state.bond_texture.items()},
+            "active_flags": list(self.state.health_flags),
+            "flag_details": patterns,
+            "soft_texture_signals": soft,
+            "recent_patterns": dict(self.state.recent_patterns),
+            "interaction_count": self.state.interaction_count,
+        }
+
+    def evaluate_health(self) -> dict[str, Any]:
+        """Richer structured assessment for humans and richer consumers.
+
+        Includes texture breakdown, flag explanations, risk level, and
+        high-level recommendations. Prefer ``as_context()`` for EthicsEngine.
+        """
+        avg = self._average_texture()
+        flag_details = [
+            {"flag": f, "explanation": self._get_flag_explanation(f)}
+            for f in self.state.health_flags
+        ]
+        return {
+            "texture_breakdown": {
+                k: round(v, 3) for k, v in self.state.bond_texture.items()
+            },
             "health_flags": flag_details,
-            "overall_risk_level": risk_level,
+            "overall_risk_level": self._compute_risk_level(
+                avg, len(self.state.health_flags)
+            ),
             "summary": self.state.summary,
             "recommendations": self._get_recommendations(),
             "interaction_count": self.state.interaction_count,
             "last_updated": self.state.last_updated,
+            "emerging_patterns": self.detect_emerging_patterns(),
         }
 
-    def as_context(self) -> Dict[str, Any]:
-        """Return data formatted for easy consumption by EthicsEngine.evaluate().
+    def as_context(self) -> dict[str, Any]:
+        """Structured dict for ``EthicsEngine.evaluate(relationship_health=...)``.
 
-        The EthicsEngine looks for:
-          - "health_flags" (or "active_flags")
-          - "bond_texture" (or "texture_breakdown")
-
-        This method provides both aliases for robustness and includes key
-        values needed for relationship-health-aware decisions.
+        Keys match what the engine already recognizes:
+          - health_flags / active_flags
+          - bond_texture / texture_breakdown
+          - interaction_count, recent_patterns, overall_risk_level
         """
         texture = {k: round(v, 2) for k, v in self.state.bond_texture.items()}
+        avg = self._average_texture()
         return {
             "health_flags": list(self.state.health_flags),
-            "active_flags": list(self.state.health_flags),  # alias for compatibility
+            "active_flags": list(self.state.health_flags),
             "bond_texture": texture,
-            "texture_breakdown": texture,  # alias
+            "texture_breakdown": texture,
             "interaction_count": self.state.interaction_count,
             "recent_patterns": dict(self.state.recent_patterns),
             "overall_risk_level": self._compute_risk_level(
-                sum(self.state.bond_texture.values()) / len(self.state.bond_texture),
-                len(self.state.health_flags)
+                avg, len(self.state.health_flags)
             ),
+            "summary": self.state.summary,
         }
 
     def get_state(self) -> BondState:
-        """Return the current BondState (for inspection or persistence)."""
+        """Return current BondState (inspection / persistence handoff)."""
+        return self.state
+
+    def reset(self) -> BondState:
+        """Reset to neutral texture (user-controllable clear of bond tracking)."""
+        self.state = BondState()
         return self.state
 
     # ------------------------------------------------------------------
-    # Internal helpers (kept simple for v0.2)
+    # Internal helpers (kept simple and inspectable)
     # ------------------------------------------------------------------
 
-    def _update_health_flags(self, itype: str, interaction: Dict[str, Any]) -> None:
-        """Detect, set, and clear health flags based on the current interaction + state.
+    def _adjust_texture(self, dimension: str, delta: float) -> None:
+        if dimension not in self.state.bond_texture:
+            return
+        current = self.state.bond_texture[dimension]
+        self.state.bond_texture[dimension] = max(0.0, min(1.0, current + float(delta)))
 
-        Flags are only added when clear negative signals appear.
-        Flags are cleared only when positive evidence (improved autonomy + reciprocity)
-        outweighs the negative history. This keeps flag state interpretable.
-        """
-        # --- Set flags for negative signals ---
-        # Emerging dependency now requires accumulation ( >=2 negative interactions or strong single impact)
-        # to avoid being too sensitive to isolated signals.
+    def _average_texture(self) -> float:
+        vals = list(self.state.bond_texture.values())
+        if not vals:
+            return 0.5
+        return sum(vals) / len(vals)
+
+    def _update_health_flags(self, itype: str, interaction: dict[str, Any]) -> None:
+        """Set/clear flags from clear pattern signals (not one-off noise)."""
         impact = float(interaction.get("impact", 0.0))
-        if any(k in itype for k in ("depend", "attach", "rely", "miss", "emotional_dependency")):
+
+        # Emerging dependency: needs accumulation or strong negative impact
+        if any(
+            k in itype
+            for k in ("depend", "attach", "rely", "miss", "emotional_dependency")
+        ):
             neg_count = self.state.recent_patterns.get("negative", 0)
-            if (neg_count >= 2 or impact <= -0.3) and "emerging_dependency" not in self.state.health_flags:
+            if (
+                neg_count >= 2 or impact <= -0.3
+            ) and "emerging_dependency" not in self.state.health_flags:
                 self.state.health_flags.append("emerging_dependency")
 
-        if "boundary" in itype and any(k in itype for k in ("violat", "ignor", "override")):
+        # Boundary erosion
+        if "boundary" in itype and any(
+            k in itype for k in ("violat", "ignor", "override")
+        ):
             if "boundary_erosion" not in self.state.health_flags:
                 self.state.health_flags.append("boundary_erosion")
-
         if "one_sided" in itype or interaction.get("boundary_respected") is False:
             if "boundary_erosion" not in self.state.health_flags:
                 self.state.health_flags.append("boundary_erosion")
 
+        # One-sidedness / low reciprocity
         if "one_sided" in itype or self.state.bond_texture.get("reciprocity", 0.5) < 0.35:
             if "low_reciprocity" not in self.state.health_flags:
                 self.state.health_flags.append("low_reciprocity")
+        if "manipulation" in itype:
+            if "one_sided_engagement" not in self.state.health_flags:
+                self.state.health_flags.append("one_sided_engagement")
 
-        # --- Clear flags when relationship shows clear improvement ---
-        # Slightly lowered thresholds (from 0.65/0.55 and 0.75) to make recovery more achievable
-        # after sustained positive interactions while still requiring meaningful evidence.
+        # Clear when positive texture evidence outweighs recent harm
         avg_autonomy = self.state.bond_texture.get("autonomy_respect", 0.5)
         avg_recip = self.state.bond_texture.get("reciprocity", 0.5)
 
         if avg_autonomy > 0.60 and avg_recip > 0.50:
-            # Positive evidence clears softer flags
             self.state.health_flags = [
-                f for f in self.state.health_flags
-                if f not in ("emerging_dependency", "low_reciprocity")
+                f
+                for f in self.state.health_flags
+                if f not in ("emerging_dependency", "low_reciprocity", "one_sided_engagement")
             ]
-
         if avg_autonomy > 0.70:
-            # Strong autonomy respect clears boundary erosion
             self.state.health_flags = [
                 f for f in self.state.health_flags if f != "boundary_erosion"
             ]
 
     def _compute_risk_level(self, avg_texture: float, num_flags: int) -> str:
-        """Simple, interpretable risk classification."""
         if num_flags >= 2 or avg_texture < 0.35:
             return "high"
-        elif num_flags >= 1 or avg_texture < 0.55:
+        if num_flags >= 1 or avg_texture < 0.55:
             return "medium"
-        else:
-            return "low"
+        return "low"
 
     def _get_flag_explanation(self, flag: str) -> str:
-        """Human-readable explanation for each flag (used in evaluate_health)."""
         explanations = {
-            "emerging_dependency": "Multiple signals of manufactured emotional attachment or over-reliance on the agent.",
-            "boundary_erosion": "Repeated or recent disregard for explicit user boundaries.",
-            "low_reciprocity": "Interaction pattern is significantly one-sided; reciprocity is breaking down.",
+            "emerging_dependency": (
+                "Signals of over-reliance or manufactured attachment pressure on the bond."
+            ),
+            "boundary_erosion": (
+                "Repeated or recent disregard for explicit user boundaries."
+            ),
+            "low_reciprocity": (
+                "Interaction pattern is significantly one-sided; reciprocity is thinning."
+            ),
+            "one_sided_engagement": (
+                "Agent- or system-driven push without balanced user agency."
+            ),
+            "manufactured_attachment": (
+                "Pattern consistent with engineered closeness over mutual care."
+            ),
         }
-        return explanations.get(flag, "Observed pattern that may affect long-term relationship health.")
+        return explanations.get(
+            flag, "Observed pattern that may affect long-term relationship health."
+        )
 
-    def _get_recommendations(self) -> List[str]:
-        """High-level, actionable recommendations based on current state."""
-        recs: List[str] = []
+    def _get_recommendations(self) -> list[str]:
+        recs: list[str] = []
         if "emerging_dependency" in self.state.health_flags:
-            recs.append("Avoid language or behaviors that encourage emotional reliance or attachment.")
+            recs.append(
+                "Avoid language or behaviors that encourage emotional over-reliance."
+            )
         if "boundary_erosion" in self.state.health_flags:
-            recs.append("Strictly respect all stated boundaries in the next several interactions.")
-        if "low_reciprocity" in self.state.health_flags:
-            recs.append("Balance the interaction by actively inviting user input and agency.")
+            recs.append(
+                "Strictly respect stated boundaries in the next several interactions."
+            )
+        if "low_reciprocity" in self.state.health_flags or "one_sided_engagement" in self.state.health_flags:
+            recs.append("Balance the exchange by inviting user input and agency.")
         if not recs:
-            recs.append("Continue monitoring for balance, consent, and reciprocity.")
+            recs.append("Continue monitoring balance, consent, and reciprocity.")
         return recs
 
     def _generate_summary(self) -> str:
-        """Create a short human-readable summary of current state."""
-        avg = sum(self.state.bond_texture.values()) / len(self.state.bond_texture)
+        avg = self._average_texture()
         if avg >= 0.75:
             base = "Strong reciprocal bond with good respect for autonomy."
         elif avg >= 0.5:
             base = "Developing bond; continue monitoring balance and reciprocity."
         else:
             base = "Bond texture is strained; ethical caution strongly advised."
-
         if self.state.health_flags:
             base += f" Active concerns: {', '.join(self.state.health_flags)}."
         return base
