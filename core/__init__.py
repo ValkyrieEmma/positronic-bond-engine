@@ -16,6 +16,11 @@ Design principles:
 
 from .ethics_engine import DecisionLog, EthicsEngine  # noqa: F401
 from .exploratory_questioning import ExploratoryQuestioner, QuestionDecision  # noqa: F401
+from .interaction_memory import (  # noqa: F401
+    InteractionMemoryStore,
+    InteractionRecord,
+    MemoryStore,
+)
 from .ontology import (
     EthicalOntology,
     EthicalPrinciple,
@@ -33,6 +38,9 @@ __all__ = [
     "EthicalPrinciple",
     "ExploratoryQuestioner",
     "get_default_ontology",
+    "InteractionMemoryStore",
+    "InteractionRecord",
+    "MemoryStore",
     "PerUserBaseline",
     "QuestionDecision",
     "RelationshipHealth",

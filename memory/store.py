@@ -6,8 +6,11 @@ Basic memory substrate interface (in-process scaffold).
 
 For durable, local-only file persistence of baselines, bond state, decision
 logs, and settings, see the ``persistence`` package (``LocalPersistence``).
-That layer is the foundation for per-user baseline memory and later long-term
-stores; this module remains a lightweight in-memory interface.
+
+For durable **interaction history** (JSONL per user), use
+``core.InteractionMemoryStore`` (also exported as ``core.MemoryStore``).
+This module remains a lightweight **in-process** scaffold only — do not
+confuse it with the persistence-backed interaction store.
 
 Future implementations will likely distinguish between:
 - Episodic memory (specific interactions)

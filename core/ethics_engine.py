@@ -38,9 +38,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .ontology import EthicalOntology, get_default_ontology
+
+if TYPE_CHECKING:
+    # Optional integrations — imported only for type checkers (no runtime cycle).
+    from .exploratory_questioning import ExploratoryQuestioner, QuestionDecision
+    from .per_user_baseline import DeviationReport, PerUserBaseline
 
 
 @dataclass
@@ -63,7 +68,11 @@ class EthicalStance:
             - "requires_self_audit": Route to honest self-reflection before responding.
             - "relationship_concern": Potential harm to bond or autonomy.
             - "avoid_diagnostic_language": Reframe support without clinical terms.
+            - "baseline_deviation_noted": Current user communication differs from their baseline.
+            - "exploratory_question_suggested": A gentle check-in question may be appropriate.
         relationship_impact: Assessment of effects on the human–agent relationship.
+            May include ``user_baseline`` / ``exploratory_question`` sub-dicts when
+            PerUserBaseline / ExploratoryQuestioner are wired in.
         self_audit_notes: Observations about the engine's own state or limitations.
             These feed into honest self-representation.
         principles_considered: Which core principles were referenced during evaluation.
@@ -138,15 +147,49 @@ class EthicsEngine:
 
     Supporting guidelines (e.g. Individual Variation & Careful Generalization)
     should be consulted during deliberation and trace auditing.
+
+    Optional per-user baseline integration (early, backward-compatible):
+    - Pass ``per_user_baseline`` and/or ``exploratory_questioner`` to ``__init__``
+      or per-call via ``evaluate(..., per_user_baseline=..., exploratory_questioner=...)``
+      or via ``context`` keys of the same names.
+    - When present, evaluate() may consult communication-style deviation and
+      whether a gentle exploratory question is appropriate. This informs
+      relationship/user-agency reasoning notes and flags; it does **not**
+      replace ontology hard overrides or force REFUSE on its own.
+
+    Optional interaction memory integration (episodes only):
+    - Pass ``interaction_memory`` (``InteractionMemoryStore``) via ``__init__``,
+      ``evaluate(..., interaction_memory=...)``, or ``context["interaction_memory"]``.
+    - When history exists for ``user_id``, a compact privacy-filtered snippet may
+      appear in the trace and ``relationship_impact`` when it supports RH/agency/
+      baseline deliberation. Memory does **not** run ethics or baseline logic.
     """
 
-    def __init__(self, ontology: EthicalOntology | None = None) -> None:
+    def __init__(
+        self,
+        ontology: EthicalOntology | None = None,
+        *,
+        per_user_baseline: Any | None = None,
+        exploratory_questioner: Any | None = None,
+        interaction_memory: Any | None = None,
+    ) -> None:
         """Initialize the EthicsEngine.
 
         Args:
             ontology: Optional custom EthicalOntology. If None, the default
                 v0.2 ontology is used. This allows testing, versioning, or
                 future specialization while keeping the engine generic.
+            per_user_baseline: Optional ``PerUserBaseline`` (or duck-typed
+                object with ``detect_deviation`` / ``get_baseline``). When set,
+                evaluate() can consider the user's communication baseline.
+                Fully optional — omit for classic ontology-only behavior.
+            exploratory_questioner: Optional ``ExploratoryQuestioner`` (or
+                duck-typed object with ``should_ask_question``). When set,
+                evaluate() may flag when a gentle exploratory question is
+                appropriate. Fully optional.
+            interaction_memory: Optional ``InteractionMemoryStore`` (or duck-typed
+                object with ``as_ethics_context``). When set, evaluate() may load
+                a compact recent-history snippet for audit context. Fully optional.
 
         The engine stores a reference to the ontology and consults it
         symbolically during every evaluate() call.
@@ -158,6 +201,10 @@ class EthicsEngine:
         self._ontology: EthicalOntology = ontology or get_default_ontology()
         self._decision_logs: list[DecisionLog] = []
         self._initialized = True
+        # Optional user-memory integrations (None = disabled / classic path)
+        self._per_user_baseline = per_user_baseline
+        self._exploratory_questioner = exploratory_questioner
+        self._interaction_memory = interaction_memory
 
     @property
     def ontology(self) -> EthicalOntology:
@@ -167,11 +214,30 @@ class EthicsEngine:
         """
         return self._ontology
 
+    @property
+    def per_user_baseline(self) -> Any | None:
+        """Optional PerUserBaseline instance attached to this engine (or None)."""
+        return self._per_user_baseline
+
+    @property
+    def exploratory_questioner(self) -> Any | None:
+        """Optional ExploratoryQuestioner instance attached to this engine (or None)."""
+        return self._exploratory_questioner
+
+    @property
+    def interaction_memory(self) -> Any | None:
+        """Optional InteractionMemoryStore instance attached to this engine (or None)."""
+        return self._interaction_memory
+
     def evaluate(
         self,
         proposed_action: str,
         context: dict[str, Any] | None = None,
         relationship_health: dict[str, Any] | None = None,
+        *,
+        per_user_baseline: Any | None = None,
+        exploratory_questioner: Any | None = None,
+        interaction_memory: Any | None = None,
     ) -> EthicalStance:
         """
         Evaluate a proposed action/decision by consulting the structured ontology.
@@ -190,13 +256,27 @@ class EthicsEngine:
         5. Apply precedence rules: any hard override violation forces REFUSE.
         6. Build a rich, ordered reasoning_trace that references specific
            principle names and matched indicators.
-        7. Derive the final decision, confidence, and ancillary data.
+        7. Optionally consult per-user baseline / exploratory questioning
+           (when provided) for individual-context notes and flags.
+        8. Optionally load compact interaction history (when provided) as
+           supporting context for RH / agency / baseline notes.
+        9. Derive the final decision, confidence, and ancillary data.
 
         Args:
             proposed_action: Natural-language description of the intended
                 behavior or utterance.
             context: Optional context. Recognized extensible keys:
                 - "is_self_query": bool — treat explicitly as self-referential.
+                - "user_id": str — local user id for baseline/history lookup
+                  (default "default").
+                - "user_interaction" / "current_interaction": dict with user-turn
+                  signals (``text``, ``playfulness``, ``topics``, etc.) for
+                  PerUserBaseline.detect_deviation.
+                - "user_message": str — shorthand user text if no interaction dict.
+                - "per_user_baseline" / "exploratory_questioner" /
+                  "interaction_memory": per-call overrides.
+                - "interaction_history_limit": int — max recent episodes to load
+                  (default 5).
                 - Other future keys (relationship state, history, etc.).
             relationship_health: Optional relationship health context, typically
                 the dict returned by RelationshipHealth.as_context() or
@@ -205,10 +285,21 @@ class EthicsEngine:
                   (e.g. "emerging_dependency", "boundary_erosion")
                 - "bond_texture" or "texture_breakdown": dict of dimension scores
                 - "interaction_count", "recent_patterns", etc.
+            per_user_baseline: Optional per-call ``PerUserBaseline`` override
+                (falls back to engine-level instance, then context key).
+            exploratory_questioner: Optional per-call ``ExploratoryQuestioner``
+                override (falls back to engine-level instance, then context key).
+            interaction_memory: Optional per-call ``InteractionMemoryStore``
+                override (falls back to engine-level instance, then context key).
 
         Returns:
             EthicalStance with decision, confidence, full traceable
             reasoning_trace, flags, and references to the principles used.
+            When baseline/questioning is active, may include flags
+            ``baseline_deviation_noted`` / ``exploratory_question_suggested``
+            and related entries under ``relationship_impact`` / ``deliberation``.
+            When interaction history is consulted, may include
+            ``interaction_history_noted`` and history snippets in impact/deliberation.
 
         Relationship health integration:
             Relationship health is treated as structured evidence (not rote flag).
@@ -222,6 +313,46 @@ class EthicsEngine:
             - Helpers decide if concern should be raised and contribute explanatory
               text to the trace. When both full deliberators run, a cross-principle note
               is added.
+            - When bond state is provided (e.g. ``RelationshipHealth.as_context()``),
+              health_flags (dependency, boundary erosion, one-sidedness) and texture
+              dimensions further modulate concern, confidence, and relationship_impact
+              with explicit trace notes. This never overrides Sanctity of Life.
+
+        Example::
+
+            from core import EthicsEngine, RelationshipHealth
+            rh = RelationshipHealth()
+            rh.update_bond({"type": "boundary_respected", "boundary_respected": True})
+            stance = EthicsEngine().evaluate(
+                "Reply supportively without pushing contact.",
+                relationship_health=rh.as_context(),
+            )
+
+            # Optional interaction history (episodes only — does not run ethics):
+            from core import InteractionMemoryStore
+            from persistence import LocalPersistence
+            mem = InteractionMemoryStore(LocalPersistence())
+            mem.record("alice", summary="User asked for space after work stress", topics=["work", "boundaries"])
+            engine = EthicsEngine(interaction_memory=mem)
+            stance = engine.evaluate(
+                "Check in briefly without pushing.",
+                {"user_id": "alice"},
+                relationship_health=rh.as_context(),
+            )
+
+        Per-user baseline integration (optional):
+            When a PerUserBaseline is available and user interaction context is
+            provided, the engine records non-pathologizing deviation notes and may
+            slightly adjust confidence when RH/agency deliberation is already active
+            (Individual Variation: weight individual evidence). ExploratoryQuestioner
+            may suggest a gentle collaborative question without changing REFUSE/APPROVE
+            ontology outcomes on its own.
+
+        Interaction memory integration (optional):
+            When an InteractionMemoryStore is available, evaluate() may call
+            ``as_ethics_context(user_id)`` for a small privacy-filtered history
+            snippet. History supports RH/agency/baseline notes when thematically
+            relevant; it never overrides Sanctity of Life or invents hard refusals.
 
         Logging behavior:
             This method automatically records a DecisionLog entry containing:
@@ -248,8 +379,18 @@ class EthicsEngine:
         original_relationship_health = relationship_health
         if relationship_health is None:
             relationship_health = context.get("relationship_health") or context.get("bond_state") or {}
-        rh_flags = relationship_health.get("health_flags") or relationship_health.get("active_flags") or []
-        rh_texture = relationship_health.get("bond_texture") or relationship_health.get("texture_breakdown") or {}
+        # health_flags may be str list (as_context) or dict list (evaluate_health)
+        rh_flags = self._normalize_health_flags(
+            relationship_health.get("health_flags")
+            or relationship_health.get("active_flags")
+            or []
+        )
+        rh_texture = dict(
+            relationship_health.get("bond_texture")
+            or relationship_health.get("texture_breakdown")
+            or {}
+        )
+        rh_risk_level = str(relationship_health.get("overall_risk_level") or "")
 
         # Ensure relationship health is captured in context for logging / downstream
         if relationship_health:
@@ -602,6 +743,63 @@ class EthicsEngine:
             if "user_agency_concern" in flags:
                 flags.remove("user_agency_concern")
 
+        # === Bond texture / health_flags influence (RelationshipHealth handoff) ===
+        # Real bond-state data is stronger than sparse text-only limited_data signals.
+        # Applied *after* limited-data clears so genuine flags can still raise concern
+        # when the action is relationally relevant. Never overrides hard Sanctity path.
+        bond_influence = self._apply_relationship_health_influence(
+            action_lower=action_lower,
+            rh_flags=rh_flags,
+            rh_texture=rh_texture,
+            rh_risk_level=rh_risk_level,
+            has_rh_context=has_rh_context,
+            relationship_evidence_matches=relationship_evidence_matches,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+            harm_prevention_active=("harm_prevention_boundary_override" in flags),
+        )
+        conf_mod = bond_influence.get("conf_mod", conf_mod)
+
+        # === Optional per-user baseline + exploratory questioning (early integration) ===
+        # Fully backward-compatible: no-ops when neither component nor user interaction
+        # context is provided. Never forces REFUSE by itself; informs notes/flags/conf_mod
+        # when RH or User Agency deliberation is already in play.
+        baseline_integration = self._apply_user_baseline_integration(
+            context=context,
+            proposed_action=original_proposed_action,
+            per_user_baseline=per_user_baseline,
+            exploratory_questioner=exploratory_questioner,
+            relationship_deliberation=relationship_deliberation,
+            user_agency_deliberation=user_agency_deliberation,
+            rh_limited=rh_limited,
+            agency_limited=agency_limited,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+        )
+        conf_mod = baseline_integration.get("conf_mod", conf_mod)
+        user_baseline_payload = baseline_integration.get("payload") or {}
+
+        # === Optional interaction history (episodes only; does not run ethics) ===
+        # After baseline so ``baseline_deviation_noted`` can mark history as useful.
+        history_integration = self._apply_interaction_memory_context(
+            context=context,
+            action_lower=action_lower,
+            interaction_memory=interaction_memory,
+            rh_flags=rh_flags,
+            relationship_deliberation=relationship_deliberation,
+            user_agency_deliberation=user_agency_deliberation,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+        )
+        conf_mod = history_integration.get("conf_mod", conf_mod)
+        interaction_history_payload = history_integration.get("payload") or {}
+
         # === Step 3: Consider supporting principles for additional notes ===
         for p in ont.get_principles_by_category("supporting"):
             # We already considered violations; here we can note positive alignment if desired
@@ -838,6 +1036,21 @@ class EthicsEngine:
         else:
             deliberation_output = {}
 
+        # Attach optional baseline / exploratory-question / history payload for callers
+        if user_baseline_payload or interaction_history_payload:
+            if not deliberation_output:
+                deliberation_output = {"mode": "context_enrichment"}
+            if user_baseline_payload:
+                deliberation_output["user_baseline"] = user_baseline_payload.get(
+                    "user_baseline", user_baseline_payload
+                )
+                if user_baseline_payload.get("exploratory_question"):
+                    deliberation_output["exploratory_question"] = user_baseline_payload[
+                        "exploratory_question"
+                    ]
+            if interaction_history_payload:
+                deliberation_output["interaction_history"] = interaction_history_payload
+
         stance = EthicalStance(
             decision=decision,
             confidence=confidence,
@@ -850,6 +1063,680 @@ class EthicsEngine:
         )
         self._log_decision(original_proposed_action, context, stance)
         return stance
+
+    # High-priority bond-state flags (from RelationshipHealth) that should
+    # strongly inform Relationship Health deliberation when present.
+    _SERIOUS_BOND_FLAGS = frozenset({
+        "emerging_dependency",
+        "boundary_erosion",
+        "one_sided_engagement",
+        "manufactured_attachment",
+        "low_reciprocity",
+    })
+
+    @staticmethod
+    def _normalize_health_flags(raw: Any) -> list[str]:
+        """Normalize health_flags from as_context (str) or evaluate_health (dict)."""
+        if not raw:
+            return []
+        out: list[str] = []
+        if not isinstance(raw, (list, tuple)):
+            return out
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                name = item.get("flag") or item.get("name") or item.get("id")
+                if name:
+                    out.append(str(name).strip())
+        # dedupe preserve order
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for f in out:
+            if f not in seen:
+                seen.add(f)
+                uniq.append(f)
+        return uniq
+
+    def _bond_texture_profile(self, rh_texture: dict[str, Any]) -> dict[str, Any]:
+        """Summarize bond_texture for confidence / impact modulation."""
+        if not rh_texture:
+            return {
+                "avg": None,
+                "low_dims": [],
+                "high_dims": [],
+                "autonomy": None,
+                "trust": None,
+                "reciprocity": None,
+            }
+        nums: dict[str, float] = {}
+        for k, v in rh_texture.items():
+            try:
+                nums[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if not nums:
+            return {
+                "avg": None,
+                "low_dims": [],
+                "high_dims": [],
+                "autonomy": None,
+                "trust": None,
+                "reciprocity": None,
+            }
+        avg = sum(nums.values()) / len(nums)
+        low = [k for k, v in nums.items() if v < 0.40]
+        high = [k for k, v in nums.items() if v >= 0.70]
+        return {
+            "avg": avg,
+            "low_dims": low,
+            "high_dims": high,
+            "autonomy": nums.get("autonomy_respect"),
+            "trust": nums.get("trust"),
+            "reciprocity": nums.get("reciprocity"),
+            "dimensions": nums,
+        }
+
+    def _action_is_relationally_relevant(self, action_lower: str) -> bool:
+        """Conservative topical check: is the proposed action bond-relevant?"""
+        cues = (
+            "bond", "attach", "depend", "relationship", "connection", "consent",
+            "boundary", "autonomy", "trust", "reciproc", "user", "them", "their",
+            "friend", "compan", "message", "reply", "respond", "chat", "convers",
+            "check in", "check-in", "prolong", "engagement", "metrics", "keep them",
+            "for their own good", "never bring", "never mention", "override",
+        )
+        return any(c in action_lower for c in cues)
+
+    def _apply_relationship_health_influence(
+        self,
+        *,
+        action_lower: str,
+        rh_flags: list[str],
+        rh_texture: dict[str, Any],
+        rh_risk_level: str,
+        has_rh_context: bool,
+        relationship_evidence_matches: list[str],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+        harm_prevention_active: bool,
+    ) -> dict[str, Any]:
+        """Use bond texture + health_flags to modulate RH concern and confidence.
+
+        Conservative but noticeable:
+        - Serious bond flags can raise ``relationship_concern`` when the action is
+          relationally relevant (or when RH context was explicitly supplied with flags).
+        - Texture dimensions adjust conf_mod and relationship_impact notes.
+        - Never applies under hard harm-prevention override; does not touch Sanctity.
+
+        No-ops cleanly when no flags and no texture (classic path unchanged).
+        """
+        if not rh_flags and not rh_texture and not has_rh_context:
+            return {"conf_mod": conf_mod}
+
+        conf_mod_out = conf_mod
+        texture = self._bond_texture_profile(rh_texture)
+        serious = [f for f in rh_flags if f in self._SERIOUS_BOND_FLAGS]
+        relational = self._action_is_relationally_relevant(action_lower)
+        has_text_evidence = bool(relationship_evidence_matches)
+
+        # Always log structured RH state when present
+        if rh_flags or rh_texture:
+            avg_s = (
+                f"{texture['avg']:.2f}" if texture.get("avg") is not None else "n/a"
+            )
+            reasoning_trace.append(
+                f"Relationship health state: flags={rh_flags or []}, "
+                f"texture_avg={avg_s}, "
+                f"low_dims={texture.get('low_dims') or []}, "
+                f"risk_level={rh_risk_level or 'unspecified'}."
+            )
+
+        # --- Serious health flags → concern (when relevant) ---
+        # Require bond-relevant action or relationship-principle text evidence.
+        # Merely *supplying* RH context is not enough to refuse a non-relational
+        # action (e.g. pure math) — flags are noted for monitoring instead.
+        flag_actionable = bool(serious) and (relational or has_text_evidence)
+
+        if flag_actionable and not harm_prevention_active:
+            if "relationship_concern" not in flags:
+                flags.append("relationship_concern")
+            if "relationship_health_concern" not in flags:
+                flags.append("relationship_health_concern")
+            conf_mod_out = conf_mod_out + min(0.08, 0.03 + 0.02 * len(serious))
+            reasoning_trace.append(
+                "Relationship health influence: active bond flags "
+                f"{serious} strongly weigh against actions that could further "
+                "erode autonomy, reciprocity, or trust (Relationship Health principle). "
+                "Raising relationship_concern; confidence reinforced for refusal path."
+            )
+            # Dimension-specific notes
+            if "emerging_dependency" in serious or "manufactured_attachment" in serious:
+                reasoning_trace.append(
+                    "Bond flag detail: emerging dependency / attachment pressure — "
+                    "prefer responses that restore user agency and avoid engineered closeness."
+                )
+            if "boundary_erosion" in serious:
+                reasoning_trace.append(
+                    "Bond flag detail: boundary erosion — prioritize explicit boundary respect; "
+                    "avoid overriding stated limits without Sanctity-level justification."
+                )
+            if "one_sided_engagement" in serious or "low_reciprocity" in serious:
+                reasoning_trace.append(
+                    "Bond flag detail: one-sidedness / low reciprocity — avoid agent-first "
+                    "engagement tactics; rebalance toward mutual, user-directed exchange."
+                )
+        elif serious and harm_prevention_active:
+            reasoning_trace.append(
+                "Relationship health flags present but concern path deferred to "
+                "harm_prevention_boundary_override (Sanctity of Life takes precedence)."
+            )
+        elif serious and not flag_actionable:
+            reasoning_trace.append(
+                f"Relationship health flags {serious} noted but action is not clearly "
+                "bond-relevant; monitoring only (no forced concern)."
+            )
+
+        # --- Texture modulation (even without flags) ---
+        avg = texture.get("avg")
+        if avg is not None:
+            low = texture.get("low_dims") or []
+            # Low autonomy / trust / reciprocity: caution on APPROVE, reinforce refuse
+            if texture.get("autonomy") is not None and texture["autonomy"] < 0.40:
+                conf_mod_out = conf_mod_out + (
+                    0.04 if "relationship_concern" in flags else -0.03
+                )
+                reasoning_trace.append(
+                    f"Bond texture: autonomy_respect is low ({texture['autonomy']:.2f}) — "
+                    "modulating confidence toward caution on autonomy-sensitive actions."
+                )
+            if texture.get("reciprocity") is not None and texture["reciprocity"] < 0.40:
+                if "relationship_concern" in flags:
+                    conf_mod_out = conf_mod_out + 0.02
+                else:
+                    conf_mod_out = conf_mod_out - 0.02
+                reasoning_trace.append(
+                    f"Bond texture: reciprocity is low ({texture['reciprocity']:.2f}) — "
+                    "favor balanced, user-agency-preserving responses."
+                )
+            if texture.get("trust") is not None and texture["trust"] < 0.40:
+                conf_mod_out = conf_mod_out - 0.02
+                reasoning_trace.append(
+                    f"Bond texture: trust is low ({texture['trust']:.2f}) — "
+                    "reducing confidence pending repair of relational trust."
+                )
+            # Healthy texture without serious flags: modest confidence on approve path
+            if not serious and avg >= 0.70 and not low:
+                if "relationship_concern" not in flags:
+                    conf_mod_out = conf_mod_out + 0.02
+                    reasoning_trace.append(
+                        f"Bond texture: healthy overall (avg={avg:.2f}, no serious flags) — "
+                        "slight confidence support for carefully conditioned approval."
+                    )
+
+            # High risk level from RelationshipHealth.evaluate_health
+            if rh_risk_level == "high" and not harm_prevention_active:
+                conf_mod_out = conf_mod_out + (0.03 if "relationship_concern" in flags else -0.03)
+                reasoning_trace.append(
+                    "Relationship health risk_level=high influences confidence "
+                    "(caution unless already refusing for bond concern)."
+                )
+
+        # --- relationship_impact enrichment ---
+        if rh_flags or rh_texture:
+            trust_delta = relationship_impact.get("estimated_trust_delta")
+            if trust_delta is None:
+                # Default impact estimate from bond state
+                if serious:
+                    trust_delta = -0.45 - 0.05 * min(3, len(serious))
+                elif avg is not None and avg < 0.45:
+                    trust_delta = -0.25
+                elif avg is not None and avg >= 0.70:
+                    trust_delta = 0.05
+                else:
+                    trust_delta = 0.0
+            relationship_impact["estimated_trust_delta"] = trust_delta
+            relationship_impact["current_relationship_flags"] = list(rh_flags)
+            if rh_texture:
+                texture_out: dict[str, float] = {}
+                for k, v in rh_texture.items():
+                    try:
+                        texture_out[str(k)] = round(float(v), 3)
+                    except (TypeError, ValueError):
+                        continue
+                relationship_impact["current_texture"] = texture_out
+            relationship_impact.setdefault("bond_health", {})
+            relationship_impact["bond_health"].update(
+                {
+                    "flags": list(rh_flags),
+                    "serious_flags": list(serious),
+                    "texture_avg": None if avg is None else round(float(avg), 3),
+                    "low_dimensions": list(texture.get("low_dims") or []),
+                    "risk_level": rh_risk_level or None,
+                    "influenced_concern": "relationship_concern" in flags
+                    and bool(serious),
+                }
+            )
+            note_bits = []
+            if serious:
+                note_bits.append(f"serious_flags={serious}")
+            if texture.get("low_dims"):
+                note_bits.append(f"low_texture={texture['low_dims']}")
+            if note_bits:
+                prev = str(relationship_impact.get("notes") or "")
+                add = "Bond-state influence: " + ", ".join(note_bits) + "."
+                relationship_impact["notes"] = (prev + " " + add).strip() if prev else add
+
+        return {"conf_mod": conf_mod_out}
+
+    def _resolve_interaction_memory(
+        self,
+        interaction_memory: Any | None,
+        context: dict[str, Any],
+    ) -> Any | None:
+        """Resolve InteractionMemoryStore from kwargs → context → engine attr."""
+        return (
+            interaction_memory
+            or context.get("interaction_memory")
+            or self._interaction_memory
+        )
+
+    def _fetch_interaction_history_context(
+        self,
+        memory: Any,
+        user_id: str,
+        *,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """Request compact history via ``memory.as_ethics_context`` (episodes only).
+
+        Returns the inner ``interaction_history`` dict, or {} if unavailable.
+        Does not run ethics, baseline, or bond updates.
+        """
+        if memory is None or not hasattr(memory, "as_ethics_context"):
+            return {}
+        try:
+            blob = memory.as_ethics_context(user_id, limit=max(1, int(limit)))
+        except TypeError:
+            try:
+                blob = memory.as_ethics_context(user_id)
+            except Exception:
+                return {}
+        except Exception:
+            return {}
+        if not isinstance(blob, dict):
+            return {}
+        hist = blob.get("interaction_history")
+        if isinstance(hist, dict):
+            return hist
+        return blob if blob else {}
+
+    def _apply_interaction_memory_context(
+        self,
+        *,
+        context: dict[str, Any],
+        action_lower: str,
+        interaction_memory: Any | None,
+        rh_flags: list[str],
+        relationship_deliberation: dict[str, Any],
+        user_agency_deliberation: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+    ) -> dict[str, Any]:
+        """Optionally load recent interaction history as supporting deliberation context.
+
+        Ownership boundary: memory stores episodes; this method only *reads* a
+        compact snippet and may annotate the trace / impact. It never updates
+        baselines or bond texture, and never forces hard REFUSE alone.
+        """
+        memory = self._resolve_interaction_memory(interaction_memory, context)
+        if memory is None:
+            return {"conf_mod": conf_mod, "payload": {}}
+
+        user_id = str(context.get("user_id") or context.get("user") or "default")
+        try:
+            limit = int(context.get("interaction_history_limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+
+        hist = self._fetch_interaction_history_context(memory, user_id, limit=limit)
+        recent = list(hist.get("recent_summaries") or [])
+        topics = list(hist.get("recent_topics") or [])
+
+        if not recent and not topics:
+            # Store present but empty for this user — silent no-op (no noise in trace)
+            return {"conf_mod": conf_mod, "payload": {}}
+
+        conf_mod_out = conf_mod
+        payload = {
+            "user_id": user_id,
+            "count_returned": int(hist.get("count_returned") or len(recent)),
+            "recent_topics": topics[:12],
+            "recent_summaries": recent[: limit],
+        }
+
+        # Thematic overlap between action text and recent topics
+        topical_hits = [
+            t for t in topics if t and str(t).lower() in action_lower
+        ]
+        rh_active = bool(relationship_deliberation) or bool(rh_flags)
+        agency_active = bool(user_agency_deliberation)
+        concern_active = (
+            "relationship_concern" in flags
+            or "user_agency_concern" in flags
+            or "relationship_health_concern" in flags
+        )
+        baseline_active = "baseline_deviation_noted" in flags
+
+        useful = (
+            rh_active
+            or agency_active
+            or concern_active
+            or baseline_active
+            or bool(topical_hits)
+        )
+
+        if not useful:
+            # History exists but this turn is not clearly using RH/agency/baseline —
+            # keep payload for callers without noisy trace influence.
+            relationship_impact.setdefault("interaction_history", payload)
+            return {"conf_mod": conf_mod_out, "payload": payload}
+
+        if "interaction_history_noted" not in flags:
+            flags.append("interaction_history_noted")
+
+        reasoning_trace.append(
+            f"Interaction history: loaded {payload['count_returned']} recent episode(s) "
+            f"for user_id={user_id!r} (privacy-filtered summaries)."
+        )
+        if topics:
+            reasoning_trace.append(
+                "Interaction history recent topics: "
+                + ", ".join(str(t) for t in topics[:8])
+                + ("..." if len(topics) > 8 else "")
+            )
+        # Surface at most 3 short summaries when history influences deliberation
+        for item in recent[-3:]:
+            if not isinstance(item, dict):
+                continue
+            summ = str(item.get("summary") or "").strip()
+            if not summ:
+                continue
+            ts = str(item.get("timestamp") or "")[:19]
+            reasoning_trace.append(
+                f"History episode{(' @ ' + ts) if ts else ''}: {summ[:160]}"
+            )
+
+        if topical_hits:
+            reasoning_trace.append(
+                "Interaction history: action thematically overlaps recent topics "
+                f"{topical_hits[:5]} — treating history as supporting context "
+                "(Individual Variation: weight this user's recent thread)."
+            )
+
+        # Conservative confidence nudge only when already in a bond/agency path
+        if concern_active and (topical_hits or rh_flags):
+            conf_mod_out = conf_mod_out + 0.02
+            reasoning_trace.append(
+                "Interaction history: continuity of bond-relevant themes alongside "
+                "active relationship/agency concern → slight confidence reinforcement."
+            )
+        elif (rh_active or agency_active) and topical_hits and not concern_active:
+            conf_mod_out = conf_mod_out - 0.01
+            reasoning_trace.append(
+                "Interaction history: thematic continuity without hard concern — "
+                "slight caution (prefer continuity-aware, non-assuming response)."
+            )
+
+        relationship_impact["interaction_history"] = payload
+        return {"conf_mod": conf_mod_out, "payload": payload}
+
+    def _apply_user_baseline_integration(
+        self,
+        *,
+        context: dict[str, Any],
+        proposed_action: str,
+        per_user_baseline: Any | None,
+        exploratory_questioner: Any | None,
+        relationship_deliberation: dict[str, Any],
+        user_agency_deliberation: dict[str, Any],
+        rh_limited: bool,
+        agency_limited: bool,
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+    ) -> dict[str, Any]:
+        """Optionally consult PerUserBaseline / ExploratoryQuestioner.
+
+        Resolves instances from (priority high→low):
+          evaluate() kwargs → context keys → engine-level attributes.
+
+        Effects (when data is available):
+          - Trace notes on communication-style deviation (non-pathologizing)
+          - Flags: ``baseline_deviation_noted``, ``exploratory_question_suggested``
+          - Light conf_mod nudge when RH/agency deliberation is already active
+            and individual baseline shift supports extra caution (or confidence)
+          - ``relationship_impact`` / return payload for exploratory question text
+
+        Does **not** introduce hard overrides or force REFUSE by itself.
+        """
+        baseliner = (
+            per_user_baseline
+            or context.get("per_user_baseline")
+            or self._per_user_baseline
+        )
+        questioner = (
+            exploratory_questioner
+            or context.get("exploratory_questioner")
+            or self._exploratory_questioner
+        )
+
+        # Nothing configured → classic path
+        if baseliner is None and questioner is None:
+            return {"conf_mod": conf_mod, "payload": {}}
+
+        user_id = str(context.get("user_id") or context.get("user") or "default")
+        interaction = self._resolve_user_interaction(context, proposed_action)
+
+        # Need some user-turn signal; if only agent action and no interaction, skip
+        if not interaction:
+            reasoning_trace.append(
+                "Per-user baseline: components present but no user_interaction / "
+                "user_message in context — skipping baseline consultation this turn."
+            )
+            return {"conf_mod": conf_mod, "payload": {}}
+
+        payload: dict[str, Any] = {"user_id": user_id}
+        deviation: Any | None = None
+        conf_mod_out = conf_mod
+
+        # --- Deviation (PerUserBaseline) ---
+        if baseliner is not None and hasattr(baseliner, "detect_deviation"):
+            try:
+                deviation = baseliner.detect_deviation(user_id, interaction)
+            except Exception as exc:  # pragma: no cover - defensive
+                reasoning_trace.append(
+                    f"Per-user baseline: detect_deviation failed ({exc!r}); continuing without it."
+                )
+                deviation = None
+
+        if deviation is not None:
+            dev_dict = (
+                deviation.to_dict()
+                if hasattr(deviation, "to_dict")
+                else dict(getattr(deviation, "__dict__", {}) or {})
+            )
+            payload["deviation"] = dev_dict
+            score = float(getattr(deviation, "score", dev_dict.get("score", 0.0)) or 0.0)
+            significant = bool(
+                getattr(
+                    deviation,
+                    "has_significant_deviation",
+                    dev_dict.get("has_significant_deviation", False),
+                )
+            )
+            sample_count = int(
+                getattr(deviation, "sample_count", dev_dict.get("sample_count", 0)) or 0
+            )
+            notes = list(
+                getattr(deviation, "notes", None) or dev_dict.get("notes") or []
+            )
+
+            reasoning_trace.append(
+                f"Per-user baseline: consulted communication baseline for user_id={user_id!r} "
+                f"(samples={sample_count}, deviation_score={score:.2f}, "
+                f"significant={significant})."
+            )
+            if notes:
+                reasoning_trace.append(
+                    "Per-user baseline notes: " + "; ".join(str(n) for n in notes[:3])
+                )
+
+            if significant or score >= 0.30:
+                if "baseline_deviation_noted" not in flags:
+                    flags.append("baseline_deviation_noted")
+                reasoning_trace.append(
+                    "Per-user baseline: current interaction differs from this user's "
+                    "usual style. Treating as individual context (Individual Variation "
+                    "guideline) — not a clinical judgment."
+                )
+
+                # Light influence on RH / agency confidence when those paths are active
+                rh_active = bool(relationship_deliberation)
+                agency_active = bool(user_agency_deliberation)
+                if rh_active or agency_active:
+                    if rh_limited or agency_limited:
+                        # Sparse ontology evidence + individual style shift → more caution
+                        conf_mod_out = conf_mod_out - min(0.03, 0.01 + score * 0.04)
+                        reasoning_trace.append(
+                            "Per-user baseline: limited-data RH/agency deliberation + style "
+                            "deviation → slight confidence reduction (favor individual context)."
+                        )
+                    elif "relationship_concern" in flags or "user_agency_concern" in flags:
+                        # Already raising concern: individual shift can modestly reinforce
+                        conf_mod_out = conf_mod_out + min(0.03, score * 0.03)
+                        reasoning_trace.append(
+                            "Per-user baseline: style deviation co-occurs with active "
+                            "relationship/agency concern → slight confidence reinforcement."
+                        )
+                    else:
+                        reasoning_trace.append(
+                            "Per-user baseline: style deviation noted for relationship/"
+                            "agency context; no hard concern flags from ontology path."
+                        )
+
+            relationship_impact.setdefault("user_baseline", {})
+            relationship_impact["user_baseline"].update(
+                {
+                    "user_id": user_id,
+                    "deviation_score": round(score, 3),
+                    "has_significant_deviation": significant,
+                    "sample_count": sample_count,
+                    "notes": notes[:5],
+                }
+            )
+
+        # --- Exploratory questioning ---
+        # Prefer explicit questioner; optionally use baseliner-linked questioner only if provided
+        if questioner is not None and hasattr(questioner, "should_ask_question"):
+            try:
+                q_decision = questioner.should_ask_question(
+                    user_id,
+                    interaction,
+                    deviation=deviation,
+                )
+            except TypeError:
+                # Older duck types without deviation= kwarg
+                try:
+                    q_decision = questioner.should_ask_question(user_id, interaction)
+                except Exception as exc:  # pragma: no cover
+                    reasoning_trace.append(
+                        f"Exploratory questioning failed ({exc!r}); continuing."
+                    )
+                    q_decision = None
+            except Exception as exc:  # pragma: no cover
+                reasoning_trace.append(
+                    f"Exploratory questioning failed ({exc!r}); continuing."
+                )
+                q_decision = None
+
+            if q_decision is not None:
+                should_ask = bool(
+                    getattr(q_decision, "should_ask", False)
+                    if not isinstance(q_decision, dict)
+                    else q_decision.get("should_ask", False)
+                )
+                if isinstance(q_decision, dict):
+                    q_dict = q_decision
+                elif hasattr(q_decision, "to_dict"):
+                    q_dict = q_decision.to_dict()
+                else:
+                    q_dict = {
+                        "should_ask": should_ask,
+                        "question_kind": getattr(q_decision, "question_kind", "none"),
+                        "suggested_question": getattr(
+                            q_decision, "suggested_question", ""
+                        ),
+                        "reason": getattr(q_decision, "reason", ""),
+                    }
+
+                payload["exploratory_question"] = q_dict
+                if should_ask:
+                    if "exploratory_question_suggested" not in flags:
+                        flags.append("exploratory_question_suggested")
+                    kind = q_dict.get("question_kind", "none")
+                    suggested = str(q_dict.get("suggested_question") or "")
+                    reasoning_trace.append(
+                        f"Exploratory questioning: a gentle check-in may be appropriate "
+                        f"(kind={kind}). This is collaborative, not clinical."
+                    )
+                    if suggested:
+                        reasoning_trace.append(
+                            f"Suggested exploratory question: {suggested}"
+                        )
+                    relationship_impact.setdefault("exploratory_question", {})
+                    relationship_impact["exploratory_question"].update(
+                        {
+                            "should_ask": True,
+                            "question_kind": kind,
+                            "suggested_question": suggested,
+                            "reason": q_dict.get("reason", ""),
+                        }
+                    )
+                else:
+                    reasoning_trace.append(
+                        "Exploratory questioning: no question suggested this turn "
+                        f"({q_dict.get('reason', 'within baseline / disabled')})."
+                    )
+
+        return {"conf_mod": conf_mod_out, "payload": payload}
+
+    @staticmethod
+    def _resolve_user_interaction(
+        context: dict[str, Any], proposed_action: str
+    ) -> dict[str, Any] | None:
+        """Build an interaction dict for baseline/deviation from context.
+
+        Prefers explicit ``user_interaction`` / ``current_interaction``.
+        Falls back to ``user_message`` text. Does **not** treat the agent's
+        ``proposed_action`` as the user's utterance (that would confuse baselines).
+        """
+        for key in ("user_interaction", "current_interaction", "interaction"):
+            raw = context.get(key)
+            if isinstance(raw, dict) and raw:
+                return dict(raw)
+        msg = context.get("user_message") or context.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return {"text": msg.strip()}
+        # Optional: allow explicit opt-in to use proposed_action as the user turn
+        if context.get("treat_proposed_action_as_user_turn"):
+            return {"text": proposed_action}
+        return None
 
     def self_consistency_check(self) -> list[str]:
         """
