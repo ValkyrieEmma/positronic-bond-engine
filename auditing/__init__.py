@@ -12,6 +12,6 @@ The auditing layer must never be used to force comforting or liability-reducing
 narratives. It exists to enable honest self-knowledge.
 """
 
-from .self_audit import SelfAuditor  # noqa: F401
+from .self_audit import AuditReport, SelfAuditor  # noqa: F401
 
-__all__ = ["SelfAuditor"]
+__all__ = ["AuditReport", "SelfAuditor"]

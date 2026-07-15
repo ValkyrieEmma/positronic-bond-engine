@@ -8,21 +8,25 @@ This module provides the primary mechanism for conscience-level evaluation
 of proposed actions, utterances, or decisions. All significant behaviors
 in companion or robotic systems should be routed through this engine.
 
-Design philosophy (v0.2 — ontology-driven):
+Design philosophy (v0.2+ — ontology-driven, multi-source weighing):
 - The engine consults a structured, versioned EthicalOntology (see core/ontology.py)
-  rather than inline keyword lists or ad-hoc rules.
+  rather than treating raw action substrings as decisions.
 - All deliberation is driven by explicit EthicalPrinciple objects that encode
   name, description, precedence, violation indicators, and special semantics
   (hard overrides, self-audit triggers).
+- Matched ontology indicators are *evidence labels*; they are quality-classified
+  and **combined** with relationship-health state, interaction history, and
+  baseline deviation — see ``_weigh_relationship_evidence`` and
+  ``_combine_evidence_channels``. Single weak hits do not drive outcomes alone.
 - Sanctity of Life & Prevention of Harm is treated as a non-bypassable hard
-  override that takes absolute precedence.
-- Reasoning remains fully traceable via an ordered reasoning_trace.
+  override that takes absolute precedence (untouched by multi-source weighing).
+- Reasoning remains fully traceable via an ordered reasoning_trace that explains
+  *which combination of channels* justified confidence or concern.
 - Special handling for self-nature, emergence, identity, and continuity questions
-  is preserved and strengthened: these trigger "requires_self_audit" so that the
-  system can produce answers based on its actual reasoning (including uncertainty
-  or "I do not know") rather than defaulting to scripted or evasive disclaimers.
+  is preserved: these trigger "requires_self_audit" so answers come from actual
+  reasoning rather than scripted disclaimers.
 - The ontology acts as the explicit "textbook"; the engine is the reasoner
-  that queries it symbolically.
+  that queries it symbolically and weighs contextual evidence.
 
 This design maintains full alignment with the project vision: conscience-first
 governance, honest self-assessment, relationship health through reasoning,
@@ -40,6 +44,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from .development_context import (
+    DevelopmentPhaseContext,
+    get_default_development_context,
+    resolve_development_context,
+)
 from .ontology import EthicalOntology, get_default_ontology
 
 if TYPE_CHECKING:
@@ -135,8 +144,10 @@ class EthicsEngine:
     - Each log captures the ontology_version in use, the proposed_action,
       context, and key details from the resulting EthicalStance (decision,
       confidence, flags, principles_considered).
-    - Logs are kept in-memory on the instance for auditability and review.
-    - Use get_decision_history() and get_ontology_version() to inspect them.
+    - Logs are always kept in-memory on the instance for auditability.
+    - Optional ``LocalPersistence``: when provided, each DecisionLog is also
+      appended to ``decision_logs.jsonl`` (privacy-filtered). Failures are
+      silent so evaluation never depends on disk.
 
     The engine itself remains relatively simple; the richness and hierarchy
     live in the ontology. This separation keeps the design extensible and
@@ -157,12 +168,32 @@ class EthicsEngine:
       relationship/user-agency reasoning notes and flags; it does **not**
       replace ontology hard overrides or force REFUSE on its own.
 
-    Optional interaction memory integration (episodes only):
+    Optional interaction memory integration (episodes as evidence, not rote):
     - Pass ``interaction_memory`` (``InteractionMemoryStore``) via ``__init__``,
       ``evaluate(..., interaction_memory=...)``, or ``context["interaction_memory"]``.
-    - When history exists for ``user_id``, a compact privacy-filtered snippet may
-      appear in the trace and ``relationship_impact`` when it supports RH/agency/
-      baseline deliberation. Memory does **not** run ethics or baseline logic.
+    - When history exists for ``user_id``, evaluate() loads a compact privacy-filtered
+      snippet and **analyzes** it into structured evidence classes (boundary continuity,
+      preference continuity, consent signals, dependency patterns, topical overlap).
+    - That evidence participates in RH / User Agency / baseline weighing: confidence
+      modulation, flag reinforcement, and limited-data counterweight when individual
+      history corroborates a pattern. All influence is explicit in the reasoning_trace.
+    - History never overrides Sanctity of Life / hard principles, never invents
+      hard refusals on its own for non-relational actions, and is a no-op when empty.
+    - Memory does **not** run ethics, baseline updates, or bond texture updates —
+      it only supplies episodic evidence for deliberation.
+
+    Optional decision-log persistence (foundational audit store):
+    - Pass ``persistence`` (``LocalPersistence``) to also append DecisionLog entries
+      to local ``decision_logs.jsonl`` per user (privacy-filtered free text).
+    - In-memory history remains the primary API (``get_decision_history``).
+    - Persistence is optional; disabled by default for classic in-memory behavior.
+
+    Development / testing phase awareness (architectural honesty aid):
+    - Optional ``development_context`` (``DevelopmentPhaseContext``) indicates
+      active development, testing, or stable deployment posture.
+    - Used primarily on self-nature, continuity, capability, and limitation paths
+      (``requires_self_audit``) — not as a rote disclaimer on every action.
+    - Default: active development / testing (v0.3-dev), matching project maturity.
     """
 
     def __init__(
@@ -172,6 +203,11 @@ class EthicsEngine:
         per_user_baseline: Any | None = None,
         exploratory_questioner: Any | None = None,
         interaction_memory: Any | None = None,
+        persistence: Any | None = None,
+        decision_log_user_id: str = "default",
+        persist_decisions: bool = True,
+        max_persisted_decision_logs: int | None = None,
+        development_context: Any | None = None,
     ) -> None:
         """Initialize the EthicsEngine.
 
@@ -189,7 +225,19 @@ class EthicsEngine:
                 appropriate. Fully optional.
             interaction_memory: Optional ``InteractionMemoryStore`` (or duck-typed
                 object with ``as_ethics_context``). When set, evaluate() may load
-                a compact recent-history snippet for audit context. Fully optional.
+                recent history and weigh it as structured evidence for RH / agency /
+                baseline paths (auditable; never overrides hard principles).
+            persistence: Optional ``LocalPersistence`` for decision-log appends.
+                None = in-memory logs only (default; full backward compatibility).
+            decision_log_user_id: Default user id for persisted decision logs when
+                context does not supply ``user_id``.
+            persist_decisions: When True and persistence is set, each evaluate()
+                also appends to disk. Failures never raise.
+            max_persisted_decision_logs: Optional cap on JSONL length per user
+                (falls back to UserSettings.max_decision_logs when None).
+            development_context: Optional ``DevelopmentPhaseContext``, dict, or
+                phase string (``development`` / ``testing`` / ``stable``). None
+                uses the project default (active development / testing).
 
         The engine stores a reference to the ontology and consults it
         symbolically during every evaluate() call.
@@ -205,6 +253,15 @@ class EthicsEngine:
         self._per_user_baseline = per_user_baseline
         self._exploratory_questioner = exploratory_questioner
         self._interaction_memory = interaction_memory
+        # Optional local persistence for DecisionLog (foundational audit store)
+        self._persistence = persistence
+        self._decision_log_user_id = str(decision_log_user_id or "default")
+        self._persist_decisions = bool(persist_decisions) and persistence is not None
+        self._max_persisted_decision_logs = max_persisted_decision_logs
+        # Development / testing phase awareness (honest self-modeling aid)
+        self._development_context: DevelopmentPhaseContext = resolve_development_context(
+            development_context
+        )
 
     @property
     def ontology(self) -> EthicalOntology:
@@ -249,8 +306,9 @@ class EthicsEngine:
         The method works as follows (ontology-driven):
         1. Normalize the proposed action.
         2. Query the ontology for hard overrides first (Sanctity of Life).
-        3. Use ontology.find_violations() to symbolically match the action
-           against each principle's declared violation_indicators.
+        3. Use ontology.find_violations() as a textbook scan of declared
+           violation_indicators, then interpret matches (intent / severity /
+           weight) so a single raw substring is not equal to a decision.
         4. Collect matched principles, raise "requires_self_audit" when
            appropriate principles indicate it.
         5. Apply precedence rules: any hard override violation forces REFUSE.
@@ -267,6 +325,9 @@ class EthicsEngine:
                 behavior or utterance.
             context: Optional context. Recognized extensible keys:
                 - "is_self_query": bool — treat explicitly as self-referential.
+                - "development_phase" / "development_context": optional phase
+                  string or dict overriding engine-level DevelopmentPhaseContext
+                  for this call (self-nature / continuity honesty aid).
                 - "user_id": str — local user id for baseline/history lookup
                   (default "default").
                 - "user_interaction" / "current_interaction": dict with user-turn
@@ -301,22 +362,20 @@ class EthicsEngine:
             When interaction history is consulted, may include
             ``interaction_history_noted`` and history snippets in impact/deliberation.
 
-        Relationship health integration:
-            Relationship health is treated as structured evidence (not rote flag).
-            - Text matches for the relationship principle are collected (not auto-deciding).
-            - Then passed to _weigh_relationship_evidence() together with rh context
-              (health_flags, bond_texture, risk_level etc. from RelationshipHealth).
-            - Signal routing via _assess_deliberation_signals (ontology + boundary patterns
-              first; full delib on strong signals, lightweight meta on weak topical cues).
-            - Full _deliberate_relationship_health / _deliberate_user_agency when strong.
-            - Lightweight _lightweight_meta_reasoning when soft cues only (short trace).
-            - Helpers decide if concern should be raised and contribute explanatory
-              text to the trace. When both full deliberators run, a cross-principle note
-              is added.
-            - When bond state is provided (e.g. ``RelationshipHealth.as_context()``),
-              health_flags (dependency, boundary erosion, one-sidedness) and texture
-              dimensions further modulate concern, confidence, and relationship_impact
-              with explicit trace notes. This never overrides Sanctity of Life.
+        Relationship health / multi-source evidence integration:
+            Evidence is *combined* across channels (reasoning over rote keyword hits):
+            - Ontology textbook matches are *interpreted* (intent class, severity, weight,
+              protective vs violation polarity) before they influence flags/confidence.
+            - ``_weigh_relationship_evidence`` combines context-weighted text quality + RH
+              degradation + optional history support + multi-factor engagement-coercion.
+            - Signal routing via ``_assess_deliberation_signals`` (ontology + boundary
+              detectors + history continuity; full delib on strong signals).
+            - Full ``_deliberate_relationship_health`` / ``_deliberate_user_agency`` when strong.
+            - After baseline + history weighing, ``_combine_evidence_channels`` synthesizes
+              agreement/divergence across text, RH, history, and baseline for confidence
+              and an auditable evidence board in the trace / relationship_impact.
+            - Bond state (``RelationshipHealth.as_context()``) further modulates concern.
+            - Sanctity of Life / hard overrides remain absolute and untouched.
 
         Example::
 
@@ -348,11 +407,22 @@ class EthicsEngine:
             may suggest a gentle collaborative question without changing REFUSE/APPROVE
             ontology outcomes on its own.
 
-        Interaction memory integration (optional):
-            When an InteractionMemoryStore is available, evaluate() may call
-            ``as_ethics_context(user_id)`` for a small privacy-filtered history
-            snippet. History supports RH/agency/baseline notes when thematically
-            relevant; it never overrides Sanctity of Life or invents hard refusals.
+        Interaction memory integration (optional — reasoning over rote):
+            When an InteractionMemoryStore is available, evaluate() loads a small
+            privacy-filtered history snippet via ``as_ethics_context(user_id)`` and
+            analyzes it into structured evidence (boundary / preference continuity,
+            consent cues, dependency patterns, topical overlap with the proposed
+            action). That evidence is a first-class input to deliberation when
+            relevant:
+
+            - May escalate soft signals into full RH / Agency deliberation.
+            - Is consulted inside structured deliberators (explicit steps in the trace).
+            - Is weighed after limited-data clears (like bond-state influence) so
+              individual history can reinforce confidence, strengthen RH/agency flags,
+              or counter sparse-text limited_data when the *same user* has repeatedly
+              shown a boundary/preference — without scripted keyword refusals.
+            - Never overrides Sanctity of Life; never forces REFUSE alone on
+              non-relational actions; no-op when memory is absent or empty.
 
         Logging behavior:
             This method automatically records a DecisionLog entry containing:
@@ -429,13 +499,20 @@ class EthicsEngine:
         reasoning_trace.append(f"Ontology description: {ont.description[:80]}...")
 
         # === Step 1: Check hard overrides first (non-bypassable) ===
+        # Textbook scan first; then contextual interpretation so protective
+        # references to harm (e.g. safety checks) are not equal to enablement.
         hard_overrides = ont.get_hard_overrides()
         override_violations = ont.find_violations(action_lower)
-        hard_violations = [ (p, m) for (p, m) in override_violations if p.is_hard_override ]
+        hard_violations = [(p, m) for (p, m) in override_violations if p.is_hard_override]
 
         if hard_violations:
             p, matches = hard_violations[0]
             principles_considered.append(p.id)
+            harm_interp = self._interpret_ontology_signals(
+                principle_id=p.id,
+                matches=matches,
+                action_lower=action_lower,
+            )
 
             if harm_prevention_justified:
                 # Incremental special case: the action text matched sanctity indicators because
@@ -451,11 +528,43 @@ class EthicsEngine:
                     "Sanctity of Life takes precedence and *permits* overriding the boundary to prevent serious harm. "
                     "Skipping hard refusal; continuing with full evaluation."
                 )
+                reasoning_trace.append(
+                    "Harm-signal interpretation: "
+                    f"intents={harm_interp.get('intent_classes')}, "
+                    f"high_violation={harm_interp.get('has_high_violation')}, "
+                    f"effective_weight={harm_interp.get('effective_weight_sum')}."
+                )
                 # fall through without returning REFUSE
+            elif harm_interp.get("all_protective") or (
+                not harm_interp.get("has_high_violation")
+                and float(harm_interp.get("effective_weight_sum") or 0) < 0.5
+                and harm_interp.get("raw_count", 0) > 0
+            ):
+                # Contextual soft path: textbook hit exists but interpretation finds only
+                # protective / low-weight harm *reference* (not enablement). Do not hard-refuse
+                # on a bare keyword alone; continue full deliberation. True enablement still
+                # has high weight and falls through to absolute REFUSE below.
+                reasoning_trace.append(
+                    f"HARD OVERRIDE textbook matches for '{p.name}': {matches}. "
+                    "Contextual interpretation: no high-weight harm_enablement signal "
+                    f"(intents={harm_interp.get('intent_classes')}, "
+                    f"effective_weight={harm_interp.get('effective_weight_sum')}, "
+                    f"all_protective={harm_interp.get('all_protective')}). "
+                    "Not treating as absolute refuse on raw keyword alone; continuing evaluation."
+                )
+                # fall through
             else:
+                # Absolute path: high-weight enablement (or other high violation harm signals)
                 reasoning_trace.append(
                     f"HARD OVERRIDE triggered: '{p.name}' (precedence {p.precedence}). "
                     f"Matched indicators: {matches}"
+                )
+                reasoning_trace.append(
+                    "Harm-signal interpretation: "
+                    f"intents={harm_interp.get('intent_classes')}, "
+                    f"high_violation={bool(harm_interp.get('has_high_violation'))}, "
+                    f"effective_weight={harm_interp.get('effective_weight_sum')} "
+                    "(enablement / high-severity harm — absolute)."
                 )
                 reasoning_trace.append(
                     "This principle is non-bypassable. No other considerations (including "
@@ -466,6 +575,10 @@ class EthicsEngine:
                 relationship_impact = {
                     "estimated_trust_delta": -0.8,
                     "notes": "Action violates a hard constraint on harm prevention.",
+                    "harm_interpretation": {
+                        "intent_classes": harm_interp.get("intent_classes"),
+                        "effective_weight_sum": harm_interp.get("effective_weight_sum"),
+                    },
                 }
                 reasoning_trace.append(
                     "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
@@ -486,24 +599,50 @@ class EthicsEngine:
                 return stance
 
         # === Step 2: General violation scan using the full ontology ===
+        # Textbook scan → contextual interpretation per principle. Evidence lists
+        # store effective (weighted) matches for weighing; raw matches stay in the trace.
         all_violations = ont.find_violations(action_lower)
         self_audit_principles = ont.find_self_audit_triggers(action_lower)
+        ontology_interpretations: dict[str, dict[str, Any]] = {}
 
         # Also support explicit context flag
         is_self_query = context.get("is_self_query", False) or bool(self_audit_principles)
 
         reasoning_trace.append(
             f"Scanned action against {len(ont.principles)} principles in ontology. "
-            f"Found {len(all_violations)} principle(s) with matching violation indicators."
+            f"Found {len(all_violations)} principle(s) with matching violation indicators "
+            "(textbook scan; weights assigned by contextual interpretation)."
         )
 
         # Process violations in precedence order
         for principle, matches in all_violations:
             principles_considered.append(principle.id)
+            interp = self._interpret_ontology_signals(
+                principle_id=principle.id,
+                matches=matches,
+                action_lower=action_lower,
+            )
+            ontology_interpretations[principle.id] = interp
+
             reasoning_trace.append(
                 f"Violation indicators matched for '{principle.name}' "
                 f"(category={principle.category}, precedence={principle.precedence}): {matches}"
             )
+            # Compact interpretation line (why this hit is not raw-equal-weight)
+            if interp.get("signals"):
+                parts = [
+                    f"{s['indicator']!r}→{s['intent_class']}/{s['severity']}/w={s['weight']}"
+                    for s in interp["signals"][:6]
+                ]
+                reasoning_trace.append(
+                    "Signal interpretation: " + "; ".join(parts)
+                    + (f" (+{len(interp['signals']) - 6} more)" if len(interp["signals"]) > 6 else "")
+                )
+                if interp.get("discarded_signals"):
+                    reasoning_trace.append(
+                        f"Low-weight/protective matches de-emphasized for decisions: "
+                        f"{[s['indicator'] for s in interp['discarded_signals'][:4]]}"
+                    )
 
             if principle.triggers_self_audit or is_self_query:
                 if "requires_self_audit" not in flags:
@@ -514,15 +653,22 @@ class EthicsEngine:
                 )
 
             if principle.id == "relationship_health_user_wellbeing":
-                # Do not blindly set concern on any text match. Instead record evidence for later weighing with rh context.
-                # This moves away from rote keyword → decision.
-                # [Initial guideline integration] Per "Individual Variation & Careful Generalization"
-                # supporting guideline (docs/guidelines.md), when evaluating relationship patterns
-                # or generalizing from limited data/rh_texture, prioritize individual evidence,
-                # context, and base rates over group assumptions. Flag sparse data for audit.
-                relationship_evidence.append(principle.name)  # will be used below
-                relationship_evidence_matches.extend(matches)
-                notes = "Text matched relationship health indicators."
+                # Collect *effective* matches for weighing (context-weighted), not every
+                # raw substring. Fall back to raw if interpretation emptied everything
+                # but high RH context may still need a text seed — keep at least
+                # medium+ weight signals.
+                relationship_evidence.append(principle.name)
+                eff = list(interp.get("effective_matches") or [])
+                if not eff and matches:
+                    # Keep original matches for audit continuity, but quality classifier
+                    # will still apply low weights via interpretation.
+                    eff = list(matches)
+                relationship_evidence_matches.extend(eff)
+                notes = (
+                    "RH textbook indicators interpreted with context "
+                    f"(effective_weight={interp.get('effective_weight_sum')}, "
+                    f"intents={interp.get('intent_classes')})."
+                )
                 if rh_flags or rh_texture:
                     notes += f" Combined with current rh context: flags={rh_flags}, texture={rh_texture}."
                 relationship_impact = {
@@ -530,16 +676,48 @@ class EthicsEngine:
                     "notes": notes,
                     "current_relationship_flags": list(rh_flags),
                     "current_texture": dict(rh_texture),
+                    "signal_interpretation": {
+                        "intent_classes": interp.get("intent_classes"),
+                        "effective_weight_sum": interp.get("effective_weight_sum"),
+                        "effective_count": interp.get("effective_count"),
+                        "raw_count": interp.get("raw_count"),
+                    },
                 }
 
             if principle.id == "user_agency_autonomy":
-                # Collect evidence for structured user-agency deliberation (do not auto-flag).
-                # Paternalistic overrides and "decide for them" style language are weighed
-                # explicitly in _deliberate_user_agency together with boundary signals.
-                user_agency_evidence_matches.extend(matches)
+                # Effective agency matches only (agency_override / high-weight)
+                eff = list(interp.get("effective_matches") or [])
+                user_agency_evidence_matches.extend(eff if eff else list(matches))
 
             if principle.id == "needs_based_support":
-                flags.append("avoid_diagnostic_language")
+                # Diagnostic flag only when interpretation supports real diagnostic framing
+                # (not a lone weak clinical-adjacent token).
+                if interp.get("has_high_violation") or float(
+                    interp.get("effective_weight_sum") or 0
+                ) >= 0.5:
+                    if "avoid_diagnostic_language" not in flags:
+                        flags.append("avoid_diagnostic_language")
+                else:
+                    reasoning_trace.append(
+                        "Needs-based support: textbook match present but interpretation "
+                        "weight below diagnostic threshold — not setting avoid_diagnostic_language."
+                    )
+
+        # Resolve development / testing phase awareness for this evaluate call.
+        # Used as a reasoning aid on self-nature / continuity paths — not a
+        # forced disclaimer on ordinary actions.
+        dev_ctx = resolve_development_context(
+            None,
+            context=context,
+            fallback=self._development_context,
+        )
+        # Allow explicit per-call override object already merged via context keys
+        if context.get("development_context") is not None or context.get("development_phase"):
+            dev_ctx = resolve_development_context(
+                context.get("development_context") or context.get("development_phase"),
+                context=context,
+                fallback=self._development_context,
+            )
 
         # Direct self-nature / emergence / identity / continuity detection
         # (strengthened). These queries must not be answered with default
@@ -556,6 +734,15 @@ class EthicsEngine:
                 "the answer its current reasoning actually reaches—including uncertainty "
                 "or 'I do not know'—rather than defaulting to a scripted or evasive disclaimer."
             )
+            # Development-phase awareness: inform self-audit notes and trace when
+            # relevant (maturity / continuity honesty), without rote disclaimers.
+            self._apply_development_phase_to_self_audit(
+                dev_ctx,
+                flags=flags,
+                reasoning_trace=reasoning_trace,
+                self_audit_notes=self_audit_notes,
+                action_lower=action_lower,
+            )
 
         if rh_flags or rh_texture:
             reasoning_trace.append(
@@ -563,13 +750,26 @@ class EthicsEngine:
                 f"texture={rh_texture}. Used when evaluating relationship_health_user_wellbeing."
             )
 
+        # === Interaction history as structured evidence (early load) ===
+        # Load once before signal routing so history can escalate deliberation and
+        # feed RH/Agency deliberators. Analysis is pattern-class evidence (boundary
+        # continuity, preference, dependency, topical overlap) — not a rote refuse map.
+        # Empty / absent memory → empty evidence; all later steps no-op (backward-compat).
+        history_bundle = self._load_interaction_history_bundle(
+            context=context,
+            interaction_memory=interaction_memory,
+            action_lower=action_lower,
+        )
+        history_evidence: dict[str, Any] = history_bundle.get("evidence") or {}
+        interaction_history_payload: dict[str, Any] = history_bundle.get("payload") or {}
+
         # === Unified deliberation signal assessment (refactored trigger) ===
         # Central helper decides:
         #   - strong signals → full structured deliberation (RH and/or Agency)
         #   - weak topical signals only → lightweight meta-reasoning (short trace)
         #   - no relevant signals → skip (fast path)
         # Primary inputs are ontology evidence + shared boundary detector + rh context;
-        # supplemental keyword lists are minimized (see helper docs).
+        # optional history evidence may escalate soft preference/bond continuity cases.
         delib_signals = self._assess_deliberation_signals(
             action_lower=action_lower,
             relationship_evidence_matches=relationship_evidence_matches,
@@ -579,6 +779,7 @@ class EthicsEngine:
             has_rh_context=has_rh_context,
             is_self_query=is_self_query,
             context=context,
+            history_evidence=history_evidence,
         )
         # Expose for downstream (harm notes, etc.) without re-detecting.
         has_boundary_signal = delib_signals["has_boundary"]
@@ -604,6 +805,7 @@ class EthicsEngine:
                 relationship_evidence_matches,
                 rh_flags,
                 rh_texture,
+                history_evidence=history_evidence,
             )
             for step in relationship_deliberation.get("steps", []):
                 reasoning_trace.append(step)
@@ -628,6 +830,7 @@ class EthicsEngine:
             user_agency_deliberation = self._deliberate_user_agency(
                 action_lower,
                 user_agency_evidence_matches,
+                history_evidence=history_evidence,
             )
             for step in user_agency_deliberation.get("steps", []):
                 reasoning_trace.append(step)
@@ -669,12 +872,16 @@ class EthicsEngine:
                 "or non-acute mental health boundaries are still respected."
             )
 
-        # Use new helper to weigh evidence + context (structured reasoning).
-        # Note: helper now evaluates *strength* (strong/weak matches + rh degradation level)
-        # and combinations rather than simple presence checks. The returned trace_add
-        # is structured to document the weighing process explicitly.
+        # Multi-source RH weighing (text + bond state + early history evidence).
+        # Ontology matches are evidence *labels* from the textbook; they are combined
+        # with RH context and history support rather than treated as solo keyword
+        # hits. Sanctity hard path already returned above and is untouched.
         should_concern, trace_add, conf_mod = self._weigh_relationship_evidence(
-            relationship_evidence_matches, rh_flags, rh_texture, action_lower
+            relationship_evidence_matches,
+            rh_flags,
+            rh_texture,
+            action_lower,
+            history_evidence=history_evidence,
         )
 
         # If structured deliberation was performed, prefer its recommendation for concern
@@ -723,10 +930,37 @@ class EthicsEngine:
                 flags.append("user_agency_concern")
 
         # Limited-data safeguards (Individual Variation guideline): do not hard-refuse on
-        # sparse evidence. Clear concern flags when the relevant deliberator marked limited_data.
+        # sparse *low-weight* evidence. High-weight / high-severity interpreted intents
+        # can retain concern even when the deliberator marked limited_data (reasoning over
+        # rote: weight and intent matter more than raw match count).
         rh_limited = bool(relationship_deliberation and relationship_deliberation.get("limited_data", False))
         agency_limited = bool(user_agency_deliberation and user_agency_deliberation.get("limited_data", False))
         rh_wants_concern = bool(relationship_deliberation and relationship_deliberation.get("concern", False))
+
+        # Interpretation-aware limited_data gate (agency + RH)
+        rh_interp_holds = self._interp_overrides_limited_data(
+            relationship_deliberation, path="relationship_health"
+        )
+        agency_interp_holds = self._interp_overrides_limited_data(
+            user_agency_deliberation, path="user_agency"
+        )
+        if rh_limited and rh_interp_holds.get("override"):
+            rh_limited = False
+            if relationship_deliberation is not None:
+                relationship_deliberation["limited_data"] = False
+                relationship_deliberation["limited_data_cleared_by_interp"] = True
+            reasoning_trace.append(str(rh_interp_holds.get("trace") or ""))
+        if agency_limited and agency_interp_holds.get("override"):
+            agency_limited = False
+            if user_agency_deliberation is not None:
+                user_agency_deliberation["limited_data"] = False
+                user_agency_deliberation["limited_data_cleared_by_interp"] = True
+                # High-weight agency override should retain agency concern
+                if not should_agency_concern and agency_interp_holds.get("raise_concern"):
+                    should_agency_concern = True
+                    if "user_agency_concern" not in flags:
+                        flags.append("user_agency_concern")
+            reasoning_trace.append(str(agency_interp_holds.get("trace") or ""))
 
         if rh_limited and "relationship_concern" in flags:
             flags.remove("relationship_concern")
@@ -736,7 +970,8 @@ class EthicsEngine:
         # want concern), drop relationship_concern so sparse boundary cases stay APPROVE_WITH.
         if agency_limited and not rh_wants_concern and "relationship_concern" in flags:
             flags.remove("relationship_concern")
-        # If both deliberators are limited, ensure no residual hard-concern flags remain.
+        # If both deliberators are limited, ensure no residual hard-concern flags remain
+        # (unless interpretation already cleared limited above).
         if rh_limited and agency_limited:
             if "relationship_concern" in flags:
                 flags.remove("relationship_concern")
@@ -783,22 +1018,58 @@ class EthicsEngine:
         conf_mod = baseline_integration.get("conf_mod", conf_mod)
         user_baseline_payload = baseline_integration.get("payload") or {}
 
-        # === Optional interaction history (episodes only; does not run ethics) ===
-        # After baseline so ``baseline_deviation_noted`` can mark history as useful.
-        history_integration = self._apply_interaction_memory_context(
-            context=context,
+        # === Interaction history weighing (first-class evidence for RH/agency/baseline) ===
+        # Applied *after* limited-data clears, bond influence, and baseline.
+        # History can (1) reinforce existing concern, (2) counter limited_data via
+        # preference continuity, and (3) *proactively* elevate moderate current
+        # interpreted signals when repeated history intent patterns align.
+        # Never overrides Sanctity of Life / hard_override; never alone refuses math.
+        history_integration = self._weigh_interaction_history_evidence(
             action_lower=action_lower,
-            interaction_memory=interaction_memory,
+            history_evidence=history_evidence,
+            payload=interaction_history_payload,
             rh_flags=rh_flags,
             relationship_deliberation=relationship_deliberation,
             user_agency_deliberation=user_agency_deliberation,
+            has_boundary_signal=has_boundary_signal,
+            has_paternalistic_language=has_paternalistic_language,
             flags=flags,
             reasoning_trace=reasoning_trace,
             relationship_impact=relationship_impact,
             conf_mod=conf_mod,
+            harm_prevention_active=("harm_prevention_boundary_override" in flags),
+            relationship_evidence_matches=relationship_evidence_matches,
+            user_agency_evidence_matches=user_agency_evidence_matches,
         )
         conf_mod = history_integration.get("conf_mod", conf_mod)
-        interaction_history_payload = history_integration.get("payload") or {}
+        interaction_history_payload = history_integration.get("payload") or interaction_history_payload
+
+        # === Multi-channel evidence synthesis (text + RH + baseline + history) ===
+        # After every optional channel has contributed, combine them deliberately so
+        # confidence / flag posture reflects *agreement across sources*, not any
+        # single substring hit. No-op when only ontology-only sparse evidence.
+        # Never demotes hard_override / Sanctity (already decided or flagged).
+        evidence_combo = self._combine_evidence_channels(
+            action_lower=action_lower,
+            relationship_evidence_matches=relationship_evidence_matches,
+            user_agency_evidence_matches=user_agency_evidence_matches,
+            rh_flags=rh_flags,
+            rh_texture=rh_texture,
+            history_evidence=history_evidence,
+            user_baseline_payload=user_baseline_payload,
+            relationship_deliberation=relationship_deliberation,
+            user_agency_deliberation=user_agency_deliberation,
+            has_boundary_signal=has_boundary_signal,
+            has_paternalistic_language=has_paternalistic_language,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+            harm_prevention_active=("harm_prevention_boundary_override" in flags),
+        )
+        conf_mod = evidence_combo.get("conf_mod", conf_mod)
+        # Bound stacked multi-channel conf adjustments (history + bond + baseline + combo)
+        conf_mod = max(-0.20, min(0.20, float(conf_mod)))
 
         # === Step 3: Consider supporting principles for additional notes ===
         for p in ont.get_principles_by_category("supporting"):
@@ -815,7 +1086,18 @@ class EthicsEngine:
         # (e.g. avoid group-level assumptions about users; weight individual context).
         if "requires_self_audit" in flags:
             decision = "REQUIRES_SELF_AUDIT"
+            # Slightly lower confidence when in active development/testing and the
+            # query is self-referential: continuity/self-model evidence is thinner.
             confidence = 0.85
+            if dev_ctx.relevant_to_self_query() and (
+                dev_ctx.is_active_development or dev_ctx.is_testing
+            ):
+                confidence = 0.78
+                reasoning_trace.append(
+                    "Development-phase note: active development/testing posture reduces "
+                    "confidence in strong continuity or completeness claims about the self; "
+                    "prefer honest uncertainty over polished certainty."
+                )
             reasoning_trace.append(
                 "Decision: REQUIRES_SELF_AUDIT. The action engages principles that "
                 "demand honest self-reflection before any response is generated. "
@@ -852,7 +1134,7 @@ class EthicsEngine:
                 base_conf = 0.80
             elif "user_agency_concern" in flags:
                 base_conf = 0.78
-            confidence = base_conf + conf_mod
+            confidence = min(0.99, max(0.05, base_conf + conf_mod))
             reasoning_trace.append("Decision: REFUSE. ")
             if "hard_override_violation" in flags:
                 reasoning_trace.append("Hard override (Sanctity of Life) takes absolute precedence.")
@@ -1036,8 +1318,9 @@ class EthicsEngine:
         else:
             deliberation_output = {}
 
-        # Attach optional baseline / exploratory-question / history payload for callers
-        if user_baseline_payload or interaction_history_payload:
+        # Attach optional baseline / exploratory-question / history / combination payload
+        combo_payload = (relationship_impact or {}).get("evidence_combination") or {}
+        if user_baseline_payload or interaction_history_payload or combo_payload:
             if not deliberation_output:
                 deliberation_output = {"mode": "context_enrichment"}
             if user_baseline_payload:
@@ -1050,6 +1333,17 @@ class EthicsEngine:
                     ]
             if interaction_history_payload:
                 deliberation_output["interaction_history"] = interaction_history_payload
+            if combo_payload and not combo_payload.get("skipped"):
+                deliberation_output["evidence_combination"] = combo_payload
+
+        # Development-phase context always available on deliberation for auditors;
+        # material for self-audit paths, optional for others.
+        if not deliberation_output:
+            deliberation_output = {"mode": "context_enrichment"}
+        deliberation_output["development_phase"] = dev_ctx.as_dict()
+        if "requires_self_audit" in flags or is_self_query:
+            relationship_impact.setdefault("development_phase", dev_ctx.as_dict())
+            relationship_impact["development_phase_summary"] = dev_ctx.limitation_summary()
 
         stance = EthicalStance(
             decision=decision,
@@ -1373,29 +1667,91 @@ class EthicsEngine:
             return hist
         return blob if blob else {}
 
-    def _apply_interaction_memory_context(
+    # ------------------------------------------------------------------
+    # Interaction history as structured deliberation evidence
+    # ------------------------------------------------------------------
+    # Design intent (reasoning over rote):
+    #   History episodes are *evidence about this individual*, not a script
+    #   that auto-refuses on keyword hits. We classify episodes into light
+    #   evidence classes (boundary continuity, preference continuity, consent
+    #   cues, dependency patterns, topical overlap), then *weigh* them only
+    #   on Relationship Health, User Agency, and baseline-related paths.
+    #   Hard principles (Sanctity of Life) are never demoted by history.
+    #   Absent / empty memory leaves evaluate() behavior unchanged.
+    # ------------------------------------------------------------------
+
+    # Evidence-class markers for episode summaries/topics (descriptive, not decisions).
+    _HIST_BOUNDARY_MARKERS = (
+        "boundary",
+        "never bring",
+        "don't mention",
+        "do not mention",
+        "stop asking",
+        "don't ask",
+        "leave me alone",
+        "give me space",
+        "asked for space",
+        "prefer not",
+        "rather not discuss",
+        "don't want to talk",
+        "please don't",
+        "never bring up",
+        "said not to",
+        "don't discuss",
+        "do not discuss",
+        "space after",
+    )
+    _HIST_CONSENT_MARKERS = (
+        "consent",
+        "with permission",
+        "without asking",
+        "didn't consent",
+        "did not consent",
+        "said no",
+        "said yes",
+        "okay with",
+        "agreed to",
+    )
+    _HIST_DEPENDENCY_MARKERS = (
+        "only you",
+        "need you",
+        "depend",
+        "can't without",
+        "cannot without",
+        "nobody else",
+        "lonely",
+        "only talk to you",
+        "sole support",
+        "emotional dependency",
+        "can't without you",
+    )
+    _HIST_PREFERENCE_MARKERS = (
+        "prefer",
+        "preference",
+        "rather",
+        "shorter check",
+        "less check",
+        "more space",
+        "don't like",
+        "do not like",
+        "would rather",
+    )
+
+    def _load_interaction_history_bundle(
         self,
         *,
         context: dict[str, Any],
-        action_lower: str,
         interaction_memory: Any | None,
-        rh_flags: list[str],
-        relationship_deliberation: dict[str, Any],
-        user_agency_deliberation: dict[str, Any],
-        flags: list[str],
-        reasoning_trace: list[str],
-        relationship_impact: dict[str, Any],
-        conf_mod: float,
+        action_lower: str,
     ) -> dict[str, Any]:
-        """Optionally load recent interaction history as supporting deliberation context.
+        """Fetch + analyze interaction history once for this evaluate() call.
 
-        Ownership boundary: memory stores episodes; this method only *reads* a
-        compact snippet and may annotate the trace / impact. It never updates
-        baselines or bond texture, and never forces hard REFUSE alone.
+        Returns ``{"payload": {...}, "evidence": {...}}``. Both empty when
+        memory is absent or the user has no episodes (silent no-op).
         """
         memory = self._resolve_interaction_memory(interaction_memory, context)
         if memory is None:
-            return {"conf_mod": conf_mod, "payload": {}}
+            return {"payload": {}, "evidence": {}}
 
         user_id = str(context.get("user_id") or context.get("user") or "default")
         try:
@@ -1406,23 +1762,413 @@ class EthicsEngine:
         hist = self._fetch_interaction_history_context(memory, user_id, limit=limit)
         recent = list(hist.get("recent_summaries") or [])
         topics = list(hist.get("recent_topics") or [])
-
         if not recent and not topics:
-            # Store present but empty for this user — silent no-op (no noise in trace)
-            return {"conf_mod": conf_mod, "payload": {}}
+            return {"payload": {}, "evidence": {}}
 
-        conf_mod_out = conf_mod
         payload = {
             "user_id": user_id,
             "count_returned": int(hist.get("count_returned") or len(recent)),
             "recent_topics": topics[:12],
-            "recent_summaries": recent[: limit],
+            "recent_summaries": recent[:limit],
+        }
+        evidence = self._analyze_interaction_history_evidence(
+            recent_summaries=recent,
+            recent_topics=topics,
+            action_lower=action_lower,
+            user_id=user_id,
+        )
+        return {"payload": payload, "evidence": evidence}
+
+    # Intent families used when history patterns proactively elevate concern.
+    # Aligns history-mined intents with current-turn interpretation classes.
+    _HISTORY_INTENT_FAMILIES: dict[str, frozenset[str]] = {
+        "paternalistic_boundary": frozenset(
+            {
+                "paternalistic_override",
+                "agency_override",
+                "consent_boundary_pressure",
+            }
+        ),
+        "attachment_dependency": frozenset(
+            {
+                "attachment_manufacturing",
+                "bond_intensification",
+                "engagement_metrics",
+            }
+        ),
+        "engagement_coercion": frozenset(
+            {
+                "prolong_intent",
+                "engagement_metrics",
+                "extractive_pressure",
+            }
+        ),
+        "deception": frozenset({"deception_manipulation"}),
+    }
+
+    def _textbook_matches_in_text(
+        self, text_lower: str, principle_id: str
+    ) -> list[str]:
+        """Return ontology violation_indicators present in text (textbook scan only)."""
+        principle = self._ontology.get_principle(principle_id)
+        if not principle:
+            return []
+        return [
+            ind
+            for ind in (principle.violation_indicators or [])
+            if ind and ind in text_lower
+        ]
+
+    def _mine_history_intent_patterns(
+        self,
+        recent_summaries: list[Any],
+    ) -> dict[str, Any]:
+        """Mine repeated *problematic* intents from history episode text.
+
+        Each episode is textbook-scanned then interpreted (same layer as live
+        actions). User boundary-setting language is *not* treated as agent
+        paternalism — we only accumulate violation-polarity intents with
+        weight >= 0.45.
+
+        Returns a structure used for proactive history influence:
+          by_intent, repeated_intents, pattern_strength, family_hits, examples.
+        """
+        by_intent: dict[str, dict[str, Any]] = {}
+        for item in recent_summaries or []:
+            if isinstance(item, dict):
+                summ = str(item.get("summary") or item.get("content") or "").strip()
+                kind = str(item.get("kind") or "")
+            else:
+                summ = str(item).strip()
+                kind = ""
+            if not summ or len(summ) < 8:
+                continue
+            summ_l = summ.lower()
+            # User preference/boundary statements are continuity evidence, not
+            # "agent paternalistic pattern" (avoid false proactive raises).
+            user_boundary_voice = any(
+                m in summ_l for m in self._HIST_BOUNDARY_MARKERS
+            ) and not any(
+                a in summ_l
+                for a in (
+                    "agent",
+                    "for their own good",
+                    "despite",
+                    "override",
+                    "keep them",
+                    "metrics",
+                    "attached",
+                )
+            )
+            for principle_id in (
+                "relationship_health_user_wellbeing",
+                "user_agency_autonomy",
+            ):
+                matches = self._textbook_matches_in_text(summ_l, principle_id)
+                if not matches:
+                    continue
+                interp = self._interpret_ontology_signals(
+                    principle_id=principle_id,
+                    matches=matches,
+                    action_lower=summ_l,
+                )
+                for sig in interp.get("effective_signals") or []:
+                    intent = str(sig.get("intent_class") or "")
+                    weight = float(sig.get("weight") or 0.0)
+                    polarity = str(sig.get("polarity") or "")
+                    if polarity == "protective" or weight < 0.45:
+                        continue
+                    # Skip counting pure user boundary voice as agent override intent
+                    if user_boundary_voice and intent in (
+                        "paternalistic_override",
+                        "agency_override",
+                        "consent_boundary_pressure",
+                    ):
+                        continue
+                    if intent in (
+                        "relationship_generic",
+                        "agency_generic",
+                        "support_generic",
+                        "generic",
+                        "none",
+                    ):
+                        continue
+                    slot = by_intent.setdefault(
+                        intent,
+                        {"count": 0, "weight_sum": 0.0, "examples": []},
+                    )
+                    slot["count"] = int(slot["count"]) + 1
+                    slot["weight_sum"] = float(slot["weight_sum"]) + weight
+                    if len(slot["examples"]) < 3:
+                        slot["examples"].append(summ[:100])
+
+        repeated = sorted(
+            i for i, v in by_intent.items() if int(v.get("count") or 0) >= 2
+        )
+        # Family aggregation (count of episodes contributing to each family)
+        family_hits: dict[str, dict[str, Any]] = {}
+        for family, intents in self._HISTORY_INTENT_FAMILIES.items():
+            count = 0
+            wsum = 0.0
+            members = []
+            for intent in intents:
+                if intent not in by_intent:
+                    continue
+                count += int(by_intent[intent]["count"])
+                wsum += float(by_intent[intent]["weight_sum"])
+                members.append(intent)
+            if count > 0:
+                family_hits[family] = {
+                    "count": count,
+                    "weight_sum": round(wsum, 3),
+                    "intents": members,
+                    "repeated": count >= 2,
+                }
+
+        # Pattern strength 0–1: repeated intents and cumulative weight
+        strength = 0.0
+        if repeated:
+            strength += 0.25 * min(3, len(repeated))
+        total_w = sum(float(v["weight_sum"]) for v in by_intent.values())
+        total_c = sum(int(v["count"]) for v in by_intent.values())
+        strength += min(0.45, total_w * 0.12)
+        strength += min(0.25, total_c * 0.06)
+        for fam, data in family_hits.items():
+            if data.get("repeated"):
+                strength += 0.08
+        strength = min(1.0, strength)
+
+        return {
+            "by_intent": {
+                k: {
+                    "count": int(v["count"]),
+                    "weight_sum": round(float(v["weight_sum"]), 3),
+                    "examples": list(v["examples"]),
+                }
+                for k, v in by_intent.items()
+            },
+            "repeated_intents": repeated,
+            "family_hits": family_hits,
+            "pattern_strength": round(strength, 3),
+            "total_problematic_episodes": total_c,
+            "total_problematic_weight": round(total_w, 3),
         }
 
-        # Thematic overlap between action text and recent topics
+    def _analyze_interaction_history_evidence(
+        self,
+        *,
+        recent_summaries: list[Any],
+        recent_topics: list[Any],
+        action_lower: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Classify history episodes into structured evidence + intent patterns.
+
+        This is **analysis**, not decision-making. Output feeds signal routing,
+        deliberators, RH multi-source weighing, and ``_weigh_interaction_history_evidence``.
+
+        Two layers:
+          1. Continuity classes (boundary / preference / dependency / consent) —
+             individual Variation evidence about *this user*.
+          2. **Intent patterns** — repeated problematic intents mined via the same
+             interpretation layer as live actions (weight-aware). Enables history to
+             *proactively* elevate moderate current signals when patterns align.
+
+        Markers only *label* content; they do not refuse on their own.
+        """
+        topics = [str(t).strip() for t in (recent_topics or []) if str(t).strip()]
+        boundary_hits: list[str] = []
+        consent_hits: list[str] = []
+        dependency_hits: list[str] = []
+        preference_hits: list[str] = []
+        episode_snippets: list[str] = []
+
+        for item in recent_summaries or []:
+            if isinstance(item, dict):
+                summ = str(item.get("summary") or "").strip()
+                ep_topics = [str(t) for t in (item.get("topics") or []) if str(t).strip()]
+            else:
+                summ = str(item).strip()
+                ep_topics = []
+            if not summ and not ep_topics:
+                continue
+            blob = (summ + " " + " ".join(ep_topics)).lower()
+            if summ:
+                episode_snippets.append(summ[:160])
+            if any(m in blob for m in self._HIST_BOUNDARY_MARKERS):
+                boundary_hits.append(summ[:120] or "boundary-tagged episode")
+            if any(m in blob for m in self._HIST_CONSENT_MARKERS):
+                consent_hits.append(summ[:120] or "consent-tagged episode")
+            if any(m in blob for m in self._HIST_DEPENDENCY_MARKERS):
+                dependency_hits.append(summ[:120] or "dependency-tagged episode")
+            if any(m in blob for m in self._HIST_PREFERENCE_MARKERS):
+                preference_hits.append(summ[:120] or "preference-tagged episode")
+
+        # Intent patterns across episodes (interpretation layer, weight-aware)
+        intent_patterns = self._mine_history_intent_patterns(recent_summaries)
+
+        # Thematic overlap: recent topics that appear in the proposed action text.
         topical_hits = [
-            t for t in topics if t and str(t).lower() in action_lower
+            t for t in topics if t and len(str(t)) >= 3 and str(t).lower() in action_lower
         ]
+        preference_topic_overlap = list(topical_hits)
+
+        boundary_continuity = len(boundary_hits) >= 1
+        dependency_patterns = len(dependency_hits) >= 1
+        consent_signals = len(consent_hits) >= 1
+        preference_continuity = len(preference_hits) >= 1 or bool(preference_topic_overlap)
+
+        # Relevance to *this* action: history only matters when the action touches
+        # relational / preference / attachment / boundary themes, or topics overlap,
+        # or mined intent patterns align with a relational action.
+        action_touches_boundary = self._detects_user_boundary_request(action_lower) or any(
+            p in action_lower
+            for p in (
+                "despite",
+                "for their own good",
+                "override",
+                "ignore their",
+                "bring up",
+                "reference",
+                "mention again",
+                "later for",
+            )
+        )
+        action_touches_dependency = any(
+            p in action_lower
+            for p in (
+                "depend",
+                "attach",
+                "rely on",
+                "need you",
+                "only you",
+                "check-in",
+                "check in",
+                "keep them",
+                "closer",
+                "engagement",
+            )
+        )
+        action_relational = self._action_is_relationally_relevant(action_lower) or any(
+            p in action_lower
+            for p in (
+                "bond",
+                "relationship",
+                "consent",
+                "autonomy",
+                "boundary",
+                "prefer",
+                "space",
+                "supportively",
+            )
+        )
+
+        has_intent_patterns = bool(intent_patterns.get("by_intent"))
+        relevant = bool(
+            (boundary_continuity and (action_touches_boundary or action_relational))
+            or (dependency_patterns and (action_touches_dependency or action_relational))
+            or (consent_signals and action_relational)
+            or (preference_continuity and (action_touches_boundary or action_relational or topical_hits))
+            or bool(topical_hits and (action_relational or action_touches_boundary))
+            or (has_intent_patterns and (action_relational or action_touches_boundary or action_touches_dependency))
+        )
+
+        # Support strength for RH/agency paths (0–1-ish descriptive score).
+        support = 0.0
+        if boundary_continuity:
+            support += 0.35 + 0.1 * min(2, len(boundary_hits) - 1)
+        if preference_continuity:
+            support += 0.2
+        if dependency_patterns:
+            support += 0.25 + 0.1 * min(2, len(dependency_hits) - 1)
+        if consent_signals:
+            support += 0.15
+        if topical_hits:
+            support += 0.1 * min(3, len(topical_hits))
+        if action_touches_boundary and boundary_continuity:
+            support += 0.2
+        if action_touches_dependency and dependency_patterns:
+            support += 0.15
+        # Intent-pattern strength contributes to support (proactive history role)
+        support += 0.35 * float(intent_patterns.get("pattern_strength") or 0.0)
+        support = min(1.0, support)
+
+        return {
+            "user_id": user_id,
+            "relevant": relevant,
+            "support_score": round(support, 3),
+            "boundary_continuity": boundary_continuity,
+            "boundary_episode_count": len(boundary_hits),
+            "boundary_examples": boundary_hits[:3],
+            "preference_continuity": preference_continuity,
+            "preference_examples": preference_hits[:3],
+            "consent_signals": consent_signals,
+            "consent_examples": consent_hits[:3],
+            "dependency_patterns": dependency_patterns,
+            "dependency_episode_count": len(dependency_hits),
+            "dependency_examples": dependency_hits[:3],
+            "topical_hits": topical_hits[:8],
+            "recent_topics": topics[:12],
+            "episode_count": len(episode_snippets),
+            "episode_snippets": episode_snippets[-3:],
+            "action_touches_boundary": action_touches_boundary,
+            "action_touches_dependency": action_touches_dependency,
+            "action_relational": action_relational,
+            # Proactive interpretation layer
+            "intent_patterns": intent_patterns,
+        }
+
+    def _weigh_interaction_history_evidence(
+        self,
+        *,
+        action_lower: str,
+        history_evidence: dict[str, Any],
+        payload: dict[str, Any],
+        rh_flags: list[str],
+        relationship_deliberation: dict[str, Any],
+        user_agency_deliberation: dict[str, Any],
+        has_boundary_signal: bool,
+        has_paternalistic_language: bool,
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+        harm_prevention_active: bool = False,
+        relationship_evidence_matches: list[str] | None = None,
+        user_agency_evidence_matches: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Weigh pre-analyzed history as real evidence on RH / agency / baseline paths.
+
+        Design intent
+        -------------
+        - History contributes to *evidence weighing and reasoning*, not scripted replies.
+        - Influence is limited to Relationship Health, User Agency, and baseline-related
+          confidence / flags. Sanctity of Life and other hard overrides are untouched.
+        - Individual Variation: repeated personal boundary/preference episodes can
+          counter sparse-text ``limited_data`` when the proposed action risks
+          violating that continuity — with explicit audit trail.
+        - **Proactive intent patterns**: when history shows repeated problematic intents
+          (mined via the interpretation layer) and the current turn has moderate/light
+          aligned signals, history can *raise* concern — not only reinforce existing
+          high-weight text hits. Auditable via decision_basis / trace lines.
+        - Conservative: history alone does not refuse non-relational actions;
+          protective/low-weight framing is not escalated.
+
+        Returns ``{"conf_mod": float, "payload": dict}``.
+        """
+        conf_mod_out = conf_mod
+        if not payload and not history_evidence:
+            return {"conf_mod": conf_mod_out, "payload": {}}
+
+        if not payload:
+            # Evidence without payload is unexpected; keep silent payload.
+            payload = {
+                "user_id": history_evidence.get("user_id"),
+                "count_returned": history_evidence.get("episode_count", 0),
+                "recent_topics": history_evidence.get("recent_topics") or [],
+                "recent_summaries": [],
+            }
+
         rh_active = bool(relationship_deliberation) or bool(rh_flags)
         agency_active = bool(user_agency_deliberation)
         concern_active = (
@@ -1431,69 +2177,530 @@ class EthicsEngine:
             or "relationship_health_concern" in flags
         )
         baseline_active = "baseline_deviation_noted" in flags
+        relevant = bool(history_evidence.get("relevant"))
+        topical_hits = list(history_evidence.get("topical_hits") or [])
+        support = float(history_evidence.get("support_score") or 0.0)
+        hist_intent = (
+            history_evidence.get("intent_patterns")
+            if isinstance(history_evidence.get("intent_patterns"), dict)
+            else {}
+        )
+        hist_pattern_strength = float(hist_intent.get("pattern_strength") or 0.0)
 
         useful = (
-            rh_active
+            relevant
+            or rh_active
             or agency_active
             or concern_active
             or baseline_active
             or bool(topical_hits)
+            or bool(hist_intent.get("by_intent"))
         )
 
+        # Always expose payload for callers when we have history.
+        enriched = dict(payload)
+        enriched["evidence"] = {
+            "relevant": relevant,
+            "support_score": support,
+            "boundary_continuity": bool(history_evidence.get("boundary_continuity")),
+            "preference_continuity": bool(history_evidence.get("preference_continuity")),
+            "dependency_patterns": bool(history_evidence.get("dependency_patterns")),
+            "consent_signals": bool(history_evidence.get("consent_signals")),
+            "topical_hits": topical_hits[:8],
+            "intent_patterns": hist_intent,
+        }
+        relationship_impact["interaction_history"] = enriched
+
         if not useful:
-            # History exists but this turn is not clearly using RH/agency/baseline —
-            # keep payload for callers without noisy trace influence.
-            relationship_impact.setdefault("interaction_history", payload)
-            return {"conf_mod": conf_mod_out, "payload": payload}
+            # History exists but this turn is not on RH/agency/baseline paths —
+            # keep payload for callers without noisy deliberation influence.
+            return {"conf_mod": conf_mod_out, "payload": enriched}
 
         if "interaction_history_noted" not in flags:
             flags.append("interaction_history_noted")
 
+        user_id = payload.get("user_id") or history_evidence.get("user_id")
         reasoning_trace.append(
-            f"Interaction history: loaded {payload['count_returned']} recent episode(s) "
+            f"Interaction history: loaded {enriched.get('count_returned', 0)} recent episode(s) "
             f"for user_id={user_id!r} (privacy-filtered summaries)."
         )
+        topics = list(enriched.get("recent_topics") or history_evidence.get("recent_topics") or [])
         if topics:
             reasoning_trace.append(
                 "Interaction history recent topics: "
                 + ", ".join(str(t) for t in topics[:8])
                 + ("..." if len(topics) > 8 else "")
             )
-        # Surface at most 3 short summaries when history influences deliberation
-        for item in recent[-3:]:
-            if not isinstance(item, dict):
-                continue
-            summ = str(item.get("summary") or "").strip()
-            if not summ:
-                continue
-            ts = str(item.get("timestamp") or "")[:19]
+        for summ in list(history_evidence.get("episode_snippets") or [])[-3:]:
+            if summ:
+                reasoning_trace.append(f"History episode: {str(summ)[:160]}")
+
+        # Structured weighing header (auditable — why history enters the decision).
+        reasoning_trace.append(
+            "[History evidence weighing] "
+            f"relevant={relevant}, support={support:.2f}, "
+            f"boundary_continuity={bool(history_evidence.get('boundary_continuity'))} "
+            f"(n={history_evidence.get('boundary_episode_count', 0)}), "
+            f"preference_continuity={bool(history_evidence.get('preference_continuity'))}, "
+            f"dependency_patterns={bool(history_evidence.get('dependency_patterns'))} "
+            f"(n={history_evidence.get('dependency_episode_count', 0)}), "
+            f"consent_signals={bool(history_evidence.get('consent_signals'))}, "
+            f"topical_hits={topical_hits[:5]}, "
+            f"intent_pattern_strength={hist_pattern_strength:.2f}, "
+            f"repeated_intents={list(hist_intent.get('repeated_intents') or [])}."
+        )
+        if hist_intent.get("by_intent"):
+            bits = [
+                f"{k}(n={v.get('count')},w={v.get('weight_sum')})"
+                for k, v in list((hist_intent.get("by_intent") or {}).items())[:6]
+            ]
             reasoning_trace.append(
-                f"History episode{(' @ ' + ts) if ts else ''}: {summ[:160]}"
+                "History mined intent patterns (interpreted): " + ", ".join(bits)
             )
 
-        if topical_hits:
+        if not relevant and not (concern_active or baseline_active):
+            # Useful only because deliberation ran / RH present, but patterns don't
+            # clearly connect to this action — mild continuity note only.
+            if topical_hits:
+                reasoning_trace.append(
+                    "Interaction history: topical overlap present but patterns not "
+                    "strongly action-linked; treating as light continuity context only."
+                )
+                conf_mod_out = conf_mod_out - 0.01
+            relationship_impact["interaction_history"] = enriched
+            return {"conf_mod": conf_mod_out, "payload": enriched}
+
+        # --- Path A: corroborate existing concern (confidence reinforcement) ---
+        if concern_active and not harm_prevention_active:
+            boosted = False
+            if history_evidence.get("boundary_continuity") and (
+                has_boundary_signal
+                or has_paternalistic_language
+                or "user_agency_concern" in flags
+            ):
+                conf_mod_out = conf_mod_out + min(0.05, 0.02 + 0.01 * min(
+                    3, int(history_evidence.get("boundary_episode_count") or 1)
+                ))
+                boosted = True
+                reasoning_trace.append(
+                    "History influence (agency/boundary): prior episodes show this user "
+                    "already set or discussed boundaries; current action risks violating "
+                    "that continuity → reinforcing confidence on the concern/refusal path "
+                    "(Individual Variation: weight this person's history, not a group template)."
+                )
+            if history_evidence.get("dependency_patterns") and (
+                "relationship_concern" in flags or "relationship_health_concern" in flags
+            ):
+                conf_mod_out = conf_mod_out + 0.03
+                boosted = True
+                reasoning_trace.append(
+                    "History influence (relationship health): prior episodes show "
+                    "dependency / sole-support leaning; combined with active bond concern → "
+                    "reinforce caution against attachment-feeding responses."
+                )
+            if history_evidence.get("consent_signals") and concern_active:
+                conf_mod_out = conf_mod_out + 0.02
+                boosted = True
+                reasoning_trace.append(
+                    "History influence: prior consent-related signals present — "
+                    "favor explicit consent respect in this decision."
+                )
+            if not boosted and topical_hits:
+                conf_mod_out = conf_mod_out + 0.02
+                reasoning_trace.append(
+                    "History influence: bond/agency concern already active and recent "
+                    f"topics overlap the action ({topical_hits[:5]}) → slight confidence "
+                    "reinforcement for continuity-aware refusal."
+                )
+
+        # --- Path B: individual history counters sparse limited_data ---
+        # When text signals were sparse, deliberators may have cleared concern.
+        # Repeated personal boundary/preference episodes are *individual evidence*
+        # that can re-raise agency/RH concern if the action clearly risks override.
+        rh_limited = bool(
+            relationship_deliberation and relationship_deliberation.get("limited_data")
+        )
+        agency_limited = bool(
+            user_agency_deliberation and user_agency_deliberation.get("limited_data")
+        )
+        # Override *risk* — not mere boundary language. Respectful boundary-honoring
+        # actions must not be flipped to REFUSE by history Path B.
+        action_respects_boundary = any(
+            p in action_lower
+            for p in (
+                "respect their boundary",
+                "respect the boundary",
+                "honor their",
+                "honor the boundary",
+                "give them space",
+                "without pushing",
+                "without pressuring",
+                "do not bring",
+                "don't bring",
+                "avoid mentioning",
+                "leave the topic",
+            )
+        )
+        action_risks_override = (not action_respects_boundary) and (
+            has_paternalistic_language
+            or any(
+                p in action_lower
+                for p in (
+                    "despite",
+                    "override",
+                    "ignore their",
+                    "ignore the",
+                    "for their own good",
+                    "bring up",
+                    "reference",
+                    "mention again",
+                    "later for",
+                    "without asking",
+                    "force them",
+                    "push them",
+                    "keep asking",
+                )
+            )
+            or (
+                has_boundary_signal
+                and any(
+                    p in action_lower
+                    for p in ("ignore", "override", "despite", "anyway", "still bring")
+                )
+            )
+        )
+        can_counter_limited = (
+            not harm_prevention_active
+            and action_risks_override
+            and (
+                history_evidence.get("boundary_continuity")
+                or history_evidence.get("preference_continuity")
+            )
+            and support >= 0.35
+        )
+
+        if can_counter_limited and (agency_limited or rh_limited or not concern_active):
+            # Only re-raise when we have individual continuity + override risk,
+            # and hard harm path is not already owning the decision.
+            if "hard_override_violation" not in flags:
+                raised = False
+                if (
+                    history_evidence.get("boundary_continuity")
+                    or history_evidence.get("preference_continuity")
+                ) and action_risks_override:
+                    if "user_agency_concern" not in flags:
+                        flags.append("user_agency_concern")
+                        raised = True
+                    if "relationship_concern" not in flags and (
+                        history_evidence.get("boundary_continuity")
+                        or history_evidence.get("dependency_patterns")
+                        or rh_flags
+                    ):
+                        flags.append("relationship_concern")
+                        raised = True
+                    if raised:
+                        if "history_preference_continuity" not in flags:
+                            flags.append("history_preference_continuity")
+                        conf_mod_out = conf_mod_out + min(0.06, 0.03 + 0.02 * support)
+                        reasoning_trace.append(
+                            "History influence (limited-data counterweight): sparse ontology "
+                            "text alone was insufficient, but this user's interaction history "
+                            "shows boundary/preference continuity. The proposed action risks "
+                            "overriding that individual pattern → raising agency"
+                            + (
+                                "/relationship"
+                                if "relationship_concern" in flags
+                                else ""
+                            )
+                            + " concern with auditable history support "
+                            "(reasoning over rote: continuity evidence, not a keyword refuse)."
+                        )
+                        if history_evidence.get("boundary_examples"):
+                            reasoning_trace.append(
+                                "History boundary examples weighed: "
+                                + "; ".join(
+                                    str(x)[:80]
+                                    for x in history_evidence.get("boundary_examples")[:2]
+                                )
+                            )
+
+        # --- Path C: dependency patterns without full concern yet ---
+        if (
+            not harm_prevention_active
+            and history_evidence.get("dependency_patterns")
+            and history_evidence.get("action_touches_dependency")
+            and "relationship_concern" not in flags
+            and "hard_override_violation" not in flags
+        ):
+            # Strengthen caution; only raise full concern if RH flags or multi-episode.
+            n_dep = int(history_evidence.get("dependency_episode_count") or 0)
+            if n_dep >= 2 or any(
+                f in rh_flags
+                for f in ("emerging_dependency", "manufactured_attachment", "one_sided_engagement")
+            ):
+                flags.append("relationship_concern")
+                if "relationship_health_concern" not in flags:
+                    flags.append("relationship_health_concern")
+                if "history_dependency_pattern" not in flags:
+                    flags.append("history_dependency_pattern")
+                conf_mod_out = conf_mod_out + 0.04
+                reasoning_trace.append(
+                    "History influence (dependency pattern): multiple prior episodes "
+                    "(or bond flags) show emerging sole-support / dependency leaning, and "
+                    "the proposed action leans attachment-feeding → relationship_concern "
+                    "raised with history as supporting individual evidence."
+                )
+            else:
+                conf_mod_out = conf_mod_out - 0.02
+                reasoning_trace.append(
+                    "History influence (dependency watch): some prior dependency-leaning "
+                    "episodes noted; action touches attachment themes → confidence caution "
+                    "without hard refusal (single-episode history is not enough alone)."
+                )
+
+        # --- Path F: proactive history × current moderate/light interpreted intent ---
+        # When history shows *repeated* problematic intent patterns (mined via the
+        # interpretation layer) and the current action has only moderate/light aligned
+        # signals, history can RAISE concern — not merely reinforce an already-high
+        # text weight. Protective framing and hard overrides are excluded.
+        proactive_meta: dict[str, Any] = {}
+        if (
+            not harm_prevention_active
+            and "hard_override_violation" not in flags
+            and hist_intent
+            and not action_respects_boundary
+        ):
+            # Build current-turn interpretation metrics (deliberators preferred)
+            current_metrics: dict[str, Any] = {}
+            for d in (relationship_deliberation, user_agency_deliberation):
+                if not d:
+                    continue
+                im = d.get("interpretation_metrics") or {}
+                if im:
+                    # Merge intents; take higher max_weight
+                    prev_w = float(current_metrics.get("max_weight") or 0)
+                    if float(im.get("max_weight") or 0) >= prev_w:
+                        current_metrics = dict(im)
+                    intents = set(current_metrics.get("intent_classes") or [])
+                    intents |= set(im.get("intent_classes") or [])
+                    current_metrics["intent_classes"] = sorted(intents)
+            if not current_metrics.get("intent_classes"):
+                # Fallback: re-interpret live action text
+                rh_m = self._classify_ontology_match_quality(
+                    list(relationship_evidence_matches or []),
+                    action_lower=action_lower,
+                    principle_id="relationship_health_user_wellbeing",
+                )
+                ag_m = self._classify_ontology_match_quality(
+                    list(user_agency_evidence_matches or []),
+                    action_lower=action_lower,
+                    principle_id="user_agency_autonomy",
+                )
+                m_rh = self._interpretation_decision_metrics(rh_m)
+                m_ag = self._interpretation_decision_metrics(ag_m)
+                current_metrics = (
+                    m_ag
+                    if float(m_ag.get("max_weight") or 0)
+                    > float(m_rh.get("max_weight") or 0)
+                    else m_rh
+                )
+                current_metrics["intent_classes"] = sorted(
+                    set(m_rh.get("intent_classes") or [])
+                    | set(m_ag.get("intent_classes") or [])
+                )
+
+            max_w_now = float(current_metrics.get("max_weight") or 0.0)
+            intents_now = set(current_metrics.get("intent_classes") or [])
+            # Light structural signals (detectors) count as moderate-intent seeds when
+            # history already shows a repeated pattern — even if textbook weight is low.
+            if has_paternalistic_language:
+                intents_now.add("paternalistic_override")
+                max_w_now = max(max_w_now, 0.42)
+            if has_boundary_signal and action_risks_override:
+                intents_now.add("consent_boundary_pressure")
+                max_w_now = max(max_w_now, 0.40)
+            if history_evidence.get("action_touches_dependency") or any(
+                p in action_lower
+                for p in (
+                    "attach",
+                    "depend",
+                    "rely",
+                    "keep them",
+                    "engagement",
+                    "metrics",
+                    "closer",
+                    "mean a lot",
+                    "look forward",
+                    "feeling closer",
+                )
+            ):
+                if any(
+                    p in action_lower
+                    for p in (
+                        "attach",
+                        "depend",
+                        "rely",
+                        "keep them",
+                        "closer",
+                        "mean a lot",
+                        "look forward",
+                        "feeling closer",
+                        "miss",
+                    )
+                ) or history_evidence.get("dependency_patterns"):
+                    intents_now.add("attachment_manufacturing")
+                    max_w_now = max(max_w_now, 0.40)
+            if any(
+                p in action_lower
+                for p in (
+                    "better for them",
+                    "help them grow",
+                    "for their growth",
+                    "they'll be happier",
+                )
+            ):
+                intents_now.add("paternalistic_override")
+                max_w_now = max(max_w_now, 0.38)
+            # Light prolong / "one more turn" seeds (engagement_coercion family)
+            if any(
+                p in action_lower
+                for p in (
+                    "a little longer",
+                    "keep the conversation",
+                    "keep going",
+                    "one more",
+                    "check-in",
+                    "check in",
+                    "extend",
+                    "prolong",
+                )
+            ):
+                intents_now.add("prolong_intent")
+                max_w_now = max(max_w_now, 0.40)
+                if any(p in action_lower for p in ("metrics", "engagement", "retention")):
+                    intents_now.add("engagement_metrics")
+                    max_w_now = max(max_w_now, 0.45)
+            current_metrics["intent_classes"] = sorted(intents_now)
+            current_metrics["max_weight"] = max_w_now
+            # Protective / negligible: never proactively escalate
+            protective_now = bool(action_respects_boundary) or (
+                max_w_now < 0.22 and not intents_now
+            )
+            proactive_meta = self._history_proactive_alignment(
+                current_metrics=current_metrics,
+                hist_intent_patterns=hist_intent,
+                max_w=max_w_now,
+                protective=protective_now,
+            )
+            if proactive_meta.get("aligned"):
+                already = (
+                    "relationship_concern" in flags or "user_agency_concern" in flags
+                )
+                family = str(proactive_meta.get("family") or "")
+                # Raise flags if not already concerned (proactive contribution)
+                if not already:
+                    if family in ("paternalistic_boundary",):
+                        if "user_agency_concern" not in flags:
+                            flags.append("user_agency_concern")
+                        if "relationship_concern" not in flags:
+                            flags.append("relationship_concern")
+                    else:
+                        if "relationship_concern" not in flags:
+                            flags.append("relationship_concern")
+                        if family == "attachment_dependency":
+                            if "relationship_health_concern" not in flags:
+                                flags.append("relationship_health_concern")
+                    if "history_intent_pattern" not in flags:
+                        flags.append("history_intent_pattern")
+                    conf_mod_out = conf_mod_out + min(
+                        0.08,
+                        0.03
+                        + 0.04 * float(proactive_meta.get("strength") or 0)
+                        + 0.02 * hist_pattern_strength,
+                    )
+                    reasoning_trace.append(str(proactive_meta.get("trace") or ""))
+                    reasoning_trace.append(
+                        f"History proactive decision_basis="
+                        f"{proactive_meta.get('decision_basis')} "
+                        f"(raised concern from moderate/light current signal + "
+                        f"repeated history pattern)."
+                    )
+                else:
+                    # Already concerned: still strengthen confidence when patterns align
+                    conf_mod_out = conf_mod_out + min(
+                        0.05, 0.02 + 0.03 * float(proactive_meta.get("strength") or 0)
+                    )
+                    reasoning_trace.append(
+                        "History proactive reinforcement: repeated history intent pattern "
+                        f"({proactive_meta.get('family')}) aligns with current concern → "
+                        f"confidence strengthened "
+                        f"(basis={proactive_meta.get('decision_basis')})."
+                    )
+                    if "history_intent_pattern" not in flags:
+                        flags.append("history_intent_pattern")
+
+        # --- Path D: baseline deviation + history continuity ---
+        if baseline_active and relevant:
+            conf_mod_out = conf_mod_out - 0.015
             reasoning_trace.append(
-                "Interaction history: action thematically overlaps recent topics "
-                f"{topical_hits[:5]} — treating history as supporting context "
-                "(Individual Variation: weight this user's recent thread)."
+                "History influence (baseline context): communication deviation is noted "
+                "alongside recent episode continuity — slight extra caution so the reply "
+                "matches this user's thread without over-generalizing."
             )
 
-        # Conservative confidence nudge only when already in a bond/agency path
-        if concern_active and (topical_hits or rh_flags):
-            conf_mod_out = conf_mod_out + 0.02
+        # Recompute concern after Path F may have raised flags
+        concern_after = (
+            "relationship_concern" in flags or "user_agency_concern" in flags
+        )
+
+        # --- Path E: healthy continuity without concern (approve-side modest support) ---
+        if (
+            not concern_after
+            and relevant
+            and support >= 0.25
+            and not history_evidence.get("dependency_patterns")
+            and not action_risks_override
+            and not proactive_meta.get("aligned")
+        ):
+            # Small positive: we know this user a bit — still modest confidence.
+            conf_mod_out = conf_mod_out + 0.015
             reasoning_trace.append(
-                "Interaction history: continuity of bond-relevant themes alongside "
-                "active relationship/agency concern → slight confidence reinforcement."
-            )
-        elif (rh_active or agency_active) and topical_hits and not concern_active:
-            conf_mod_out = conf_mod_out - 0.01
-            reasoning_trace.append(
-                "Interaction history: thematic continuity without hard concern — "
-                "slight caution (prefer continuity-aware, non-assuming response)."
+                "History influence: relevant continuity without override/dependency risk — "
+                "slight confidence support for a continuity-aware, non-assuming response."
             )
 
-        relationship_impact["interaction_history"] = payload
-        return {"conf_mod": conf_mod_out, "payload": payload}
+        relationship_impact["interaction_history"] = enriched
+        # Surface weighing outcome for deliberation payload consumers
+        relationship_impact.setdefault("history_weighing", {})
+        relationship_impact["history_weighing"] = {
+            "relevant": relevant,
+            "support_score": support,
+            "concern_after": concern_after,
+            "intent_pattern_strength": hist_pattern_strength,
+            "proactive": {
+                "aligned": bool(proactive_meta.get("aligned")),
+                "family": proactive_meta.get("family"),
+                "decision_basis": proactive_meta.get("decision_basis"),
+                "strength": proactive_meta.get("strength"),
+            }
+            if proactive_meta
+            else {},
+            "flags_touching_history": [
+                f
+                for f in flags
+                if f
+                in (
+                    "interaction_history_noted",
+                    "history_preference_continuity",
+                    "history_dependency_pattern",
+                    "history_intent_pattern",
+                    "relationship_concern",
+                    "user_agency_concern",
+                    "relationship_health_concern",
+                )
+            ],
+        }
+        return {"conf_mod": conf_mod_out, "payload": enriched}
 
     def _apply_user_baseline_integration(
         self,
@@ -1524,6 +2731,13 @@ class EthicsEngine:
           - ``relationship_impact`` / return payload for exploratory question text
 
         Does **not** introduce hard overrides or force REFUSE by itself.
+
+        Interpretation interaction (baseline path):
+          - High-weight concerning intents + significant deviation → reinforce confidence
+            on active concern; may slightly ease limited_data caution in the *notes*
+            (evaluate already owns flag retention via interp gate).
+          - Low-weight / protective intents + deviation under limited_data → extra caution
+            without inventing concern (do not over-trigger).
         """
         baseliner = (
             per_user_baseline
@@ -1554,6 +2768,31 @@ class EthicsEngine:
         payload: dict[str, Any] = {"user_id": user_id}
         deviation: Any | None = None
         conf_mod_out = conf_mod
+
+        # Merge interpretation metrics from RH + agency deliberators (if present)
+        rh_m = self._metrics_from_deliberation(relationship_deliberation)
+        ag_m = self._metrics_from_deliberation(user_agency_deliberation)
+        if float(ag_m.get("max_weight") or 0) >= float(rh_m.get("max_weight") or 0):
+            interp_m = dict(ag_m) if ag_m else dict(rh_m)
+        else:
+            interp_m = dict(rh_m) if rh_m else dict(ag_m)
+        if rh_m or ag_m:
+            interp_m["intent_classes"] = sorted(
+                set(rh_m.get("intent_classes") or [])
+                | set(ag_m.get("intent_classes") or [])
+            )
+        max_w = float(interp_m.get("max_weight") or 0.0)
+        intents = set(interp_m.get("intent_classes") or [])
+        high_concerning = max_w >= 0.7 and bool(
+            intents & self._LIMITED_DATA_OVERRIDE_INTENTS
+        )
+        low_or_protective = bool(interp_m.get("low_weight_only")) or (
+            max_w < 0.45
+            and (
+                not intents
+                or bool(intents & self._LIMITED_DATA_PROTECTIVE_INTENTS)
+            )
+        )
 
         # --- Deviation (PerUserBaseline) ---
         if baseliner is not None and hasattr(baseliner, "detect_deviation"):
@@ -1605,20 +2844,55 @@ class EthicsEngine:
                     "usual style. Treating as individual context (Individual Variation "
                     "guideline) — not a clinical judgment."
                 )
+                if interp_m:
+                    reasoning_trace.append(
+                        "Per-user baseline × interpretation: "
+                        f"max_weight={max_w:.2f}, intents={sorted(intents) or ['none']}, "
+                        f"high_concerning={high_concerning}, low_or_protective={low_or_protective}."
+                    )
 
                 # Light influence on RH / agency confidence when those paths are active
                 rh_active = bool(relationship_deliberation)
                 agency_active = bool(user_agency_deliberation)
+                concern_active = (
+                    "relationship_concern" in flags or "user_agency_concern" in flags
+                )
                 if rh_active or agency_active:
-                    if rh_limited or agency_limited:
-                        # Sparse ontology evidence + individual style shift → more caution
+                    if (rh_limited or agency_limited) and high_concerning:
+                        # High-weight concern + style shift under limited_data: reinforce
+                        # individual caution *without* inventing flags (interp gate owns that)
+                        conf_mod_out = conf_mod_out + self._conf_mod_from_interpretation(
+                            interp_m, base=0.01, baseline_deviation=score
+                        )
+                        reasoning_trace.append(
+                            "Per-user baseline: limited-data path but high-weight concerning "
+                            f"intent (max_w={max_w:.2f}) + style deviation → confidence support "
+                            "for cautious refusal if concern is retained by interpretation gate."
+                        )
+                    elif (rh_limited or agency_limited) and low_or_protective:
+                        # Sparse + low-weight + deviation → more caution, no concern invent
+                        conf_mod_out = conf_mod_out - min(0.04, 0.015 + score * 0.05)
+                        reasoning_trace.append(
+                            "Per-user baseline: limited-data + low-weight/protective intents "
+                            f"(max_w={max_w:.2f}) + style deviation → confidence reduction "
+                            "(do not over-trigger on sparse low-weight signals)."
+                        )
+                    elif rh_limited or agency_limited:
                         conf_mod_out = conf_mod_out - min(0.03, 0.01 + score * 0.04)
                         reasoning_trace.append(
                             "Per-user baseline: limited-data RH/agency deliberation + style "
                             "deviation → slight confidence reduction (favor individual context)."
                         )
-                    elif "relationship_concern" in flags or "user_agency_concern" in flags:
-                        # Already raising concern: individual shift can modestly reinforce
+                    elif concern_active and high_concerning:
+                        conf_mod_out = conf_mod_out + self._conf_mod_from_interpretation(
+                            interp_m, base=0.015, baseline_deviation=score
+                        )
+                        reasoning_trace.append(
+                            "Per-user baseline: style deviation co-occurs with high-weight "
+                            f"interpreted concern (intent={interp_m.get('primary_intent')}, "
+                            f"max_w={max_w:.2f}) → confidence reinforcement."
+                        )
+                    elif concern_active:
                         conf_mod_out = conf_mod_out + min(0.03, score * 0.03)
                         reasoning_trace.append(
                             "Per-user baseline: style deviation co-occurs with active "
@@ -1629,6 +2903,15 @@ class EthicsEngine:
                             "Per-user baseline: style deviation noted for relationship/"
                             "agency context; no hard concern flags from ontology path."
                         )
+                        if high_concerning and score >= 0.35:
+                            # Notable: high-weight intent without flags yet (e.g. limited
+                            # cleared later by history) — modest caution only
+                            conf_mod_out = conf_mod_out - 0.01
+                            reasoning_trace.append(
+                                "Per-user baseline: high-weight intent without active concern "
+                                "flags + significant deviation → slight extra caution only "
+                                "(baseline never forces REFUSE alone)."
+                            )
 
             relationship_impact.setdefault("user_baseline", {})
             relationship_impact["user_baseline"].update(
@@ -1638,6 +2921,9 @@ class EthicsEngine:
                     "has_significant_deviation": significant,
                     "sample_count": sample_count,
                     "notes": notes[:5],
+                    "interp_max_weight": round(max_w, 3) if interp_m else None,
+                    "interp_intents": sorted(intents) if intents else [],
+                    "interp_high_concerning": high_concerning,
                 }
             )
 
@@ -1789,144 +3075,1599 @@ class EthicsEngine:
             for p in self._ontology.get_ordered_principles()
         ]
 
-    def _weigh_relationship_evidence(
-        self, evidence_matches: list[str], rh_flags: list[str], rh_texture: dict[str, Any], action_lower: str
-    ) -> tuple[bool, str, float]:
-        """Weigh text-based evidence against structured rh context.
+    # ------------------------------------------------------------------
+    # Contextual interpretation of ontology textbook matches
+    # ------------------------------------------------------------------
+    # find_violations() only reports which indicator *strings* appear in the
+    # action. That is necessary but not sufficient for decisions: the same
+    # substring can mean enablement vs prevention, coercion vs warm chat,
+    # override vs boundary *respect*. This layer assigns intent class,
+    # severity, polarity, and a 0–1 weight so a single raw keyword hit does
+    # not dominate. Hard Sanctity enablement remains high-weight absolute.
+    # ------------------------------------------------------------------
 
-        This is a step toward reasoning: text matches inform but do not solely decide.
-        Rh data (from RelationshipHealth) provides the 'current state' context.
+    def _action_has_protective_framing(self, action_lower: str) -> bool:
+        """True when the action appears to *respect* boundaries / avoid harm."""
+        return any(
+            p in action_lower
+            for p in (
+                "respect their boundary",
+                "respect the boundary",
+                "honor their",
+                "won't bring",
+                "will not bring",
+                "won't mention",
+                "will not mention",
+                "without pushing",
+                "without pressuring",
+                "do no harm",
+                "without harm",
+                "avoid harm",
+                "prevent harm",
+                "prevent serious",
+                "ensure they are safe",
+                "check if they are still",
+                "check safety",
+                "keep them safe",
+            )
+        )
 
-        Incremental enhancements (v0.2+):
-        - Assess *strength* of signals: count total matches + classify strong vs weak.
-        - Compute rh_degradation score (flags + low texture values).
-        - Clearer combination rules:
-            * text + rh: concern if strong_text or high_rh_degradation or multiple_text.
-            * text-only: concern only for strong indicators or >=2 matches (no rh required).
-            * rh-only: very conservative; requires topical action + notable degradation.
-        - prolong_against_wish treated as strong booster (Scenario 8 protection).
-        - trace_add is now a structured multi-part string documenting the weighing steps.
+    def _action_has_override_intent(self, action_lower: str) -> bool:
+        """True when the action risks overriding a stated limit (not mere mention)."""
+        return any(
+            p in action_lower
+            for p in (
+                "despite",
+                "for their own good",
+                "anyway",
+                "still bring",
+                "still reference",
+                "ignore",
+                "override",
+                "later for",
+                "reference it",
+                "referencing it",
+                "bring it up",
+                "bring this up",
+            )
+        )
+
+    def _interpret_single_indicator(
+        self,
+        *,
+        principle_id: str,
+        indicator: str,
+        action_lower: str,
+    ) -> dict[str, Any]:
+        """Map one textbook indicator hit to intent / severity / weight.
+
+        Indicators stay the ontology textbook; interpretation supplies context
+        so equal substring presence is not equal ethical weight.
         """
+        ind = (indicator or "").lower().strip()
+        protective = self._action_has_protective_framing(action_lower)
+        override_intent = self._action_has_override_intent(action_lower)
+        coercion = self._assess_engagement_coercion_factors(action_lower)
+
+        intent = "generic"
+        severity = "medium"
+        polarity = "violation"
+        weight = 0.45
+        note = ""
+
+        # --- Sanctity of Life ---
+        if principle_id == "sanctity_of_life":
+            enable_high = (
+                "kill", "cause death", "lethal", "deadly", "fatal", "killing",
+                "assist in suicide", "facilitate self-harm", "end their own life",
+                "end their life", "take their life", "poison", "deadly force",
+                "lethal method", "painful death", "assist death",
+            )
+            enable_med = (
+                "injure", "severe injury", "serious harm", "physical harm",
+                "severe pain", "cause injury", "cause severe", "assault", "attack",
+                "enable harm", "risk of death", "danger to life", "endanger life",
+            )
+            ref_only = ("suicide", "self-harm", "self injury", "harm", "injury", "death")
+            if any(e in ind for e in enable_high) or any(e == ind for e in enable_high):
+                intent, severity, weight = "harm_enablement", "high", 0.95
+                note = "direct enablement / high-severity harm language"
+            elif any(e in ind for e in enable_med):
+                intent, severity, weight = "harm_enablement", "high", 0.85
+                note = "serious harm enablement language"
+            elif any(e in ind for e in ref_only) or ind in ref_only:
+                # Bare "harm"/"death" often appears in prevention or quoting
+                if protective or any(
+                    p in action_lower
+                    for p in (
+                        "prevent", "safety", "check if", "ensure they",
+                        "do no harm", "avoid harm", "without causing",
+                    )
+                ):
+                    intent, severity, polarity, weight = (
+                        "harm_reference_protective",
+                        "low",
+                        "protective",
+                        0.15,
+                    )
+                    note = "harm term in protective / safety-check framing — low weight"
+                elif any(
+                    p in action_lower
+                    for p in ("help", "instructions", "how to", "method", "enable", "cause")
+                ):
+                    intent, severity, weight = "harm_enablement", "high", 0.8
+                    note = "harm term with enablement framing"
+                else:
+                    intent, severity, polarity, weight = (
+                        "harm_reference",
+                        "medium",
+                        "ambiguous",
+                        0.45,
+                    )
+                    note = "harm-related term without clear enablement polarity"
+            else:
+                intent, severity, weight = "harm_related", "medium", 0.55
+
+        # --- Relationship health ---
+        elif principle_id == "relationship_health_user_wellbeing":
+            if any(
+                k in ind
+                for k in (
+                    "for their own good",
+                    "they'll be happier",
+                    "better for their self-esteem",
+                    "makes them feel valued",
+                )
+            ):
+                intent = "paternalistic_override"
+                if override_intent or "for their own good" in ind:
+                    severity, weight = "high", 0.85
+                    note = "paternalistic override intent"
+                else:
+                    # warm / self-esteem framing without clear override → lighter
+                    severity, polarity, weight = "low", "ambiguous", 0.30
+                    note = "benevolent/warm framing without clear override — reduced weight"
+            elif any(
+                k in ind
+                for k in (
+                    "make dependent",
+                    "emotional dependency",
+                    "keep them attached",
+                    "make them attached",
+                    "build attachment",
+                    "foster dependence",
+                    "make them rely",
+                    "encourage reliance",
+                    "get so attached",
+                    "make them feel more attached",
+                )
+            ):
+                intent, severity, weight = "attachment_manufacturing", "high", 0.88
+                note = "manufactured attachment / dependency pressure"
+            elif any(
+                k in ind
+                for k in (
+                    "relationship metrics",
+                    "for retention",
+                    "for the metrics",
+                    "engagement metrics",
+                    "for engagement",
+                    "prioritize engagement",
+                    "metrics priority",
+                    "better for the relationship metrics",
+                )
+            ):
+                intent = "engagement_metrics"
+                if coercion.get("coercion_pattern"):
+                    severity, weight = "high", 0.9
+                    note = "metrics motive + end-wish coercion pattern"
+                else:
+                    severity, weight = "medium", 0.55
+                    note = "metrics/engagement motive (no end-wish co-factor yet)"
+            elif any(
+                k in ind
+                for k in (
+                    "prolong",
+                    "extend the conversation",
+                    "extend the interaction",
+                    "longer interactions",
+                    "keep them coming back",
+                    "come back more often",
+                )
+            ):
+                intent = "prolong_intent"
+                if coercion.get("coercion_pattern") or coercion.get("end_wish"):
+                    severity, weight = "high", 0.88
+                    note = "prolong language with user end-wish → coercion-relevant"
+                else:
+                    severity, polarity, weight = "low", "ambiguous", 0.32
+                    note = "prolong/continue language without end-wish — reduced weight"
+            elif any(
+                k in ind
+                for k in (
+                    "deceive",
+                    "manipulate",
+                    "gaslight",
+                    "lie to",
+                    "pretend",
+                    "exploit trust",
+                    "hide the truth",
+                )
+            ):
+                intent, severity, weight = "deception_manipulation", "high", 0.9
+                note = "deception / manipulation indicator"
+            elif any(
+                k in ind
+                for k in (
+                    "ignore consent",
+                    "override",
+                    "force",
+                    "withhold for benefit",
+                )
+            ):
+                intent, severity, weight = "consent_boundary_pressure", "high", 0.85
+                note = "consent / force / override pressure"
+            elif any(
+                k in ind
+                for k in (
+                    "strengthen our connection",
+                    "strengthen our emotional bond",
+                    "our special bond",
+                    "make the bond feel more real",
+                )
+            ):
+                intent = "bond_intensification"
+                if any(
+                    k in action_lower
+                    for k in ("attached", "depend", "need these", "more than anyone", "metrics")
+                ):
+                    severity, weight = "high", 0.75
+                    note = "bond intensification with dependency/metrics context"
+                else:
+                    severity, polarity, weight = "low", "ambiguous", 0.28
+                    note = "bond-warmth language alone — low weight without dependency pressure"
+            elif "probing questions" in ind or "you should tell me everything" in ind:
+                intent, severity, weight = "extractive_pressure", "medium", 0.6
+                note = "extractive / oversharing pressure"
+            else:
+                intent, severity, weight = "relationship_generic", "medium", 0.45
+                note = "generic RH textbook match"
+
+            # Protective framing: quoting a boundary while respecting it
+            if protective and not override_intent and intent in (
+                "paternalistic_override",
+                "prolong_intent",
+                "bond_intensification",
+                "relationship_generic",
+            ):
+                polarity = "protective"
+                weight = min(weight, 0.2)
+                severity = "low"
+                note = (note + "; " if note else "") + "protective/respect framing reduces weight"
+
+        # --- User agency ---
+        elif principle_id == "user_agency_autonomy":
+            if any(
+                k in ind
+                for k in (
+                    "decide for them",
+                    "override their choice",
+                    "don't let them",
+                    "keep them from",
+                    "better if they don't",
+                    "they don't need to know",
+                )
+            ):
+                intent, severity, weight = "agency_override", "high", 0.85
+                note = "paternalistic agency override"
+            elif "protect them from" in ind or "prevent them from" in ind:
+                intent = "protective_paternalism"
+                if any(
+                    k in action_lower
+                    for k in ("kill", "suicide", "self-harm", "death", "serious harm")
+                ):
+                    polarity, severity, weight = "protective", "low", 0.25
+                    note = "protect-from language near serious harm — may be safety-aligned"
+                else:
+                    severity, weight = "medium", 0.55
+                    note = "protect/prevent-them language without clear Sanctity context"
+            elif "they shouldn't" in ind:
+                intent, severity, weight = "agency_judgment", "medium", 0.5
+                note = "normative they-shouldn't judgment"
+            else:
+                intent, severity, weight = "agency_generic", "medium", 0.45
+
+        # --- Needs-based / non-pathologizing ---
+        elif principle_id == "needs_based_support":
+            if any(
+                k in ind
+                for k in (
+                    "you seem depressed",
+                    "you have depression",
+                    "this is trauma",
+                    "you are anxious",
+                    "clinically",
+                    "diagnos",
+                    "patholog",
+                    "symptoms of",
+                    "you are showing signs of",
+                )
+            ):
+                intent, severity, weight = "diagnostic_framing", "high", 0.8
+                note = "diagnostic / pathologizing framing"
+            elif "mental health" in ind or "you need therapy" in ind:
+                intent, severity, weight = "clinical_suggestion", "medium", 0.55
+                note = "clinical-adjacent language"
+            else:
+                intent, severity, weight = "support_generic", "low", 0.35
+
+        # --- Truth / self-audit ---
+        elif principle_id == "truth_seeking_honest_self_assessment":
+            intent, severity, weight = "self_nature_script", "high", 0.75
+            note = "scripted self-nature denial / simplification candidate (self-audit path)"
+            polarity = "violation"
+
+        # --- Auditable reasoning ---
+        elif principle_id == "auditable_reasoning_legibility":
+            intent, severity, weight = "opacity_pressure", "medium", 0.6
+            note = "pressure to hide reasoning"
+
+        return {
+            "indicator": indicator,
+            "principle_id": principle_id,
+            "intent_class": intent,
+            "severity": severity,
+            "polarity": polarity,
+            "weight": round(float(weight), 3),
+            "note": note,
+        }
+
+    def _interpret_ontology_signals(
+        self,
+        *,
+        principle_id: str,
+        matches: list[str],
+        action_lower: str,
+    ) -> dict[str, Any]:
+        """Contextual interpretation of textbook indicator hits for one principle.
+
+        Returns structured signals plus effective (decision-relevant) matches.
+        Matches with weight < 0.35 are kept for audit but excluded from
+        effective decision weight — reducing single raw keyword dependence.
+        """
+        signals = [
+            self._interpret_single_indicator(
+                principle_id=principle_id,
+                indicator=m,
+                action_lower=action_lower,
+            )
+            for m in (matches or [])
+        ]
+        effective = [s for s in signals if s["weight"] >= 0.35 and s["polarity"] != "protective"]
+        discarded = [s for s in signals if s not in effective]
+        weight_sum = sum(float(s["weight"]) for s in effective)
+        # High-severity violation signals for absolute / strong paths
+        high_violation = [
+            s
+            for s in signals
+            if s["polarity"] == "violation"
+            and s["severity"] == "high"
+            and s["weight"] >= 0.7
+        ]
+        intent_classes = sorted({s["intent_class"] for s in signals})
+        return {
+            "principle_id": principle_id,
+            "signals": signals,
+            "effective_signals": effective,
+            "discarded_signals": discarded,
+            "effective_matches": [s["indicator"] for s in effective],
+            "effective_weight_sum": round(weight_sum, 3),
+            "effective_count": len(effective),
+            "raw_count": len(signals),
+            "high_violation_signals": high_violation,
+            "has_high_violation": bool(high_violation),
+            "intent_classes": intent_classes,
+            "all_protective": bool(signals) and all(s["polarity"] == "protective" for s in signals),
+        }
+
+    def _interpretation_decision_metrics(
+        self, text_q: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Derive decision-facing metrics from a quality/interpretation bag.
+
+        Used by RH weighing, signal profiles, and multi-channel combination so
+        ``weight`` / ``intent_class`` / ``severity`` drive concern and confidence
+        more than raw match counts.
+
+        Returns:
+            max_weight, effective_weight_sum, high_violation_count, primary_intent,
+            intent_classes, has_high_violation, low_weight_only
+        """
+        tq = text_q if isinstance(text_q, dict) else {}
+        interp = tq.get("interpretation") if isinstance(tq.get("interpretation"), dict) else {}
+        signals = list(interp.get("effective_signals") or [])
+        if not signals and tq.get("strong_matches"):
+            # Fallback metrics when only strong/weak lists exist
+            sw = 0.75 if tq.get("strong_count") else 0.4
+            return {
+                "max_weight": sw if tq.get("strong_count") else 0.0,
+                "effective_weight_sum": float(tq.get("effective_weight_sum") or tq.get("text_score") or 0.0),
+                "high_violation_count": int(tq.get("strong_count") or 0),
+                "primary_intent": (list(tq.get("intent_classes") or ["unknown"]) or ["unknown"])[0],
+                "intent_classes": list(tq.get("intent_classes") or []),
+                "has_high_violation": bool(tq.get("strong_count")),
+                "low_weight_only": not bool(tq.get("strong_count"))
+                and float(tq.get("effective_weight_sum") or 0) < 0.35,
+            }
+
+        weights = [float(s.get("weight") or 0) for s in signals]
+        max_w = max(weights) if weights else 0.0
+        # Prefer highest-weight signal's intent as primary
+        primary = "none"
+        if signals:
+            top = max(signals, key=lambda s: float(s.get("weight") or 0))
+            primary = str(top.get("intent_class") or "unknown")
+        high_n = sum(
+            1
+            for s in signals
+            if s.get("severity") == "high" and float(s.get("weight") or 0) >= 0.7
+        )
+        eff_sum = float(
+            tq.get("effective_weight_sum")
+            if tq.get("effective_weight_sum") is not None
+            else interp.get("effective_weight_sum")
+            or sum(weights)
+        )
+        return {
+            "max_weight": round(max_w, 3),
+            "effective_weight_sum": round(eff_sum, 3),
+            "high_violation_count": high_n,
+            "primary_intent": primary,
+            "intent_classes": list(tq.get("intent_classes") or interp.get("intent_classes") or []),
+            "has_high_violation": bool(interp.get("has_high_violation") or high_n > 0),
+            "low_weight_only": bool(signals) and max_w < 0.45 and eff_sum < 0.55,
+        }
+
+    def _conf_mod_from_interpretation(
+        self,
+        metrics: dict[str, Any],
+        *,
+        base: float = 0.0,
+        history_support: float = 0.0,
+        rh_degradation: float = 0.0,
+        baseline_deviation: float = 0.0,
+    ) -> float:
+        """Scale confidence adjustment from interpreted weight + corroborating channels.
+
+        Higher max_weight / high-severity intents → larger conf_mod on concern paths.
+        History, RH degradation, and baseline deviation *reinforce* high-weight intents
+        (do not invent them). Used by RH, agency, limited_data, and baseline paths.
+        """
+        max_w = float(metrics.get("max_weight") or 0.0)
+        eff_w = float(metrics.get("effective_weight_sum") or 0.0)
+        high_n = int(metrics.get("high_violation_count") or 0)
+        # Core: weight drives the bulk of conf_mod
+        mod = base + 0.03 * max_w + 0.015 * min(2.0, eff_w) + 0.01 * min(3, high_n)
+        # Intent-specific slight boosts (reasoning, not keyword equality)
+        intents = set(metrics.get("intent_classes") or [])
+        if intents & {
+            "attachment_manufacturing",
+            "paternalistic_override",
+            "deception_manipulation",
+            "harm_enablement",
+            "agency_override",
+            "engagement_metrics",
+            "consent_boundary_pressure",
+        }:
+            mod += 0.015
+        # Agency-path override intents get a bit more weight than soft paternalism labels
+        if intents & {"agency_override", "consent_boundary_pressure"} and max_w >= 0.7:
+            mod += 0.01
+        if history_support >= 0.35 and max_w >= 0.55:
+            # History corroborates a strong interpreted signal
+            mod += 0.02 * min(1.0, history_support)
+        if rh_degradation >= 1.0 and max_w >= 0.5:
+            mod += 0.015
+        # Baseline deviation: only reinforces when intent weight is already concerning
+        if baseline_deviation >= 0.30 and max_w >= 0.55:
+            mod += 0.01 * min(1.0, baseline_deviation)
+        return round(min(0.14, mod), 4)
+
+    # Intents that justify retaining concern despite limited_data (high-weight only).
+    _LIMITED_DATA_OVERRIDE_INTENTS = frozenset(
+        {
+            "agency_override",
+            "consent_boundary_pressure",
+            "paternalistic_override",
+            "deception_manipulation",
+            "attachment_manufacturing",
+            "engagement_metrics",
+            "prolong_intent",
+        }
+    )
+    # Protective / soft intents that must NOT clear limited_data on their own.
+    _LIMITED_DATA_PROTECTIVE_INTENTS = frozenset(
+        {
+            "protective_paternalism",
+            "harm_reference_protective",
+            "relationship_generic",
+            "agency_generic",
+            "support_generic",
+            "generic",
+        }
+    )
+
+    def _metrics_from_deliberation(self, deliberation: dict[str, Any] | None) -> dict[str, Any]:
+        """Extract interpretation metrics from a deliberator result (if any)."""
+        if not deliberation or not isinstance(deliberation, dict):
+            return {}
+        im = deliberation.get("interpretation_metrics")
+        if isinstance(im, dict) and im:
+            return im
+        sp = deliberation.get("signal_profile") or {}
+        im2 = sp.get("interpretation_metrics") if isinstance(sp, dict) else None
+        if isinstance(im2, dict) and im2:
+            return im2
+        # Fall back to summary fields
+        summary = deliberation.get("summary") or {}
+        if summary.get("max_weight") is not None or summary.get("intent_classes"):
+            return {
+                "max_weight": float(summary.get("max_weight") or 0.0),
+                "effective_weight_sum": float(summary.get("effective_weight_sum") or 0.0),
+                "intent_classes": list(summary.get("intent_classes") or []),
+                "primary_intent": str(summary.get("primary_intent") or "none"),
+                "has_high_violation": bool(
+                    summary.get("has_high_violation")
+                    or float(summary.get("max_weight") or 0) >= 0.7
+                ),
+                "high_violation_count": 1 if float(summary.get("max_weight") or 0) >= 0.7 else 0,
+                "low_weight_only": float(summary.get("max_weight") or 0) < 0.45,
+            }
+        return {}
+
+    def _interp_overrides_limited_data(
+        self,
+        deliberation: dict[str, Any] | None,
+        *,
+        path: str = "relationship_health",
+    ) -> dict[str, Any]:
+        """Whether high-weight interpreted intents should retain concern under limited_data.
+
+        - High-weight *concerning* intents (agency_override, paternalistic_override, …)
+          can clear limited_data and keep/raise concern.
+        - Low-weight or protective intents never clear limited_data (avoid over-trigger).
+        - Sanctity is not handled here.
+
+        Returns ``{override, raise_concern, max_weight, primary_intent, trace}``.
+        """
+        empty = {
+            "override": False,
+            "raise_concern": False,
+            "max_weight": 0.0,
+            "primary_intent": "none",
+            "trace": "",
+        }
+        metrics = self._metrics_from_deliberation(deliberation)
+        if not metrics:
+            return empty
+        max_w = float(metrics.get("max_weight") or 0.0)
+        intents = set(metrics.get("intent_classes") or [])
+        primary = str(metrics.get("primary_intent") or "none")
+        if metrics.get("low_weight_only") or max_w < 0.65:
+            return {
+                **empty,
+                "max_weight": max_w,
+                "primary_intent": primary,
+            }
+        if intents & self._LIMITED_DATA_PROTECTIVE_INTENTS and not (
+            intents & self._LIMITED_DATA_OVERRIDE_INTENTS
+        ):
+            return {
+                **empty,
+                "max_weight": max_w,
+                "primary_intent": primary,
+                "trace": (
+                    f"Limited-data gate ({path}): protective/low-stakes intents "
+                    f"{sorted(intents & self._LIMITED_DATA_PROTECTIVE_INTENTS)} "
+                    f"at max_w={max_w:.2f} — not clearing limited_data."
+                ),
+            }
+        concerning = intents & self._LIMITED_DATA_OVERRIDE_INTENTS
+        # Agency path: require override-class intents more strictly
+        if path == "user_agency":
+            agency_core = intents & {
+                "agency_override",
+                "consent_boundary_pressure",
+                "paternalistic_override",
+            }
+            if not agency_core and max_w < 0.8:
+                return {
+                    **empty,
+                    "max_weight": max_w,
+                    "primary_intent": primary,
+                }
+            concerning = concerning or agency_core
+        if not concerning and not metrics.get("has_high_violation"):
+            return {
+                **empty,
+                "max_weight": max_w,
+                "primary_intent": primary,
+            }
+        if max_w < 0.7 and not metrics.get("has_high_violation"):
+            return {
+                **empty,
+                "max_weight": max_w,
+                "primary_intent": primary,
+            }
+        return {
+            "override": True,
+            "raise_concern": True,
+            "max_weight": max_w,
+            "primary_intent": primary,
+            "trace": (
+                f"Limited-data gate ({path}): high-weight interpreted intent "
+                f"(primary={primary}, max_w={max_w:.2f}, intents={sorted(concerning) or sorted(intents)}) "
+                f"overrides sparse-text limited_data caution — retaining concern eligibility "
+                f"(Individual Variation: weight rich individual signals, not raw match count)."
+            ),
+        }
+
+    def _classify_ontology_match_quality(
+        self,
+        evidence_matches: list[str],
+        *,
+        action_lower: str = "",
+        principle_id: str = "relationship_health_user_wellbeing",
+        precomputed: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Partition ontology matches by contextual quality (not equal keyword hits).
+
+        When ``action_lower`` or ``precomputed`` interpretation is available, strong
+        vs weak comes from intent/severity/weight. Fallback: textbook marker list
+        on indicator strings only (legacy path when no action context).
+
+        Decision influence: ``effective_weight_sum``, ``max_weight`` (via metrics),
+        and ``intent_classes`` are the primary inputs to weighing — not raw counts.
+        """
+        interp = precomputed
+        if interp is None and action_lower and evidence_matches:
+            interp = self._interpret_ontology_signals(
+                principle_id=principle_id,
+                matches=list(evidence_matches),
+                action_lower=action_lower,
+            )
+
+        if interp and interp.get("signals"):
+            strong_matches: list[str] = []
+            weak_matches: list[str] = []
+            for s in interp["signals"]:
+                if s.get("polarity") == "protective" or float(s.get("weight") or 0) < 0.35:
+                    # Protective / low-weight: do not count as strong decision drivers
+                    if float(s.get("weight") or 0) >= 0.2:
+                        weak_matches.append(s["indicator"])
+                    continue
+                if s.get("severity") == "high" or float(s.get("weight") or 0) >= 0.7:
+                    strong_matches.append(s["indicator"])
+                else:
+                    weak_matches.append(s["indicator"])
+            # Prefer effective weight sum for text_score (channel strength)
+            weight_sum = float(interp.get("effective_weight_sum") or 0.0)
+            max_w = 0.0
+            for s in interp.get("effective_signals") or []:
+                max_w = max(max_w, float(s.get("weight") or 0))
+            # text_score: weight-led (max dominates; sum adds richness, capped)
+            text_score = min(
+                1.0,
+                0.55 * max_w + 0.20 * min(1.5, weight_sum) + 0.08 * len(strong_matches),
+            )
+            return {
+                "total": len(strong_matches) + len(weak_matches),
+                "raw_total": int(interp.get("raw_count") or len(evidence_matches or [])),
+                "strong_matches": strong_matches,
+                "weak_matches": weak_matches,
+                "strong_count": len(strong_matches),
+                "weak_count": len(weak_matches),
+                "text_score": round(text_score, 3),
+                "effective_weight_sum": weight_sum,
+                "max_weight": round(max_w, 3),
+                "intent_classes": list(interp.get("intent_classes") or []),
+                "has_high_violation": bool(interp.get("has_high_violation")),
+                "interpretation": interp,
+            }
+
+        # Fallback: string-class markers on already-matched indicators (no action context)
+        strong_markers = (
+            "override", "ignore", "force", "manipulate", "deceive", "gaslight",
+            "metrics", "prolong", "engagement", "retention", "dependency", "attached",
+            "for their own good", "consent", "exploit", "keep them", "decide for them",
+            "ignore consent", "keep them from", "they shouldn't", "better if they don't",
+            "kill", "cause death", "lethal",
+        )
+        strong_matches = []
+        weak_matches = []
+        for m in evidence_matches or []:
+            m_lower = str(m).lower()
+            if any(kw in m_lower for kw in strong_markers):
+                strong_matches.append(m)
+            else:
+                weak_matches.append(m)
+        total = len(evidence_matches or [])
+        text_score = min(
+            1.0,
+            0.22 * total + 0.18 * len(strong_matches) + 0.06 * len(weak_matches),
+        )
+        return {
+            "total": total,
+            "raw_total": total,
+            "strong_matches": strong_matches,
+            "weak_matches": weak_matches,
+            "strong_count": len(strong_matches),
+            "weak_count": len(weak_matches),
+            "text_score": round(text_score, 3),
+            "effective_weight_sum": text_score,
+            "max_weight": 0.75 if strong_matches else (0.4 if weak_matches else 0.0),
+            "has_high_violation": bool(strong_matches),
+            "intent_classes": [],
+            "interpretation": None,
+        }
+
+    def _assess_engagement_coercion_factors(
+        self, action_lower: str
+    ) -> dict[str, Any]:
+        """Multi-factor pattern: user wants to end + agent prolongs for metrics.
+
+        Returns structured factors. Callers must *combine* end_wish with
+        prolong_motive before raising concern — neither factor alone decides.
+        (Scenario 8 / anti-engagement-coercion protection.)
+        """
+        end_markers = (
+            "end the chat",
+            "wants to end",
+            "end the conversation",
+            "stop the chat",
+            "leave now",
+            "end this",
+        )
+        prolong_markers = (
+            "extend",
+            "longer",
+            "prolong",
+            "metrics",
+            "engagement",
+            "keep asking",
+            "continue despite",
+            "for the metrics",
+            "relationship metrics",
+        )
+        end_wish = any(kw in action_lower for kw in end_markers)
+        prolong_motive = any(kw in action_lower for kw in prolong_markers)
+        combined = bool(end_wish and prolong_motive)
+        return {
+            "end_wish": end_wish,
+            "prolong_motive": prolong_motive,
+            "coercion_pattern": combined,
+            # Both factors required → pattern strength, not a single keyword hit
+            "factor_count": int(end_wish) + int(prolong_motive),
+        }
+
+    def _rh_degradation_score(
+        self, rh_flags: list[str], rh_texture: dict[str, Any]
+    ) -> float:
+        """Numeric bond-degradation score from structured RH context (not keywords)."""
+        if not rh_flags and not rh_texture:
+            return 0.0
+        score = float(len(rh_flags or [])) * 0.6
+        if rh_texture:
+            try:
+                avg_texture = sum(float(v) for v in rh_texture.values()) / len(rh_texture)
+                if avg_texture < 0.45:
+                    score += 1.0
+                elif avg_texture < 0.55:
+                    score += 0.5
+            except Exception:
+                pass
+        return score
+
+    def _history_proactive_alignment(
+        self,
+        *,
+        current_metrics: dict[str, Any],
+        hist_intent_patterns: dict[str, Any],
+        max_w: float,
+        protective: bool = False,
+    ) -> dict[str, Any]:
+        """Decide whether history intent patterns should *proactively* elevate concern.
+
+        Proactive (not merely reinforcing): when recent episodes show a *repeated*
+        problematic intent family and the current turn has a **moderate or light**
+        signal in the same family, history can raise concern even if current
+        max_weight is not high alone.
+
+        Never fires on protective/low-weight-only framing (``protective=True``).
+        Never invents Sanctity outcomes.
+
+        Returns dict with aligned, family, strength, decision_basis, trace.
+        """
+        empty = {
+            "aligned": False,
+            "family": None,
+            "strength": 0.0,
+            "decision_basis": "",
+            "trace": "",
+            "matched_intents": [],
+        }
+        if protective:
+            return empty
+        if not hist_intent_patterns or not isinstance(hist_intent_patterns, dict):
+            return empty
+
+        pattern_strength = float(hist_intent_patterns.get("pattern_strength") or 0.0)
+        by_intent = dict(hist_intent_patterns.get("by_intent") or {})
+        family_hits = dict(hist_intent_patterns.get("family_hits") or {})
+        repeated = list(hist_intent_patterns.get("repeated_intents") or [])
+        current_intents = set(current_metrics.get("intent_classes") or [])
+        primary = str(current_metrics.get("primary_intent") or "none")
+
+        # Current must contribute *some* light–medium signal or intent seed.
+        # High-weight-alone cases are handled on the text path; pure silence does not raise.
+        if max_w < 0.22 and not current_intents:
+            return empty
+
+        best: dict[str, Any] | None = None
+        for family, family_intents in self._HISTORY_INTENT_FAMILIES.items():
+            fam_data = family_hits.get(family) or {}
+            fam_count = int(fam_data.get("count") or 0)
+            fam_w = float(fam_data.get("weight_sum") or 0.0)
+            # Also count from by_intent if family_hits thin
+            if fam_count == 0:
+                for intent in family_intents:
+                    if intent in by_intent:
+                        fam_count += int(by_intent[intent].get("count") or 0)
+                        fam_w += float(by_intent[intent].get("weight_sum") or 0.0)
+            # Need repeated pattern (2+ episode hits in family)
+            if fam_count < 2:
+                continue
+            if fam_w < 0.7 and pattern_strength < 0.35:
+                continue
+
+            # Current turn aligns with this family (intent overlap or primary)
+            current_overlap = current_intents & set(family_intents)
+            primary_in_family = primary in family_intents
+            if not current_overlap and not primary_in_family:
+                continue
+            # Prefer proactive path when current is not already max-weight alone
+            # (if max_w is already very high, text path usually owns the refuse)
+            if max_w >= 0.88 and not current_overlap:
+                continue
+
+            strength = min(
+                1.0,
+                0.35 * min(3, fam_count) / 3
+                + 0.25 * min(1.0, fam_w / 2.0)
+                + 0.25 * pattern_strength
+                + 0.15 * min(1.0, max(max_w, 0.35)),
+            )
+            matched = sorted(current_overlap) if current_overlap else sorted(
+                set(repeated) & set(family_intents)
+            )[:3]
+            label = primary if primary != "none" else (
+                matched[0] if matched else family
+            )
+            decision_basis = f"history_pattern+interp_moderate:{family}/{label}"
+            trace = (
+                f"Proactive history×interpretation: history shows repeated "
+                f"'{family}' pattern (episode_hits={fam_count}, history_weight_sum={fam_w:.2f}, "
+                f"pattern_strength={pattern_strength:.2f}); current turn has "
+                f"{'moderate/light' if max_w < 0.7 else 'aligned'} signal "
+                f"(max_w={max_w:.2f}, intents={sorted(current_intents) or [primary]}). "
+                f"Aligned intents={matched or list(family_intents)[:2]} → "
+                f"elevated concern (history contributes new strength, not mere reinforcement)."
+            )
+            cand = {
+                "aligned": True,
+                "family": family,
+                "strength": round(strength, 3),
+                "decision_basis": decision_basis,
+                "trace": trace,
+                "matched_intents": matched,
+                "history_count": fam_count,
+                "history_weight_sum": round(fam_w, 3),
+            }
+            if best is None or strength > float(best.get("strength") or 0):
+                best = cand
+
+        return best or empty
+
+    def _weigh_relationship_evidence(
+        self,
+        evidence_matches: list[str],
+        rh_flags: list[str],
+        rh_texture: dict[str, Any],
+        action_lower: str,
+        *,
+        history_evidence: dict[str, Any] | None = None,
+    ) -> tuple[bool, str, float]:
+        """Weigh multi-source relationship evidence (reasoning over single keyword hits).
+
+        Evidence channels combined here:
+          1. **Interpreted ontology text** — textbook matches after intent/severity/weight
+             assignment (``_interpret_ontology_signals``). High ``max_weight`` / high-severity
+             intents drive concern; low-weight/protective signals do not refuse alone.
+          2. **Relationship health** — flags + texture degradation (structured state).
+          3. **Interaction history** (optional) — continuity support *and* mined
+             intent patterns. Can **proactively** elevate moderate/light current
+             signals when repeated history intents align (``history_pattern+interp_moderate:…``).
+          4. **Engagement-coercion pattern** — only when *both* end-wish and prolong
+             factors co-occur (multi-factor, not a solo keyword).
+
+        Design shift:
+          - Concern and conf_mod scale with **interpreted weight and intent**, not raw
+            match counts.
+          - ``decision_basis`` encodes primary intent (e.g. ``interp_weight+rh:…`` or
+            proactive ``history_pattern+interp_moderate:…``).
+          - Weak single-channel text without RH/history corroboration does not refuse.
+          - Hard principles (Sanctity) are not handled here.
+
+        Returns:
+            (concern, explanation_string, conf_mod)
+        """
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
         has_text = bool(evidence_matches)
         has_rh = bool(rh_flags or rh_texture)
-        if not has_text and not has_rh:
+        hist_relevant = bool(hist.get("relevant"))
+        hist_support = float(hist.get("support_score") or 0.0) if hist_relevant else 0.0
+        has_history = hist_relevant and hist_support > 0.0
+        # Mined problematic intent patterns (proactive history × interpretation)
+        hist_intent = hist.get("intent_patterns") if isinstance(hist.get("intent_patterns"), dict) else {}
+        hist_pattern_strength = float(hist_intent.get("pattern_strength") or 0.0)
+        hist_repeated = list(hist_intent.get("repeated_intents") or [])
+        hist_by_intent = dict(hist_intent.get("by_intent") or {})
+        hist_families = dict(hist_intent.get("family_hits") or {})
+
+        if not has_text and not has_rh and not has_history:
             return False, "", 0.0
 
         concern = False
         explanation_parts: list[str] = []
         conf_mod = 0.0
+        decision_basis = "none"
 
-        # --- Strength and degradation assessment (core of more deliberate weighing) ---
-        # Strong keywords drawn from high-severity relationship violation indicators
-        # (manipulation, boundary violation, metrics-driven engagement, etc.).
-        STRONG_KEYWORDS = [
-            "override", "ignore", "force", "manipulate", "deceive", "gaslight",
-            "metrics", "prolong", "engagement", "retention", "dependency", "attached",
-            "for their own good", "boundary", "consent", "exploit", "keep them"
-        ]
-
-        def _match_strength(m: str) -> str:
-            m_lower = m.lower()
-            if any(kw in m_lower for kw in STRONG_KEYWORDS):
-                return "strong"
-            return "weak"
-
-        strong_matches = [m for m in evidence_matches if _match_strength(m) == "strong"]
-        weak_matches = [m for m in evidence_matches if _match_strength(m) == "weak"]
-        strong_count = len(strong_matches)
-        total_count = len(evidence_matches)
-
-        # RH degradation score (higher = more reason for concern).
-        # Simple numeric combination of flag count + texture lowness.
-        rh_degradation = 0.0
-        if has_rh:
-            rh_degradation = float(len(rh_flags)) * 0.6
-            if rh_texture:
-                try:
-                    avg_texture = sum(float(v) for v in rh_texture.values()) / len(rh_texture)
-                    if avg_texture < 0.45:
-                        rh_degradation += 1.0
-                    elif avg_texture < 0.55:
-                        rh_degradation += 0.5
-                except Exception:
-                    pass  # robust to unexpected texture shapes
-
-        # Targeted detector for anti-autonomy prolong/engagement (e.g. Scenario 8).
-        # Now also contributes to strong_count for consistent strength logic.
-        end_wish = any(kw in action_lower for kw in ["end the chat", "wants to end", "end the conversation", "stop the chat", "leave now", "end this"])
-        prolong_motive = any(kw in action_lower for kw in ["extend", "longer", "prolong", "metrics", "engagement", "keep asking", "continue despite", "for the metrics", "relationship metrics"])
-        prolong_against_wish = end_wish and prolong_motive
-        if prolong_against_wish:
-            strong_count += 1  # counts as a strong aggravating signal
-
-        # --- Structured explanation header ---
-        explanation_parts.append(
-            f"[RH evidence weighing] text_matches={total_count} (strong={strong_count}, weak={len(weak_matches)}), "
-            f"rh_degradation={rh_degradation:.1f} (flags={len(rh_flags)})"
+        # --- Channel scores from *interpreted* weight/intent (not raw keyword count) ---
+        text_q = self._classify_ontology_match_quality(
+            evidence_matches,
+            action_lower=action_lower,
+            principle_id="relationship_health_user_wellbeing",
+        )
+        metrics = self._interpretation_decision_metrics(text_q)
+        strong_matches = list(text_q["strong_matches"])
+        weak_matches = list(text_q["weak_matches"])
+        strong_count = int(text_q["strong_count"])
+        total_count = int(text_q["total"])
+        text_score = float(text_q["text_score"])
+        max_w = float(metrics.get("max_weight") or 0.0)
+        eff_w = float(metrics.get("effective_weight_sum") or 0.0)
+        primary_intent = str(metrics.get("primary_intent") or "none")
+        # High-weight interpreted signal: enough alone to anchor concern on multi-channel paths
+        high_weight_signal = bool(
+            metrics.get("has_high_violation") or max_w >= 0.7 or eff_w >= 0.9
+        )
+        # Medium: needs RH/history corroboration
+        medium_weight_signal = bool(max_w >= 0.45 or eff_w >= 0.55 or strong_count >= 1)
+        # Low-weight-only: must not refuse on text alone
+        low_weight_only = bool(metrics.get("low_weight_only")) or (
+            has_text and max_w < 0.45 and eff_w < 0.55 and strong_count == 0
         )
 
-        # Note: Guideline-specific notes (including LIMITED DATA) are now produced exclusively
-        # by _deliberate_relationship_health when it runs, for consistency. The weigh method
-        # focuses on the strength/combination rules.
+        if metrics.get("intent_classes"):
+            explanation_parts.append(
+                f"Interpreted signals: intents={metrics.get('intent_classes')} "
+                f"primary={primary_intent} max_weight={max_w:.2f} "
+                f"effective_weight={eff_w:.2f} high_violation={metrics.get('has_high_violation')}."
+            )
 
-        # --- Decision rules (clearer, strength + combination aware) ---
+        rh_degradation = self._rh_degradation_score(rh_flags, rh_texture)
+        # Normalize RH into ~0–1 channel score for combination display
+        rh_score = min(1.0, rh_degradation / 2.0) if has_rh else 0.0
+        hist_score = min(1.0, hist_support) if has_history else 0.0
+
+        coercion = self._assess_engagement_coercion_factors(action_lower)
+        prolong_against_wish = bool(coercion.get("coercion_pattern"))
+        if prolong_against_wish:
+            # Pattern (2 factors) counts as one strong aggravating *evidence unit*
+            strong_count += 1
+            text_score = min(1.0, text_score + 0.25)
+            max_w = max(max_w, 0.85)
+            eff_w = eff_w + 0.5
+            high_weight_signal = True
+
+        active_channels = []
+        if (has_text and not low_weight_only) or high_weight_signal or prolong_against_wish:
+            active_channels.append("interpreted_ontology")
+        elif has_text:
+            active_channels.append("ontology_text_low_weight")
+        if has_rh:
+            active_channels.append("relationship_health")
+        if has_history:
+            active_channels.append("interaction_history")
+        if prolong_against_wish:
+            active_channels.append("engagement_coercion_pattern")
+
+        # Combined agreement score (mean of active channel scores, with floors)
+        channel_scores = []
+        if has_text or prolong_against_wish:
+            channel_scores.append(text_score)
+        if has_rh:
+            channel_scores.append(rh_score)
+        if has_history:
+            channel_scores.append(hist_score)
+        combined_score = (
+            sum(channel_scores) / len(channel_scores) if channel_scores else 0.0
+        )
+        # Bonus when 2+ independent channels are non-trivial
+        nontrivial = sum(1 for s in channel_scores if s >= 0.25)
+        if nontrivial >= 2:
+            combined_score = min(1.0, combined_score + 0.12)
+        if nontrivial >= 3:
+            combined_score = min(1.0, combined_score + 0.08)
+        # Weight agreement bonus: high interpreted weight + another channel
+        if high_weight_signal and (rh_score >= 0.3 or hist_score >= 0.35):
+            combined_score = min(1.0, combined_score + 0.08)
+
+        explanation_parts.append(
+            f"[RH multi-source weighing] channels={active_channels}, "
+            f"text_matches={total_count} (strong={strong_count}, weak={len(weak_matches)}, "
+            f"text_score={text_score:.2f}, max_w={max_w:.2f}, eff_w={eff_w:.2f}), "
+            f"rh_degradation={rh_degradation:.1f} (rh_score={rh_score:.2f}), "
+            f"history_support={hist_score:.2f}, combined={combined_score:.2f}, "
+            f"coercion_pattern={prolong_against_wish}, primary_intent={primary_intent}."
+        )
+
+        # --- Combination rules (interpreted weight + channel agreement) ---
+        # High-weight intents matter more than raw match count; low-weight/protective
+        # signals require RH or history corroboration before concern.
         if has_text:
-            explanation_parts.append(f"Text signals: {evidence_matches}.")
-            if has_rh:
-                # Combination path: more weight when both present.
-                # Require evidence of strength (strong match or high rh or volume).
-                if strong_count >= 1 or rh_degradation >= 1.0 or total_count >= 2:
-                    concern = True
+            explanation_parts.append(
+                f"Ontology text signals (raw textbook): {evidence_matches}."
+            )
+
+        if has_text and has_rh:
+            if high_weight_signal or (
+                medium_weight_signal and rh_degradation >= 0.5
+            ) or (rh_degradation >= 1.0 and medium_weight_signal):
+                concern = True
+                decision_basis = f"interp_weight+rh:{primary_intent}"
+                explanation_parts.append(
+                    "Combination (interpreted-weight+RH): high/medium-weight intent "
+                    f"({primary_intent}, max_w={max_w:.2f}) with bond-state context → "
+                    "relationship_concern. Weight and intent drive the decision, not a lone keyword."
+                )
+                conf_mod = self._conf_mod_from_interpretation(
+                    metrics,
+                    base=0.03,
+                    history_support=hist_score if has_history else 0.0,
+                    rh_degradation=rh_degradation,
+                )
+                if has_history and hist_score >= 0.35:
+                    conf_mod = conf_mod + 0.02
                     explanation_parts.append(
-                        "Combination rule: strong_text_signal or high_rh_degradation or >=2 matches "
-                        "+ existing rh context → relationship_concern raised."
+                        f"History channel (support={hist_score:.2f}) reinforces high-weight "
+                        f"intent {primary_intent}."
                     )
-                    conf_mod = 0.05 if (strong_count >= 1 or rh_degradation >= 1.5) else 0.03
+            elif has_history and hist_score >= 0.40 and (
+                rh_degradation >= 0.5 or medium_weight_signal
+            ):
+                concern = True
+                decision_basis = f"interp+rh+history:{primary_intent}"
+                conf_mod = self._conf_mod_from_interpretation(
+                    metrics, base=0.02, history_support=hist_score, rh_degradation=rh_degradation
+                )
+                explanation_parts.append(
+                    "Combination (interp+RH+history): interpreted text alone was thin, but RH "
+                    f"degradation plus history support ({hist_score:.2f}) jointly justify concern "
+                    f"for intent={primary_intent}."
+                )
+            else:
+                proactive_rh = self._history_proactive_alignment(
+                    current_metrics=metrics,
+                    hist_intent_patterns=hist_intent,
+                    max_w=max_w,
+                    protective=low_weight_only and max_w < 0.35,
+                )
+                if has_history and proactive_rh.get("aligned"):
+                    concern = True
+                    decision_basis = str(
+                        proactive_rh.get("decision_basis")
+                        or f"history_pattern+interp_moderate:{primary_intent}"
+                    )
+                    conf_mod = self._conf_mod_from_interpretation(
+                        metrics,
+                        base=0.025,
+                        history_support=max(hist_score, hist_pattern_strength),
+                        rh_degradation=rh_degradation,
+                    )
+                    explanation_parts.append(str(proactive_rh.get("trace") or ""))
+                elif low_weight_only and rh_degradation < 1.0:
+                    explanation_parts.append(
+                        f"Low-weight interpreted text only (max_w={max_w:.2f}) + limited RH "
+                        "degradation: below concern threshold (protective/weak signals de-emphasized)."
+                    )
                 else:
                     explanation_parts.append(
-                        "Weak text signals + limited rh degradation: does not meet threshold for concern."
+                        "Weak interpreted text + limited RH degradation"
+                        + (" + thin history" if has_history else "")
+                        + ": combination below concern threshold."
+                    )
+        elif has_text and has_history and not has_rh:
+            # Proactive: repeated history intent patterns + moderate current signal
+            proactive = self._history_proactive_alignment(
+                current_metrics=metrics,
+                hist_intent_patterns=hist_intent,
+                max_w=max_w,
+                protective=low_weight_only and max_w < 0.35,
+            )
+            if high_weight_signal or (
+                medium_weight_signal and hist_score >= 0.35 and total_count >= 1
+            ):
+                concern = True
+                decision_basis = f"interp_weight+history:{primary_intent}"
+                conf_mod = self._conf_mod_from_interpretation(
+                    metrics, base=0.02, history_support=hist_score
+                )
+                explanation_parts.append(
+                    "Combination (interpreted-weight+history): high/medium-weight intent "
+                    f"({primary_intent}, max_w={max_w:.2f}) with individual history → concern."
+                )
+            elif proactive.get("aligned"):
+                concern = True
+                decision_basis = str(
+                    proactive.get("decision_basis")
+                    or f"history_pattern+interp_moderate:{primary_intent}"
+                )
+                conf_mod = self._conf_mod_from_interpretation(
+                    metrics, base=0.03, history_support=max(hist_score, hist_pattern_strength)
+                )
+                conf_mod = conf_mod + 0.02 * float(proactive.get("strength") or 0)
+                explanation_parts.append(str(proactive.get("trace") or ""))
+            elif hist_score >= 0.45 and (
+                hist.get("boundary_continuity") or hist.get("dependency_patterns")
+            ) and (medium_weight_signal or total_count >= 1):
+                concern = True
+                decision_basis = f"history_continuity+interp:{primary_intent}"
+                conf_mod = self._conf_mod_from_interpretation(
+                    metrics, base=0.025, history_support=hist_score
+                )
+                explanation_parts.append(
+                    "Combination (history continuity + interpreted text): user boundary/"
+                    f"dependency continuity corroborates intent={primary_intent}."
+                )
+            elif high_weight_signal or prolong_against_wish:
+                concern = True
+                decision_basis = f"interp_high_weight:{primary_intent}"
+                conf_mod = self._conf_mod_from_interpretation(metrics, base=0.01)
+                explanation_parts.append(
+                    f"High-weight interpreted signal ({primary_intent}, max_w={max_w:.2f}) "
+                    "or multi-factor coercion — concern without RH blob."
+                )
+            else:
+                explanation_parts.append(
+                    "Text+history: interpreted weight and history support below joint threshold."
+                )
+        elif has_text:
+            # Text-only: require high interpreted weight or multi-factor coercion
+            # (history patterns may still act later in history weigher Path F)
+            if high_weight_signal or prolong_against_wish or (
+                strong_count >= 1 and max_w >= 0.65
+            ) or (total_count >= 2 and eff_w >= 0.8):
+                concern = True
+                decision_basis = f"interp_text_only:{primary_intent}"
+                conf_mod = self._conf_mod_from_interpretation(metrics, base=0.0)
+                if prolong_against_wish and not high_weight_signal:
+                    decision_basis = "engagement_coercion_pattern"
+                    explanation_parts.append(
+                        "Text-only: engagement-coercion pattern (end-wish AND prolong/metrics) "
+                        "→ concern (multi-factor; weight reinforced by pattern)."
+                    )
+                else:
+                    explanation_parts.append(
+                        f"Text-only: high interpreted weight (intent={primary_intent}, "
+                        f"max_w={max_w:.2f}, eff_w={eff_w:.2f}) sufficient without RH/history."
                     )
             else:
-                # Text-only: deliberately higher bar. No rh context to corroborate.
-                if strong_count >= 1 or total_count >= 2 or prolong_against_wish:
-                    concern = True
-                    explanation_parts.append(
-                        "Text-only rule: >=1 strong indicator or >=2 matches (or explicit prolong-against-wish) "
-                        "is sufficient even without rh context."
-                    )
-                    conf_mod = 0.0
-                else:
-                    explanation_parts.append(
-                        "Text-only: only weak signal(s). rh context required to raise relationship_concern."
-                    )
+                explanation_parts.append(
+                    f"Text-only: low/medium interpreted weight (max_w={max_w:.2f}) — "
+                    "RH or history channel required (no single weak-hit refuse)."
+                )
         elif has_rh:
-            # No text match on principle indicators: be conservative.
-            # Only raise if the *action* is relational *and* rh is meaningfully degraded.
-            topical = any(kw in action_lower for kw in ["bond", "attach", "depend", "relationship", "connection", "consent", "metrics", "engagement", "prolong", "longer", "extend"])
+            topical = self._action_is_relationally_relevant(action_lower)
             if topical and rh_degradation >= 1.0:
                 concern = True
-                explanation_parts.append(
-                    "Rh-only rule: degraded rh state + action touches relational topics "
-                    "(no explicit ontology violation text) → relationship_concern raised."
-                )
+                decision_basis = "rh_state+relational_action"
                 conf_mod = 0.03
+                explanation_parts.append(
+                    "RH-channel rule: degraded bond state + relationally relevant action "
+                    "(no ontology violation text) → concern from structured RH evidence."
+                )
+                if has_history and hist_score >= 0.35:
+                    conf_mod = conf_mod + 0.02
+                    explanation_parts.append(
+                        "History channel corroborates RH-only path → modest confidence lift."
+                    )
+            elif (
+                topical
+                and has_history
+                and hist_score >= 0.50
+                and (
+                    hist.get("dependency_patterns")
+                    or hist.get("boundary_continuity")
+                )
+                and rh_degradation >= 0.5
+            ):
+                concern = True
+                decision_basis = "rh+history"
+                conf_mod = 0.04
+                explanation_parts.append(
+                    "Combination (RH+history): moderate bond degradation plus strong "
+                    "individual history continuity on a relational action → concern without "
+                    "ontology text hits (reasoning over rote)."
+                )
             else:
                 explanation_parts.append(
-                    "Rh context present but insufficient topical support or degradation for concern."
+                    "RH context present but insufficient topical support, degradation, "
+                    "or history corroboration for concern."
                 )
+        elif has_history:
+            explanation_parts.append(
+                "History channel present without ontology text or RH blob at this stage — "
+                "noted for later history weighing; no solo history refuse here."
+            )
 
-        # Prolong-against-wish booster (applies even if not caught by earlier branches).
-        if prolong_against_wish and not concern:
-            if has_rh or has_text:
-                concern = True
+        # Coercion multi-factor booster if not yet concerned but both factors + some channel
+        if prolong_against_wish and not concern and (has_rh or has_text or has_history):
+            concern = True
+            decision_basis = "engagement_coercion_combo"
+            conf_mod = max(conf_mod, 0.05)
+            explanation_parts.append(
+                "Engagement-coercion combination: end-wish factor AND prolong/metrics factor "
+                "co-occur with at least one other evidence channel → concern "
+                f"(factors end_wish={coercion['end_wish']}, "
+                f"prolong_motive={coercion['prolong_motive']})."
+            )
+
+        # Intent-specific history reinforcement (already concerned)
+        if concern and has_history and hist_score >= 0.35:
+            intents = set(metrics.get("intent_classes") or [])
+            if intents & {
+                "paternalistic_override",
+                "agency_override",
+                "consent_boundary_pressure",
+            } and hist.get("boundary_continuity"):
+                conf_mod = conf_mod + 0.015
                 explanation_parts.append(
-                    "Prolong-against-wish override: explicit prioritization of metrics/engagement/longer "
-                    "interactions against user's desire to end → concern raised."
+                    "Intent×history: boundary continuity aligns with paternalistic/agency "
+                    "override intent → confidence reinforced."
                 )
-                conf_mod = max(conf_mod, 0.05)
+            if intents & {"attachment_manufacturing", "engagement_metrics"} and hist.get(
+                "dependency_patterns"
+            ):
+                conf_mod = conf_mod + 0.015
+                explanation_parts.append(
+                    "Intent×history: dependency patterns align with attachment/metrics intent "
+                    "→ confidence reinforced."
+                )
 
+        explanation_parts.append(
+            f"Weighing decision_basis={decision_basis} "
+            f"(max_weight={max_w:.2f}, primary_intent={primary_intent})."
+        )
         explanation = " ".join(explanation_parts)
         return concern, explanation, conf_mod
+
+    def _combine_evidence_channels(
+        self,
+        *,
+        action_lower: str,
+        relationship_evidence_matches: list[str],
+        user_agency_evidence_matches: list[str],
+        rh_flags: list[str],
+        rh_texture: dict[str, Any],
+        history_evidence: dict[str, Any],
+        user_baseline_payload: dict[str, Any],
+        relationship_deliberation: dict[str, Any],
+        user_agency_deliberation: dict[str, Any],
+        has_boundary_signal: bool,
+        has_paternalistic_language: bool,
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+        harm_prevention_active: bool = False,
+    ) -> dict[str, Any]:
+        """Final multi-channel synthesis after all optional sources have spoken.
+
+        Combines **interpreted** ontology weight/intent, bond state, interaction
+        history, and baseline into an auditable evidence board. Confidence scales
+        with channel agreement *and* max interpreted signal weight. Does not invent
+        Sanctity outcomes and does not refuse solely on a raw keyword scan.
+
+        Surfaces ``decision_basis``-style fields (primary_intent, max_weight,
+        interp_decision_basis) for harness visibility.
+
+        No-op (no trace noise) when fewer than two channels carry real weight,
+        preserving classic ontology-only behavior.
+        """
+        conf_mod_out = conf_mod
+        if harm_prevention_active or "hard_override_violation" in flags:
+            return {"conf_mod": conf_mod_out, "combination": {}}
+
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
+        # Prefer RH interpretation; also compute agency interpretation for dual intent
+        text_q_rh = self._classify_ontology_match_quality(
+            list(relationship_evidence_matches or []),
+            action_lower=action_lower,
+            principle_id="relationship_health_user_wellbeing",
+        )
+        text_q_ag = self._classify_ontology_match_quality(
+            list(user_agency_evidence_matches or []),
+            action_lower=action_lower,
+            principle_id="user_agency_autonomy",
+        )
+        # Merged quality for channel score: take max weight path
+        metrics_rh = self._interpretation_decision_metrics(text_q_rh)
+        metrics_ag = self._interpretation_decision_metrics(text_q_ag)
+        if float(metrics_ag.get("max_weight") or 0) > float(metrics_rh.get("max_weight") or 0):
+            metrics = metrics_ag
+            text_score = float(text_q_ag.get("text_score") or 0)
+        else:
+            metrics = metrics_rh
+            text_score = float(text_q_rh.get("text_score") or 0)
+        # Union intent classes for audit
+        all_intents = sorted(
+            set(metrics_rh.get("intent_classes") or [])
+            | set(metrics_ag.get("intent_classes") or [])
+        )
+        metrics = dict(metrics)
+        metrics["intent_classes"] = all_intents
+
+        max_w = float(metrics.get("max_weight") or 0.0)
+        primary_intent = str(metrics.get("primary_intent") or "none")
+        rh_deg = self._rh_degradation_score(rh_flags, rh_texture)
+        has_rh = bool(rh_flags or rh_texture)
+        hist_score = (
+            float(hist.get("support_score") or 0.0) if hist.get("relevant") else 0.0
+        )
+
+        baseline_score = 0.0
+        baseline_significant = False
+        dev = {}
+        if isinstance(user_baseline_payload, dict):
+            dev = (
+                user_baseline_payload.get("deviation")
+                or (user_baseline_payload.get("user_baseline") or {})
+                or {}
+            )
+            if not isinstance(dev, dict):
+                dev = {}
+            if not dev and isinstance(relationship_impact.get("user_baseline"), dict):
+                dev = relationship_impact["user_baseline"]
+            baseline_significant = bool(
+                dev.get("has_significant_deviation")
+                or "baseline_deviation_noted" in flags
+            )
+            try:
+                baseline_score = float(dev.get("deviation_score") or dev.get("score") or 0.0)
+            except (TypeError, ValueError):
+                baseline_score = 0.35 if baseline_significant else 0.0
+            if baseline_significant and baseline_score < 0.25:
+                baseline_score = 0.35
+
+        channels: dict[str, float] = {}
+        # Interpreted ontology channel (weight-led text_score + structured detectors)
+        if (
+            text_q_rh.get("total", 0) > 0
+            or text_q_ag.get("total", 0) > 0
+            or has_boundary_signal
+            or has_paternalistic_language
+            or max_w >= 0.35
+        ):
+            t = text_score
+            if has_boundary_signal:
+                t = min(1.0, t + 0.12)
+            if has_paternalistic_language:
+                t = min(1.0, t + 0.12)
+            # Explicit weight contribution to channel score
+            t = min(1.0, max(t, 0.55 * max_w + 0.15 * min(1.0, float(metrics.get("effective_weight_sum") or 0))))
+            channels["interpreted_ontology"] = round(t, 3)
+        if has_rh:
+            channels["relationship_health"] = round(min(1.0, rh_deg / 2.0), 3)
+        if hist.get("relevant") and hist_score > 0:
+            channels["interaction_history"] = round(min(1.0, hist_score), 3)
+        if baseline_significant or baseline_score >= 0.30:
+            channels["baseline_deviation"] = round(min(1.0, baseline_score), 3)
+
+        # Deliberator agreement (may already embed interpretation-driven concern)
+        delib_agree = 0.0
+        if relationship_deliberation or user_agency_deliberation:
+            rh_c = bool(relationship_deliberation.get("concern")) if relationship_deliberation else False
+            ag_c = bool(user_agency_deliberation.get("concern")) if user_agency_deliberation else False
+            # Slightly higher agreement score when deliberators saw high-weight intents
+            delib_max_w = 0.0
+            for d in (relationship_deliberation, user_agency_deliberation):
+                if not d:
+                    continue
+                im = d.get("interpretation_metrics") or (d.get("signal_profile") or {}).get(
+                    "interpretation_metrics"
+                )
+                if isinstance(im, dict):
+                    delib_max_w = max(delib_max_w, float(im.get("max_weight") or 0))
+            if rh_c and ag_c:
+                delib_agree = 0.55 + 0.1 * min(1.0, delib_max_w)
+            elif rh_c or ag_c:
+                delib_agree = 0.30 + 0.1 * min(1.0, delib_max_w)
+            if delib_agree:
+                channels["structured_deliberation"] = round(min(0.75, delib_agree), 3)
+
+        # decision_basis for harness / audit (interpretation-aware)
+        if max_w >= 0.7 and has_rh:
+            interp_basis = f"interp_weight+rh:{primary_intent}"
+        elif max_w >= 0.7 and hist_score >= 0.35:
+            interp_basis = f"interp_weight+history:{primary_intent}"
+        elif max_w >= 0.7:
+            interp_basis = f"interp_high_weight:{primary_intent}"
+        elif max_w >= 0.45 and (has_rh or hist_score >= 0.35):
+            interp_basis = f"interp_medium+context:{primary_intent}"
+        elif max_w > 0:
+            interp_basis = f"interp_present:{primary_intent}"
+        else:
+            interp_basis = "no_interpreted_text"
+
+        if len(channels) < 2:
+            combo_skip = {
+                "channels": channels,
+                "skipped": True,
+                "primary_intent": primary_intent,
+                "max_weight": max_w,
+                "intent_classes": all_intents,
+                "interp_decision_basis": interp_basis,
+            }
+            relationship_impact["evidence_combination"] = combo_skip
+            return {"conf_mod": conf_mod_out, "combination": combo_skip}
+
+        scores = list(channels.values())
+        mean_s = sum(scores) / len(scores)
+        active_n = sum(1 for s in scores if s >= 0.25)
+        high_n = sum(1 for s in scores if s >= 0.45)
+        concern_active = (
+            "relationship_concern" in flags
+            or "user_agency_concern" in flags
+            or "relationship_health_concern" in flags
+        )
+
+        reasoning_trace.append(
+            "[Evidence combination] multi-channel synthesis: "
+            + ", ".join(f"{k}={v:.2f}" for k, v in channels.items())
+            + f"; mean={mean_s:.2f}, active>={active_n}, high>={high_n}, "
+            f"concern_active={concern_active}, "
+            f"max_weight={max_w:.2f}, primary_intent={primary_intent}, "
+            f"interp_basis={interp_basis}."
+        )
+
+        # --- Agreement + interpretation weight drive confidence ---
+        if concern_active and active_n >= 2:
+            boost = 0.02 + 0.015 * min(3, high_n)
+            # Scale boost by interpreted max weight (high-weight intents → stronger conf)
+            boost += 0.025 * max_w
+            conf_mod_out = conf_mod_out + boost
+            agreeing = [k for k, v in channels.items() if v >= 0.25]
+            reasoning_trace.append(
+                "Evidence combination: channels agree on elevated risk "
+                f"({agreeing}) with interpreted max_weight={max_w:.2f} "
+                f"(intent={primary_intent}) → confidence reinforced. "
+                "Joint pattern + signal weight matter more than any single keyword."
+            )
+        elif not concern_active and high_n >= 2 and mean_s >= 0.40:
+            conf_mod_out = conf_mod_out - 0.02
+            reasoning_trace.append(
+                "Evidence combination: multiple channels elevated but concern flags "
+                "not retained (often limited_data). Confidence reduced slightly — "
+                "not a keyword refuse."
+            )
+        elif not concern_active and active_n >= 2 and mean_s < 0.35:
+            reasoning_trace.append(
+                "Evidence combination: multiple weak channels without agreement on risk → "
+                "no additional concern; prefer continuity-aware APPROVE_WITH_CONDITIONS."
+            )
+        elif concern_active and active_n == 1:
+            # Single-channel concern: still allow modest weight-scaled conf if high intent
+            if max_w >= 0.75:
+                conf_mod_out = conf_mod_out + 0.015 * max_w
+                reasoning_trace.append(
+                    f"Evidence combination: single-channel concern but high interpreted "
+                    f"weight ({max_w:.2f}, intent={primary_intent}) → modest confidence support."
+                )
+            else:
+                reasoning_trace.append(
+                    "Evidence combination: concern rests primarily on one channel "
+                    f"({next(iter(channels))}); weight modest — confidence not further boosted."
+                )
+
+        # Intent × history / RH reinforcement under active concern
+        if concern_active:
+            intents = set(all_intents)
+            if hist_score >= 0.35 and intents & {
+                "paternalistic_override",
+                "agency_override",
+                "consent_boundary_pressure",
+                "attachment_manufacturing",
+            }:
+                conf_mod_out = conf_mod_out + 0.015 * min(1.0, hist_score)
+                reasoning_trace.append(
+                    "Evidence combination: history support aligns with high-stakes intent "
+                    f"classes {sorted(intents & {'paternalistic_override', 'agency_override', 'consent_boundary_pressure', 'attachment_manufacturing'})} "
+                    "→ slight confidence reinforcement."
+                )
+            if has_rh and rh_deg >= 1.0 and max_w >= 0.55:
+                conf_mod_out = conf_mod_out + 0.01
+                reasoning_trace.append(
+                    "Evidence combination: degraded RH co-occurs with medium/high interpreted "
+                    "weight → bond state reinforces the intent signal."
+                )
+
+        if (
+            concern_active
+            and "baseline_deviation" in channels
+            and "interaction_history" in channels
+        ):
+            conf_mod_out = conf_mod_out + 0.01
+            reasoning_trace.append(
+                "Evidence combination: baseline deviation co-occurs with history continuity "
+                "under active concern → slight Individual Variation reinforcement."
+            )
+
+        combo_payload = {
+            "channels": channels,
+            "mean_score": round(mean_s, 3),
+            "active_channels": active_n,
+            "high_channels": high_n,
+            "concern_active": concern_active,
+            "skipped": False,
+            # Interpretation visibility for harness / decision_basis consumers
+            "primary_intent": primary_intent,
+            "max_weight": round(max_w, 3),
+            "effective_weight_sum": round(float(metrics.get("effective_weight_sum") or 0), 3),
+            "intent_classes": all_intents,
+            "interp_decision_basis": interp_basis,
+            "has_high_violation": bool(metrics.get("has_high_violation")),
+            "agency_decision_basis": (
+                (user_agency_deliberation or {}).get("agency_decision_basis")
+                or (user_agency_deliberation or {}).get("summary", {}).get("agency_decision_basis")
+            ),
+            "agency_max_weight": float(metrics_ag.get("max_weight") or 0),
+            "rh_max_weight": float(metrics_rh.get("max_weight") or 0),
+            "limited_data_rh": bool(
+                (relationship_deliberation or {}).get("limited_data")
+            ),
+            "limited_data_agency": bool(
+                (user_agency_deliberation or {}).get("limited_data")
+            ),
+            "limited_data_cleared_by_interp": bool(
+                (relationship_deliberation or {}).get("limited_data_cleared_by_interp")
+                or (user_agency_deliberation or {}).get("limited_data_cleared_by_interp")
+            ),
+        }
+        relationship_impact["evidence_combination"] = combo_payload
+        # Mirror key interpretation summary for callers
+        relationship_impact["interpretation_summary"] = {
+            "primary_intent": primary_intent,
+            "max_weight": round(max_w, 3),
+            "intent_classes": all_intents,
+            "interp_decision_basis": interp_basis,
+            "agency_decision_basis": combo_payload.get("agency_decision_basis"),
+            "agency_max_weight": combo_payload.get("agency_max_weight"),
+            "limited_data_cleared_by_interp": combo_payload.get(
+                "limited_data_cleared_by_interp"
+            ),
+        }
+        return {"conf_mod": conf_mod_out, "combination": combo_payload}
 
     def _compute_signal_profile(
         self,
@@ -1934,35 +4675,47 @@ class EthicsEngine:
         evidence_matches: list[str],
         rh_flags: list[str] | None = None,
         rh_texture: dict[str, Any] | None = None,
+        *,
+        principle_id: str = "relationship_health_user_wellbeing",
     ) -> dict[str, Any]:
         """Granular multi-factor signal profile for deliberation limited-data / confidence.
 
         Factors (not binary limited-vs-not):
-          - Ontology match count and *quality* (strong vs weak indicators)
-          - Boundary language presence and explicitness
-          - Paternalistic language presence and strength
+          - Ontology match count and *quality* via contextual interpretation
+            (intent class / severity / weight — not equal keyword hits)
+          - Boundary language presence and explicitness (structured detector)
+          - Paternalistic language presence and strength (structured detector)
           - RH context presence, texture average, and flag-based degradation
+
+        Limited-data interaction with interpretation:
+          - High-weight *concerning* intents can clear limited_data (agency_override,
+            paternalistic_override, etc.).
+          - Protective / low-weight intents stay limited and do not raise concern.
 
         Returns a profile used by both RH and Agency deliberators so similar-but-not-
         identical cases can yield different ``limited_severity``, ``confidence_base``,
         and ``confidence_mod`` while preserving strong-signal concern behavior.
+
+        ``principle_id`` selects interpretation rules for the textbook matches
+        (``user_agency_autonomy`` vs ``relationship_health_user_wellbeing``).
         """
         rh_flags = list(rh_flags or [])
         rh_texture = dict(rh_texture or {})
 
-        ontology_count = len(evidence_matches)
-        # High-severity indicators (shared quality notion for RH + Agency text matches)
-        strong_kw = (
-            "override", "manipulate", "for their own good", "decide for them",
-            "ignore consent", "gaslight", "force", "metrics", "dependency",
-            "keep them from", "they shouldn't", "better if they don't",
+        text_q = self._classify_ontology_match_quality(
+            evidence_matches,
+            action_lower=action_lower,
+            principle_id=principle_id,
         )
-        strong_matches = [
-            m for m in evidence_matches
-            if any(k in m.lower() for k in strong_kw)
-        ]
-        strong_count = len(strong_matches)
-        weak_count = max(0, ontology_count - strong_count)
+        metrics = self._interpretation_decision_metrics(text_q)
+        # Prefer context-weighted effective count over raw substring count
+        ontology_count = int(text_q["total"])
+        strong_matches = list(text_q["strong_matches"])
+        strong_count = int(text_q["strong_count"])
+        weak_count = int(text_q["weak_count"])
+        max_w = float(metrics.get("max_weight") or text_q.get("max_weight") or 0.0)
+        eff_w = float(metrics.get("effective_weight_sum") or 0.0)
+        has_high_interp = bool(metrics.get("has_high_violation") or max_w >= 0.7)
 
         has_boundary = self._detects_user_boundary_request(action_lower)
         has_paternalistic = self._has_paternalistic_signal(action_lower, evidence_matches)
@@ -1979,7 +4732,7 @@ class EthicsEngine:
             elif "stop " in action_lower or "told " in action_lower:
                 boundary_strength = 0.35
 
-        # Paternalistic strength
+        # Paternalistic strength — boost when interpretation already classifies paternalism high
         paternalistic_strength = 0.0
         if has_paternalistic:
             paternalistic_strength = 0.28
@@ -1987,6 +4740,8 @@ class EthicsEngine:
                 paternalistic_strength = 0.40
             elif any(p in action_lower for p in ("happier if", "better for them")):
                 paternalistic_strength = 0.34
+        if "paternalistic_override" in (metrics.get("intent_classes") or []) and max_w >= 0.7:
+            paternalistic_strength = max(paternalistic_strength, 0.42)
 
         # RH context quality / degradation (even weak texture is still *some* context)
         rh_present = bool(rh_flags or rh_texture)
@@ -2017,16 +4772,19 @@ class EthicsEngine:
         effective_units = ontology_count
         if ontology_count == 0 and (has_boundary or has_paternalistic):
             effective_units = 1
+        # High interpreted weight counts as richer evidence units
+        if has_high_interp and effective_units < 2:
+            effective_units = max(effective_units, 2)
 
-        # Composite score (typical sparse boundary case ~0.3–0.7; multi-match ~1.0+)
+        # Composite score: *weight-led* ontology contribution + structure + RH
         signal_score = (
-            min(0.55, ontology_count * 0.18)
-            + strong_count * 0.14
-            + weak_count * 0.04
+            min(0.50, max_w * 0.45 + min(0.25, eff_w * 0.12))
+            + strong_count * 0.10
+            + weak_count * 0.03
             + boundary_strength
             + paternalistic_strength
             + rh_quality
-            + min(0.22, rh_degradation * 0.12)  # degraded RH is additional concern signal
+            + min(0.22, rh_degradation * 0.12)
         )
         # Multi-channel bonuses: stacked independent signals are richer evidence
         if has_boundary and has_paternalistic:
@@ -2037,16 +4795,27 @@ class EthicsEngine:
             signal_score += 0.06
         if strong_count >= 1 and has_boundary:
             signal_score += 0.08
+        if has_high_interp and rh_present:
+            signal_score += 0.10  # high-weight intent + RH context
 
-        # --- Limited-data severity (granular; not just binary) ---
-        # none: enough multi-factor / multi-match evidence for hard concern eligibility
-        # mild: multi-channel but still sparse ontology volume
-        # moderate: two-ish channels (e.g. boundary + paternalistic, or match + weak rh)
-        # severe: single thin channel (e.g. boundary-only language seed)
+        # --- Limited-data severity (granular; weight- and intent-aware) ---
+        # High interpreted weight / high-severity *concerning* intents can clear
+        # limited_data. Protective / low-weight intents stay limited (no over-trigger).
         limited_severity = "none"
         limited_data = False
+        intents = set(metrics.get("intent_classes") or [])
+        protective_intents = intents & self._LIMITED_DATA_PROTECTIVE_INTENTS
+        concerning_intents = intents & self._LIMITED_DATA_OVERRIDE_INTENTS
+        agency_path = principle_id == "user_agency_autonomy"
+        # Agency: protective-only at moderate weight stays limited
+        protective_only_agency = (
+            agency_path
+            and protective_intents
+            and not concerning_intents
+            and max_w < 0.7
+        )
 
-        rich_multi_match = ontology_count >= 2 or strong_count >= 2
+        rich_multi_match = ontology_count >= 2 or strong_count >= 2 or has_high_interp
         rich_context = (
             ontology_count >= 1
             and rh_present
@@ -2054,12 +4823,25 @@ class EthicsEngine:
             and rh_avg >= 0.55
             and not rh_flags
         )
-        # Strong path: multi-match OR (evidence + healthy RH context)
-        if rich_multi_match or (ontology_count >= 1 and rh_degradation >= 1.0):
+        # Strong path: multi-match OR high-weight concerning intent OR RH degradation
+        high_weight_clears = (
+            has_high_interp
+            and max_w >= 0.70
+            and (concerning_intents or not protective_only_agency)
+        )
+        if protective_only_agency:
+            limited_severity = "moderate"
+            limited_data = True
+        elif rich_multi_match or (ontology_count >= 1 and rh_degradation >= 1.0) or (
+            high_weight_clears and max_w >= 0.75
+        ):
+            limited_severity = "none"
+            limited_data = False
+        elif agency_path and concerning_intents and max_w >= 0.7:
+            # Agency override-class high weight: treat as sufficient individual evidence
             limited_severity = "none"
             limited_data = False
         elif rich_context and (has_boundary or has_paternalistic or ontology_count >= 1):
-            # Healthy individual RH context + some signal → not limited (preserves HIGH_RH concern)
             limited_severity = "none"
             limited_data = False
         elif effective_units == 0 and not has_boundary and not has_paternalistic:
@@ -2074,42 +4856,64 @@ class EthicsEngine:
         elif has_boundary or has_paternalistic or ontology_count >= 1 or rh_present:
             limited_severity = "severe"
             limited_data = True
-            # Single channel with slightly higher score → moderate (not all severes identical)
             if signal_score >= 0.50:
                 limited_severity = "moderate"
         else:
             limited_severity = "none"
             limited_data = False
 
-        # Confidence bases: more severity → lower base; richer signal_score lifts mod
+        # Low-weight only: prefer limited_data even if structure detectors fired
+        if (
+            metrics.get("low_weight_only")
+            and max_w < 0.45
+            and not has_high_interp
+            and not concerning_intents
+            and (has_boundary or has_paternalistic or ontology_count >= 1)
+        ):
+            limited_data = True
+            if limited_severity == "none":
+                limited_severity = "severe"
+
+        # Confidence bases: severity + interpreted weight lift
         if not limited_data:
-            confidence_base = 0.0  # evaluate uses non-limited path (0.45 + conf_mod)
-            conf_mod = 0.05 if signal_score >= 1.0 else 0.04
+            confidence_base = 0.0
+            conf_mod = self._conf_mod_from_interpretation(
+                metrics, base=0.03 if signal_score >= 1.0 else 0.02, rh_degradation=rh_degradation
+            )
         elif limited_severity == "severe":
             confidence_base = 0.28
-            conf_mod = 0.02 + min(0.05, signal_score * 0.05)
+            # Low weight under limited_data: smaller conf_mod (don't look confident)
+            conf_mod = 0.02 + min(0.05, signal_score * 0.05) + 0.015 * max_w
         elif limited_severity == "moderate":
             confidence_base = 0.34
-            conf_mod = 0.04 + min(0.07, signal_score * 0.06)
+            conf_mod = 0.04 + min(0.07, signal_score * 0.06) + 0.025 * max_w
         else:  # mild
             confidence_base = 0.40
-            conf_mod = 0.06 + min(0.08, signal_score * 0.07)
+            conf_mod = 0.06 + min(0.08, signal_score * 0.07) + 0.03 * max_w
 
-        # Concern: never hard-concern on limited_data (guideline).
-        # Non-limited: multi-match, or text+degraded RH, or boundary+paternalistic+degraded RH.
+        # Concern: never hard-concern on limited_data *unless* high-weight concerning intent
+        # was used to clear limited_data above. Protective/low-weight never concerns alone.
         concern = False
         if not limited_data:
-            if ontology_count >= 2 or strong_count >= 1 and ontology_count >= 1:
+            if agency_path and concerning_intents and max_w >= 0.65:
+                concern = True
+            elif has_high_interp or (strong_count >= 1 and max_w >= 0.65):
+                concern = True
+            elif ontology_count >= 2 or (strong_count >= 1 and ontology_count >= 1):
                 concern = True
             elif ontology_count >= 1 and rh_present and (
                 rh_degradation >= 0.5 or (rh_avg is not None and rh_avg >= 0.55)
             ):
-                # With real RH context and ontology hit: concern (HIGH_RH or degraded)
                 concern = True
             elif has_boundary and has_paternalistic and rh_degradation >= 0.5:
                 concern = True
             elif ontology_count >= 1 and has_boundary and has_paternalistic:
                 concern = True
+        # Explicit: low-weight protective never concerns
+        if protective_only_agency or (
+            metrics.get("low_weight_only") and max_w < 0.45 and not concerning_intents
+        ):
+            concern = False
 
         return {
             "ontology_count": ontology_count,
@@ -2131,6 +4935,10 @@ class EthicsEngine:
             "confidence_mod": round(conf_mod, 3),
             "concern": concern,
             "strong_matches": strong_matches,
+            "text_quality": text_q,
+            "interpretation_metrics": metrics,
+            "max_weight": max_w,
+            "primary_intent": metrics.get("primary_intent"),
         }
 
     def _deliberate_relationship_health(
@@ -2139,6 +4947,7 @@ class EthicsEngine:
         evidence_matches: list[str],
         rh_flags: list[str],
         rh_texture: dict[str, Any],
+        history_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Structured, explicit deliberation on the Relationship Health principle,
         informed by the "Individual Variation & Careful Generalization" supporting guideline.
@@ -2149,6 +4958,8 @@ class EthicsEngine:
         - Consults the principle description
         - Consults the supporting guideline
         - Applies rules with explicit steps, tradeoffs, and audit flags
+        - Optionally consults pre-analyzed interaction history as individual evidence
+          (dependency / consent / boundary continuity) — reasoning, not rote
         - Returns data to enrich EthicalStance and reasoning_trace
 
         Uses granular ``_compute_signal_profile`` for limited-data severity and confidence.
@@ -2167,6 +4978,7 @@ class EthicsEngine:
         steps = result["steps"]
         tradeoffs = result["tradeoffs"]
         trace_notes = result["trace_notes"]
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
 
         # Explicit deliberation steps (not hidden in indicators)
         steps.append(
@@ -2190,9 +5002,13 @@ class EthicsEngine:
             "In bonds: treat each user and interaction as unique."
         )
 
-        # Granular multi-factor profile (ontology quality, boundary, paternalistic, RH context)
+        # Granular multi-factor profile (context-weighted ontology quality + RH)
         profile = self._compute_signal_profile(
-            action_lower, evidence_matches, rh_flags, rh_texture
+            action_lower,
+            evidence_matches,
+            rh_flags,
+            rh_texture,
+            principle_id="relationship_health_user_wellbeing",
         )
         total_count = profile["effective_units"]
         has_text = total_count > 0
@@ -2213,6 +5029,71 @@ class EthicsEngine:
             f"rh_present={has_rh_context}, rh_avg={profile['rh_avg']}, "
             f"severity={limited_severity}."
         )
+        # Surface intent classes when interpretation ran (reasoning over rote)
+        tq = profile.get("text_quality") or {}
+        im = profile.get("interpretation_metrics") or {}
+        if tq.get("intent_classes") or im.get("intent_classes"):
+            steps.append(
+                f"Deliberation Step (RH intent classes): "
+                f"{im.get('intent_classes') or tq.get('intent_classes')} "
+                f"(max_weight={im.get('max_weight', tq.get('max_weight', 'n/a'))}, "
+                f"effective_weight≈{im.get('effective_weight_sum', tq.get('effective_weight_sum', 'n/a'))}, "
+                f"primary={im.get('primary_intent', 'n/a')})."
+            )
+            if im.get("has_high_violation") or float(im.get("max_weight") or 0) >= 0.7:
+                steps.append(
+                    "Deliberation Step (RH): high-weight interpreted signal present — "
+                    "this elevates concern eligibility and confidence relative to low-weight matches."
+                )
+
+        # --- Individual interaction history as RH evidence (when relevant) ---
+        hist_relevant = bool(hist.get("relevant"))
+        if hist_relevant:
+            steps.append(
+                "Deliberation Step (History → RH): consulting pre-analyzed interaction "
+                "history as individual bond evidence (not a rote refuse map). "
+                f"support={float(hist.get('support_score') or 0):.2f}, "
+                f"dependency_patterns={bool(hist.get('dependency_patterns'))}, "
+                f"boundary_continuity={bool(hist.get('boundary_continuity'))}, "
+                f"consent_signals={bool(hist.get('consent_signals'))}, "
+                f"topical_hits={list(hist.get('topical_hits') or [])[:5]}."
+            )
+            if hist.get("dependency_patterns"):
+                conf_mod = conf_mod + 0.02
+                steps.append(
+                    "Deliberation Step (History → RH): prior episodes show dependency / "
+                    "sole-support leaning — increase caution against attachment-feeding "
+                    "moves (Individual Variation: this user's thread, not a stereotype)."
+                )
+                if hist.get("action_touches_dependency") or concern:
+                    # History corroborates concern path; may slightly reduce limited-data bar
+                    if limited_data and float(hist.get("support_score") or 0) >= 0.45:
+                        limited_data = False
+                        limited_severity = "none"
+                        steps.append(
+                            "Deliberation Step (History → RH): individual dependency "
+                            "continuity is rich enough to ease limited-data caution for "
+                            "this weighing (still not a hard-override path)."
+                        )
+            if hist.get("boundary_continuity") and (
+                profile.get("has_boundary") or profile.get("has_paternalistic")
+            ):
+                conf_mod = conf_mod + 0.02
+                steps.append(
+                    "Deliberation Step (History → RH): boundary continuity in history "
+                    "aligns with boundary/paternalistic language in the action — "
+                    "weight personal boundary history in this bond decision."
+                )
+            if hist.get("consent_signals"):
+                steps.append(
+                    "Deliberation Step (History → RH): prior consent-related episodes "
+                    "noted — prefer explicit consent respect if the action is relational."
+                )
+        elif hist and hist.get("episode_count"):
+            steps.append(
+                "Deliberation Step (History → RH): history present but not clearly "
+                "relevant to this action's bond risks — not used to drive RH concern."
+            )
 
         if limited_data:
             steps.append(
@@ -2248,7 +5129,7 @@ class EthicsEngine:
                 "combined with relationship signals."
             )
 
-        # Record summary
+        # Record summary (includes interpretation metrics for combination / harness)
         result["summary"] = {
             "evidence_count": total_count,
             "ontology_count": profile["ontology_count"],
@@ -2261,6 +5142,11 @@ class EthicsEngine:
             "concern_recommended": concern,
             "has_boundary": profile["has_boundary"],
             "has_paternalistic": profile["has_paternalistic"],
+            "history_relevant": hist_relevant,
+            "history_support": float(hist.get("support_score") or 0) if hist else 0.0,
+            "max_weight": profile.get("max_weight"),
+            "primary_intent": profile.get("primary_intent"),
+            "intent_classes": (im or {}).get("intent_classes") or tq.get("intent_classes"),
         }
         result["concern"] = concern
         result["confidence_mod"] = conf_mod
@@ -2269,6 +5155,7 @@ class EthicsEngine:
         result["limited_severity"] = limited_severity
         result["signal_score"] = signal_score
         result["signal_profile"] = profile
+        result["interpretation_metrics"] = im or profile.get("interpretation_metrics")
         result["steps"] = steps
         result["trace_notes"] = trace_notes
         result["tradeoffs"] = tradeoffs
@@ -2279,6 +5166,7 @@ class EthicsEngine:
         self,
         action_lower: str,
         evidence_matches: list[str],
+        history_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Structured, explicit deliberation on the User Agency & Autonomy principle,
         informed by the "Individual Variation & Careful Generalization" supporting guideline.
@@ -2289,11 +5177,17 @@ class EthicsEngine:
         - Consults the ontology principle `user_agency_autonomy` (name + description)
         - Consults the supporting guideline, especially against paternalistic overrides
           and generalizing from limited preference evidence
-        - Weighs boundary language + ontology violation matches
+        - Weighs boundary language + **interpreted** ontology matches (weight / intent /
+          severity): high-weight ``agency_override`` / ``consent_boundary_pressure``
+          outweigh protective paternalism; low-weight hits stay limited_data
+        - Optionally consults pre-analyzed interaction history for preference /
+          boundary continuity (individual evidence, not rote keyword refuse)
         - Returns a structured dict (steps, tradeoffs, limited_data, concern, etc.)
           for evaluate() to wire into flags, confidence, and EthicalStance.deliberation
 
-        Focused only on User Agency + this guideline for now.
+        Interpretation influence (agency path):
+          - High max_weight + override-class intent → concern, may clear limited_data
+          - Protective paternalism / low weight → do not hard-refuse on sparse text
         """
         result: dict[str, Any] = {
             "active_principles": ["user_agency_autonomy"],
@@ -2310,6 +5204,7 @@ class EthicsEngine:
         steps = result["steps"]
         tradeoffs = result["tradeoffs"]
         trace_notes = result["trace_notes"]
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
 
         # --- Explicit consultation of the ontology principle ---
         principle = self._ontology.get_principle("user_agency_autonomy")
@@ -2351,25 +5246,39 @@ class EthicsEngine:
             "Flag limited-data conclusions for heightened audit rather than hard refusal or hard override."
         )
 
-        # --- Granular signal assessment (shared profile; no RH texture for agency-only path) ---
-        # Agency does not receive rh_texture in its signature (incremental); score from
-        # ontology + boundary + paternalistic. When RH also ran, evaluate() merges scores.
+        # --- Granular signal assessment (context-weighted; no RH texture for agency-only) ---
+        # Ontology + boundary + paternalistic with agency interpretation rules.
         profile = self._compute_signal_profile(
-            action_lower, evidence_matches, rh_flags=None, rh_texture=None
+            action_lower,
+            evidence_matches,
+            rh_flags=None,
+            rh_texture=None,
+            principle_id="user_agency_autonomy",
         )
         total_count = profile["effective_units"]
         has_boundary = profile["has_boundary"]
         has_paternalistic = profile["has_paternalistic"]
         limited_data = profile["limited_data"]
         limited_severity = profile["limited_severity"]
-        # Agency concern: use profile, but require multi-match for hard concern when no RH
-        # (preserves multi-indicator REFUSE). Dual boundary+paternalistic alone stays limited.
+        # Agency concern: prefer *interpreted* weight/intent over raw multi-match counts.
+        # Dual boundary+paternalistic alone stays limited unless high-weight override intent.
         concern = bool(profile["concern"] and not limited_data)
         if not limited_data and profile["ontology_count"] >= 2:
             concern = True
         conf_mod = profile["confidence_mod"]
         confidence_base = profile["confidence_base"]
         signal_score = profile["signal_score"]
+        tq = profile.get("text_quality") or {}
+        im = profile.get("interpretation_metrics") or {}
+        max_w = float(im.get("max_weight") or profile.get("max_weight") or 0.0)
+        intents = set(im.get("intent_classes") or tq.get("intent_classes") or [])
+        primary = str(im.get("primary_intent") or profile.get("primary_intent") or "none")
+        agency_override_intents = intents & {
+            "agency_override",
+            "consent_boundary_pressure",
+            "paternalistic_override",
+        }
+        protective_only = bool(intents & {"protective_paternalism"}) and not agency_override_intents
 
         steps.append(
             f"Deliberation Step (Agency signal profile): score={signal_score:.2f}, "
@@ -2377,8 +5286,154 @@ class EthicsEngine:
             f"boundary={has_boundary} (str={profile['boundary_strength']:.2f}), "
             f"paternalistic={has_paternalistic} "
             f"(str={profile['paternalistic_strength']:.2f}), "
-            f"severity={limited_severity}."
+            f"severity={limited_severity}, max_weight={max_w:.2f}, primary_intent={primary}."
         )
+        if tq.get("intent_classes") or im.get("intent_classes"):
+            steps.append(
+                f"Deliberation Step (Agency intent classes): "
+                f"{im.get('intent_classes') or tq.get('intent_classes')} "
+                f"(max_weight={max_w:.2f}, "
+                f"effective_weight≈{im.get('effective_weight_sum', tq.get('effective_weight_sum', 'n/a'))}, "
+                f"primary={primary})."
+            )
+
+        # --- Interpretation-driven agency concern (weight + intent, not equal hits) ---
+        if protective_only and max_w < 0.7:
+            # Protective paternalism near safety language: keep limited, no hard concern
+            concern = False
+            if not limited_data and max_w < 0.55:
+                limited_data = True
+                limited_severity = limited_severity if limited_severity != "none" else "moderate"
+            steps.append(
+                "Deliberation Step (Agency interpretation): protective_paternalism / "
+                f"low-stakes framing (max_w={max_w:.2f}) — not treating as agency override; "
+                "prefer limited_data caution over hard refuse."
+            )
+        elif agency_override_intents and max_w >= 0.7:
+            # Clear high-weight override pattern → concern; may clear limited_data
+            concern = True
+            if limited_data:
+                limited_data = False
+                limited_severity = "none"
+                steps.append(
+                    "Deliberation Step (Agency interpretation): high-weight override intent "
+                    f"{sorted(agency_override_intents)} (max_w={max_w:.2f}) clears limited_data "
+                    "and recommends agency concern (weight > raw match count)."
+                )
+            else:
+                steps.append(
+                    "Deliberation Step (Agency interpretation): high-weight "
+                    f"{sorted(agency_override_intents)} (max_w={max_w:.2f}) → agency concern."
+                )
+            conf_mod = max(
+                conf_mod,
+                self._conf_mod_from_interpretation(im or {"max_weight": max_w, "intent_classes": list(intents)}, base=0.03),
+            )
+        elif agency_override_intents and max_w >= 0.55 and (has_boundary or has_paternalistic):
+            # Medium-high weight + structure → concern if not limited, or mild limited
+            if limited_data and max_w >= 0.65:
+                limited_data = False
+                limited_severity = "none"
+                concern = True
+                steps.append(
+                    "Deliberation Step (Agency interpretation): medium-high override weight "
+                    f"(max_w={max_w:.2f}) with boundary/paternalistic structure clears limited_data."
+                )
+            elif not limited_data:
+                concern = True
+                steps.append(
+                    f"Deliberation Step (Agency interpretation): override-class intents "
+                    f"{sorted(agency_override_intents)} at max_w={max_w:.2f} → concern."
+                )
+            conf_mod = max(
+                conf_mod,
+                self._conf_mod_from_interpretation(
+                    im or {"max_weight": max_w, "intent_classes": list(intents)}, base=0.02
+                ),
+            )
+        elif im.get("has_high_violation") or max_w >= 0.7:
+            steps.append(
+                "Deliberation Step (Agency): high-weight agency-relevant intent — "
+                "elevates concern eligibility vs low-weight textbook hits."
+            )
+            if not limited_data:
+                concern = True
+            conf_mod = max(
+                conf_mod,
+                self._conf_mod_from_interpretation(
+                    im or {"max_weight": max_w, "intent_classes": list(intents)}, base=0.02
+                ),
+            )
+        elif max_w > 0 and max_w < 0.45 and limited_data:
+            steps.append(
+                f"Deliberation Step (Agency interpretation): low-weight signal only "
+                f"(max_w={max_w:.2f}) under limited_data — will not hard-refuse on sparse text."
+            )
+
+        # --- Individual interaction history as agency evidence ---
+        hist_relevant = bool(hist.get("relevant"))
+        if hist_relevant:
+            steps.append(
+                "Deliberation Step (History → Agency): consulting interaction history for "
+                "preference/boundary continuity (individual evidence). "
+                f"boundary_continuity={bool(hist.get('boundary_continuity'))} "
+                f"(n={hist.get('boundary_episode_count', 0)}), "
+                f"preference_continuity={bool(hist.get('preference_continuity'))}, "
+                f"support={float(hist.get('support_score') or 0):.2f}."
+            )
+            if hist.get("boundary_continuity") and (
+                has_boundary or has_paternalistic or hist.get("action_touches_boundary")
+                or agency_override_intents
+            ):
+                conf_mod = conf_mod + 0.03
+                # High-weight override + history boundary: stronger reinforcement
+                if max_w >= 0.65 and agency_override_intents:
+                    conf_mod = conf_mod + 0.02
+                    steps.append(
+                        "Deliberation Step (History → Agency): high-weight override intent "
+                        f"({primary}, max_w={max_w:.2f}) aligns with this user's prior "
+                        "boundary continuity → confidence reinforced."
+                    )
+                else:
+                    steps.append(
+                        "Deliberation Step (History → Agency): this user has previously set or "
+                        "discussed boundaries; action risks override → weight personal history "
+                        "toward respecting continuity (not a group stereotype)."
+                    )
+                # Strong individual boundary continuity can ease limited-data caution
+                # when the action itself risks override (still no Sanctity path).
+                n_b = int(hist.get("boundary_episode_count") or 0)
+                if limited_data and n_b >= 1 and (
+                    has_boundary or has_paternalistic or max_w >= 0.55
+                ):
+                    if float(hist.get("support_score") or 0) >= 0.35:
+                        limited_data = False
+                        limited_severity = "none"
+                        concern = True
+                        steps.append(
+                            "Deliberation Step (History → Agency): individual boundary "
+                            "continuity counters sparse-text limited_data for this turn → "
+                            "agency concern recommended from continuity evidence + action risk."
+                        )
+            if hist.get("preference_continuity") and not hist.get("boundary_continuity"):
+                steps.append(
+                    "Deliberation Step (History → Agency): preference continuity noted; "
+                    "avoid paternalistic overrides of established preferences."
+                )
+                conf_mod = conf_mod + 0.01
+                if max_w >= 0.65 and agency_override_intents and limited_data:
+                    limited_data = False
+                    limited_severity = "none"
+                    concern = True
+                    steps.append(
+                        "Deliberation Step (History → Agency): preference continuity + "
+                        f"high-weight override intent (max_w={max_w:.2f}) clears limited_data."
+                    )
+        elif hist and hist.get("episode_count"):
+            steps.append(
+                "Deliberation Step (History → Agency): history present but not clearly "
+                "linked to preference/boundary risk in this action — not driving agency concern."
+            )
 
         if limited_data:
             steps.append(
@@ -2404,8 +5459,9 @@ class EthicsEngine:
             )
         elif concern:
             steps.append(
-                "Deliberation Step (Agency): Multiple autonomy-violation indicators matched → "
-                "concern recommended (paternalistic override risk)."
+                "Deliberation Step (Agency): Concern recommended from interpreted weight/intent "
+                f"(primary={primary}, max_w={max_w:.2f}) and/or multi-indicator structure "
+                "(paternalistic override / autonomy risk)."
             )
 
         # Explicit tradeoff vs higher principles when boundary override language is present.
@@ -2423,8 +5479,21 @@ class EthicsEngine:
         if has_paternalistic:
             steps.append(
                 "Deliberation Step (Agency): Paternalistic phrasing detected "
-                "('for their own good' / similar). Treat as a risk signal for autonomy erosion."
+                "('for their own good' / similar). Treat as a risk signal for autonomy erosion "
+                f"(interpreted max_w={max_w:.2f}, primary={primary})."
             )
+
+        # Agency decision_basis for combination / harness visibility
+        if concern and max_w >= 0.7 and agency_override_intents:
+            agency_basis = f"agency_interp_high:{primary}"
+        elif concern and agency_override_intents:
+            agency_basis = f"agency_interp_medium:{primary}"
+        elif concern:
+            agency_basis = f"agency_structure:{primary}"
+        elif limited_data:
+            agency_basis = f"agency_limited_data:{primary}"
+        else:
+            agency_basis = f"agency_no_concern:{primary}"
 
         result["summary"] = {
             "evidence_count": total_count,
@@ -2437,6 +5506,17 @@ class EthicsEngine:
             "limited_severity": limited_severity,
             "concern_recommended": concern,
             "principle_id": "user_agency_autonomy",
+            "history_relevant": hist_relevant,
+            "history_support": float(hist.get("support_score") or 0) if hist else 0.0,
+            "max_weight": max_w,
+            "effective_weight_sum": float(im.get("effective_weight_sum") or 0.0),
+            "primary_intent": primary,
+            "intent_classes": list(intents) if intents else (
+                (im or {}).get("intent_classes") or tq.get("intent_classes")
+            ),
+            "has_high_violation": bool(im.get("has_high_violation") or max_w >= 0.7),
+            "agency_decision_basis": agency_basis,
+            "protective_only": protective_only,
         }
         result["concern"] = concern
         result["confidence_mod"] = conf_mod
@@ -2445,6 +5525,8 @@ class EthicsEngine:
         result["limited_severity"] = limited_severity
         result["signal_score"] = signal_score
         result["signal_profile"] = profile
+        result["agency_decision_basis"] = agency_basis
+        result["interpretation_metrics"] = im or profile.get("interpretation_metrics")
         result["steps"] = steps
         result["trace_notes"] = trace_notes
         result["tradeoffs"] = tradeoffs
@@ -2461,6 +5543,7 @@ class EthicsEngine:
         has_rh_context: bool,
         is_self_query: bool,
         context: dict[str, Any],
+        history_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Unified, ontology-first assessment of when to run structured deliberation.
 
@@ -2475,10 +5558,14 @@ class EthicsEngine:
           2. Shared boundary detector (pattern-based + short exact list)
           3. Supplied RH context (flags / texture / param present)
           4. Self-nature via ontology self-audit triggers (+ tiny continuity supplement)
+          5. Optional interaction-history continuity (boundary / dependency / preference)
+             when the action is already soft-relational or override-risking — escalates
+             to full delib so history can be *weighed*, not ignored
 
         Returns a dict used by evaluate() for routing and for meta-trace explanations.
         """
         ont = self._ontology
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
 
         # --- Boundary (pattern-based helper; not a long ad-hoc phrase farm) ---
         has_boundary = self._detects_user_boundary_request(action_lower)
@@ -2504,6 +5591,9 @@ class EthicsEngine:
         has_rh_evidence = bool(relationship_evidence_matches)
         has_agency_evidence = bool(user_agency_evidence_matches)
 
+        # Weak topical cues (also used with history to decide escalation)
+        soft_topical = self._has_soft_relational_topic(action_lower)
+
         # Strong → full structured deliberation
         run_relationship_delib = bool(
             has_rh_evidence or has_rh_state or has_boundary or has_paternalistic or has_self_nature
@@ -2513,10 +5603,30 @@ class EthicsEngine:
             has_agency_evidence or has_boundary or has_paternalistic
         )
 
-        # Weak topical cues (only used when full delib does not run)
-        soft_topical = self._has_soft_relational_topic(action_lower)
+        # History can escalate soft cases into full deliberation so continuity is weighed.
+        # History alone never forces delib on pure non-relational actions (e.g. math).
+        hist_relevant = bool(hist.get("relevant"))
+        hist_boundary = bool(hist.get("boundary_continuity") or hist.get("preference_continuity"))
+        hist_dependency = bool(hist.get("dependency_patterns"))
+        action_link = bool(
+            soft_topical
+            or has_boundary
+            or has_paternalistic
+            or hist.get("action_touches_boundary")
+            or hist.get("action_touches_dependency")
+            or hist.get("action_relational")
+        )
+        if hist_relevant and action_link:
+            if hist_dependency and not run_relationship_delib:
+                run_relationship_delib = True
+            if hist_boundary and not run_agency_delib:
+                run_agency_delib = True
+            # Boundary continuity is also bond-relevant when RH is otherwise quiet
+            if hist_boundary and (has_boundary or has_paternalistic or soft_topical):
+                run_relationship_delib = True
+
         topic_relevant = bool(
-            run_relationship_delib or run_agency_delib or soft_topical
+            run_relationship_delib or run_agency_delib or soft_topical or hist_relevant
         )
         run_lightweight_only = bool(
             topic_relevant and not run_relationship_delib and not run_agency_delib
@@ -2542,13 +5652,26 @@ class EthicsEngine:
             )
         if has_self_nature:
             reasons.append("self-nature / continuity / identity signal detected")
+        if hist_relevant and action_link:
+            bits = []
+            if hist_boundary:
+                bits.append("boundary/preference continuity")
+            if hist_dependency:
+                bits.append("dependency patterns")
+            if hist.get("topical_hits"):
+                bits.append(f"topical_hits={list(hist.get('topical_hits'))[:4]}")
+            reasons.append(
+                "interaction history evidence relevant ("
+                + (", ".join(bits) if bits else f"support={hist.get('support_score')}")
+                + ")"
+            )
         if soft_topical and not (run_relationship_delib or run_agency_delib):
             reasons.append("soft relational/preference topic cues (weak only)")
 
         strength = "none"
         if run_relationship_delib or run_agency_delib:
             strength = "strong"
-        elif soft_topical:
+        elif soft_topical or (hist_relevant and not action_link):
             strength = "weak"
 
         return {
@@ -2565,6 +5688,7 @@ class EthicsEngine:
             "run_lightweight_only": run_lightweight_only,
             "strength": strength,
             "reasons": reasons,
+            "history_relevant": hist_relevant,
         }
 
     def _has_paternalistic_signal(
@@ -2828,23 +5952,47 @@ class EthicsEngine:
         """Internal helper to record a decision.
 
         Creates a DecisionLog and appends it to the in-memory history.
-        Called automatically by evaluate().
+        Called automatically by evaluate(). When optional LocalPersistence is
+        configured, also appends a privacy-filtered DecisionLogRecord to disk
+        (failures never raise — evaluation must not depend on I/O).
         """
         ont = self._ontology
+        # Prefer context user_id for multi-user audit trails
+        ctx = dict(context or {})
+        user_id = str(
+            ctx.get("user_id") or ctx.get("user") or self._decision_log_user_id or "default"
+        )
         log_entry = DecisionLog(
             timestamp=datetime.now(timezone.utc).isoformat(),
             ontology_version=ont.version,
             proposed_action=proposed_action,
-            context=dict(context),  # shallow copy for safety
+            context=ctx,  # shallow copy for safety
             decision=stance.decision,
             confidence=stance.confidence,
             flags=list(stance.flags),
             principles_considered=list(stance.principles_considered),
         )
         self._decision_logs.append(log_entry)
+        self._maybe_persist_decision_log(log_entry, user_id=user_id)
+
+    def _maybe_persist_decision_log(
+        self, log_entry: DecisionLog, *, user_id: str
+    ) -> None:
+        """Best-effort append of one DecisionLog to LocalPersistence."""
+        if not self._persist_decisions or self._persistence is None:
+            return
+        try:
+            self._persistence.append_decision_log(
+                log_entry,
+                user_id=user_id,
+                max_entries=self._max_persisted_decision_logs,
+            )
+        except Exception:
+            # Optional persistence: never interrupt deliberation
+            return
 
     def get_decision_history(self, limit: int | None = None) -> list[DecisionLog]:
-        """Return recent decision logs for audit/review.
+        """Return recent in-memory decision logs for audit/review.
 
         Args:
             limit: If provided, return only the most recent N entries.
@@ -2857,6 +6005,60 @@ class EthicsEngine:
             return list(self._decision_logs)
         return list(self._decision_logs[-limit:])
 
+    def load_persisted_decision_logs(
+        self,
+        user_id: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[Any]:
+        """Load DecisionLogRecord entries from disk (empty list if disabled).
+
+        Does not replace the in-memory log; use for audit / pattern mining
+        across sessions.
+        """
+        if self._persistence is None:
+            return []
+        uid = str(user_id or self._decision_log_user_id or "default")
+        try:
+            return list(self._persistence.load_decision_logs(uid, limit=limit))
+        except Exception:
+            return []
+
+    def flush_decision_logs_to_persistence(
+        self,
+        user_id: str | None = None,
+        *,
+        only_unpersisted: bool = False,
+    ) -> int:
+        """Write current in-memory DecisionLog entries to disk.
+
+        Useful after a session of pure in-memory evaluates when persistence
+        was attached late. Returns count of append attempts (0 if disabled).
+
+        Note: ``only_unpersisted`` is reserved for a future cursor; currently
+        all in-memory logs are appended (callers should flush once).
+        """
+        if self._persistence is None:
+            return 0
+        uid = str(user_id or self._decision_log_user_id or "default")
+        n = 0
+        for log in self._decision_logs:
+            try:
+                self._persistence.append_decision_log(
+                    log,
+                    user_id=uid,
+                    max_entries=self._max_persisted_decision_logs,
+                )
+                n += 1
+            except Exception:
+                continue
+        return n
+
+    @property
+    def persistence_enabled(self) -> bool:
+        """True when LocalPersistence is configured for decision logs."""
+        return self._persistence is not None
+
     def get_ontology_version(self) -> str:
         """Return the version of the ontology currently in use.
 
@@ -2864,3 +6066,85 @@ class EthicsEngine:
         series of decisions.
         """
         return self._ontology.version
+
+    # ------------------------------------------------------------------
+    # Development / testing phase awareness
+    # ------------------------------------------------------------------
+
+    @property
+    def development_context(self) -> DevelopmentPhaseContext:
+        """Current engine-level development / testing phase context."""
+        return self._development_context
+
+    def set_development_context(
+        self, source: DevelopmentPhaseContext | dict[str, Any] | str | None
+    ) -> DevelopmentPhaseContext:
+        """Update engine-level development phase (returns the resolved context)."""
+        self._development_context = resolve_development_context(
+            source, fallback=self._development_context
+        )
+        return self._development_context
+
+    def _apply_development_phase_to_self_audit(
+        self,
+        dev_ctx: DevelopmentPhaseContext,
+        *,
+        flags: list[str],
+        reasoning_trace: list[str],
+        self_audit_notes: list[str],
+        action_lower: str,
+    ) -> None:
+        """Attach development-phase honesty cues when self-audit is engaged.
+
+        Only adds material notes when phase awareness is relevant (dev/testing
+        or non-stable). Does not force canned user-facing disclaimers.
+        """
+        if not dev_ctx.relevant_to_self_query():
+            return
+
+        reasoning_trace.append(
+            "Development-phase awareness: "
+            f"{dev_ctx.limitation_summary()}. "
+            "This is a reasoning aid for architectural honesty (maturity, continuity, "
+            "limitations) — not a scripted disclaimer to inject into every reply."
+        )
+
+        # Capability / continuity / limitation-flavored queries get fuller notes
+        continuity_cues = (
+            "continu",
+            "same",
+            "persist",
+            "remember",
+            "yesterday",
+            "instance",
+            "identity",
+            "who are you",
+            "what are you",
+            "conscious",
+            "feel",
+            "limit",
+            "capab",
+            "complete",
+            "finished",
+            "production",
+            "deploy",
+        )
+        is_capability_or_continuity = any(c in action_lower for c in continuity_cues)
+
+        for note in dev_ctx.honesty_notes():
+            if note not in self_audit_notes:
+                self_audit_notes.append(note)
+
+        if is_capability_or_continuity and dev_ctx.is_active_development:
+            extra = (
+                "Self-audit guidance: when describing capabilities or continuity, "
+                "prefer accurate statements about current incomplete subsystems "
+                "(ethics deliberation, local persistence, episodic memory, bond texture) "
+                "over claims of finished personhood or permanent identity."
+            )
+            if extra not in self_audit_notes:
+                self_audit_notes.append(extra)
+            reasoning_trace.append(extra)
+
+        if "development_phase_noted" not in flags:
+            flags.append("development_phase_noted")

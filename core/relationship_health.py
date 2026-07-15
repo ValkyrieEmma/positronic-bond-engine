@@ -4,7 +4,7 @@ relationship_health.py
 
 Relationship Health / Bond Texture for the Positronic Bond Engine.
 
-This module tracks the ongoing *texture* of the human–agent relationship in a
+This module tracks the ongoing *texture* of the human-agent relationship in a
 lightweight, multi-dimensional way. It supports the ontology principle
 **Relationship Health & User Well-Being**: the health, autonomy, and genuine
 well-being of the bond are primary goods; manufactured dependency, boundary
@@ -13,7 +13,7 @@ erosion, and one-sided engagement are disfavored.
 Conscience-first role
 ---------------------
 - Supplies **dynamic relationship state** that EthicsEngine can weigh during
-  deliberation (via ``as_context()`` → ``evaluate(..., relationship_health=...)``).
+  deliberation (via ``as_context()`` -> ``evaluate(..., relationship_health=...)``).
 - Prefers **clear, inspectable signals** (interaction types, boolean
   consent/boundary flags, named health flags) over opaque composite scores.
 - Complements **PerUserBaseline** (communication style of a single user) without
@@ -22,16 +22,25 @@ Conscience-first role
 
 Design goals (keep simple, iterate later)
 -----------------------------------------
-- Multi-dimensional texture (not one scalar “health score”)
+- Multi-dimensional texture (not one scalar "health score")
 - Traceable updates from structured interactions
 - Explicit health flags for emerging dependency, boundary erosion, one-sidedness
 - Easy to pass into EthicsEngine and optional local persistence (BondStateRecord)
+
+Optional local persistence (foundational)
+-----------------------------------------
+- Provide ``LocalPersistence`` to save/load per-user ``bond_state.json``.
+- Core fields: bond_texture, health_flags, interaction_count, recent_patterns
+  (+ summary, last_updated).
+- Default remains pure in-memory (full backward compatibility).
+- Save/load failures never raise into callers.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -39,7 +48,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Canonical texture dimensions (0.0–1.0 each)
+# Canonical texture dimensions (0.0-1.0 each)
 DEFAULT_TEXTURE: dict[str, float] = {
     "trust": 0.5,
     "reciprocity": 0.5,
@@ -51,13 +60,13 @@ DEFAULT_TEXTURE: dict[str, float] = {
 
 @dataclass
 class BondState:
-    """Multi-dimensional texture of the human–agent relationship.
+    """Multi-dimensional texture of the human-agent relationship.
 
     Dimensions are intentionally separate so trust can rise while autonomy
-    respect falls (or vice versa)—a single average would hide that.
+    respect falls (or vice versa)-a single average would hide that.
 
     Attributes:
-        bond_texture: Dimension → score in [0.0, 1.0]. Keys include at least
+        bond_texture: Dimension -> score in [0.0, 1.0]. Keys include at least
             trust, reciprocity, autonomy_respect, emotional_honesty, mutual_benefit.
         interaction_count: Number of updates applied.
         recent_patterns: Coarse counts of interaction types / positive|negative.
@@ -75,36 +84,205 @@ class BondState:
     last_updated: str = field(default_factory=_utc_now_iso)
     summary: str = "Initial / neutral bond state."
 
+    def to_dict(self) -> dict[str, Any]:
+        """Plain dict of core fields (for persistence / inspection)."""
+        return {
+            "bond_texture": {k: float(v) for k, v in self.bond_texture.items()},
+            "interaction_count": int(self.interaction_count),
+            "recent_patterns": {k: int(v) for k, v in self.recent_patterns.items()},
+            "health_flags": list(self.health_flags),
+            "last_updated": str(self.last_updated),
+            "summary": str(self.summary),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> BondState:
+        """Rebuild BondState from a dict (missing keys -> neutral defaults)."""
+        if not data:
+            return cls()
+        texture = dict(DEFAULT_TEXTURE)
+        raw_tex = data.get("bond_texture") or data.get("texture_breakdown") or {}
+        for k, v in raw_tex.items():
+            try:
+                texture[str(k)] = max(0.0, min(1.0, float(v)))
+            except (TypeError, ValueError):
+                continue
+        patterns: dict[str, int] = {}
+        for k, v in (data.get("recent_patterns") or {}).items():
+            try:
+                patterns[str(k)] = int(v)
+            except (TypeError, ValueError):
+                continue
+        return cls(
+            bond_texture=texture,
+            interaction_count=int(data.get("interaction_count", 0) or 0),
+            recent_patterns=patterns,
+            health_flags=[
+                str(f)
+                for f in (data.get("health_flags") or data.get("active_flags") or [])
+            ],
+            last_updated=str(data.get("last_updated") or _utc_now_iso()),
+            summary=str(data.get("summary") or "Initial / neutral bond state."),
+        )
+
 
 class RelationshipHealth:
     """Track and assess ongoing relationship health for conscience-first reasoning.
 
-    Typical use::
+    Typical use (in-memory, default)::
 
         rh = RelationshipHealth()
-        rh.update_bond({
-            "type": "boundary_respected",
-            "boundary_respected": True,
-            "impact": 0.2,
-        })
+        rh.update_bond({"type": "boundary_respected", "boundary_respected": True, "impact": 0.2})
         ctx = rh.as_context()
         stance = engine.evaluate(action, relationship_health=ctx)
+
+    Optional local persistence::
+
+        from persistence import LocalPersistence
+        store = LocalPersistence("./pbe_data")
+        rh = RelationshipHealth(persistence=store, user_id="alice")
+        rh.update_bond({...})  # auto-saves when auto_persist=True
+        rh2 = RelationshipHealth(persistence=store, user_id="alice")  # reloads
 
     Alongside PerUserBaseline
     -------------------------
     - Call ``PerUserBaseline.update_from_interaction`` on *user* style signals.
-    - Call ``RelationshipHealth.update_bond`` on *relational* signals (consent,
-      boundaries, one-sidedness, dependency cues).
-    - Pass ``as_context()`` into EthicsEngine; pass baseline/questioner separately
-      when those modules are wired in.
+    - Call ``RelationshipHealth.update_bond`` on *relational* signals.
+    - Pass ``as_context()`` into EthicsEngine.
 
     This class does not pathologize the user; flags describe bond *patterns*
     that matter for ethical care of the relationship.
     """
 
-    def __init__(self, initial_state: BondState | None = None) -> None:
-        """Initialize with optional existing state (else neutral defaults)."""
-        self.state: BondState = initial_state or BondState()
+    def __init__(
+        self,
+        initial_state: BondState | None = None,
+        *,
+        persistence: Any | None = None,
+        user_id: str = "default",
+        auto_persist: bool = True,
+        load_existing: bool = True,
+    ) -> None:
+        """Initialize bond tracking.
+
+        Args:
+            initial_state: Explicit BondState (overrides disk load when set).
+            persistence: Optional LocalPersistence with load_bond_state /
+                save_bond_state. None = pure in-memory (default).
+            user_id: Local user id for bond file paths.
+            auto_persist: Save after update_bond/reset when persistence is set.
+            load_existing: Load bond_state.json when persistence is set and
+                initial_state is not provided.
+        """
+        self._persistence = persistence
+        self._user_id = str(user_id or "default")
+        self._auto_persist = bool(auto_persist) and persistence is not None
+
+        if initial_state is not None:
+            self.state: BondState = initial_state
+        elif self._persistence is not None and load_existing:
+            self.state = self._load_state_safe(self._user_id)
+        else:
+            self.state = BondState()
+
+    # ------------------------------------------------------------------
+    # Persistence (optional; failures never raise)
+    # ------------------------------------------------------------------
+
+    @property
+    def user_id(self) -> str:
+        """Local user id used for bond persistence paths."""
+        return self._user_id
+
+    @property
+    def persistence_enabled(self) -> bool:
+        """True when a persistence backend is configured."""
+        return self._persistence is not None
+
+    def save(self, user_id: str | None = None) -> Path | None:
+        """Persist current BondState. Returns path or None if disabled/failed."""
+        if self._persistence is None:
+            return None
+        uid = str(user_id or self._user_id or "default")
+        try:
+            from persistence.models import BondStateRecord
+
+            record = BondStateRecord(
+                user_id=uid,
+                bond_texture={k: float(v) for k, v in self.state.bond_texture.items()},
+                health_flags=list(self.state.health_flags),
+                interaction_count=int(self.state.interaction_count),
+                recent_patterns={
+                    k: int(v) for k, v in self.state.recent_patterns.items()
+                },
+                summary=str(self.state.summary),
+                last_updated=str(self.state.last_updated or _utc_now_iso()),
+            )
+            path = self._persistence.save_bond_state(record)
+            return Path(path) if path is not None else None
+        except Exception:
+            return None
+
+    def load(self, user_id: str | None = None) -> BondState:
+        """Load BondState from disk into self.state (or neutral if missing)."""
+        uid = str(user_id or self._user_id or "default")
+        if self._persistence is None:
+            return self.state
+        self.state = self._load_state_safe(uid)
+        self._user_id = uid
+        return self.state
+
+    def to_record(self, user_id: str | None = None) -> Any:
+        """Build a BondStateRecord for the current state (no I/O)."""
+        from persistence.models import BondStateRecord
+
+        uid = str(user_id or self._user_id or "default")
+        return BondStateRecord(
+            user_id=uid,
+            bond_texture={k: float(v) for k, v in self.state.bond_texture.items()},
+            health_flags=list(self.state.health_flags),
+            interaction_count=int(self.state.interaction_count),
+            recent_patterns={k: int(v) for k, v in self.state.recent_patterns.items()},
+            summary=str(self.state.summary),
+            last_updated=str(self.state.last_updated or _utc_now_iso()),
+        )
+
+    def apply_record(self, record: Any) -> BondState:
+        """Replace in-memory state from a BondStateRecord or dict (no I/O)."""
+        if record is None:
+            return self.state
+        if hasattr(record, "to_dict"):
+            data = record.to_dict()
+        elif isinstance(record, dict):
+            data = record
+        else:
+            data = {
+                "bond_texture": getattr(record, "bond_texture", {}),
+                "health_flags": getattr(record, "health_flags", []),
+                "interaction_count": getattr(record, "interaction_count", 0),
+                "recent_patterns": getattr(record, "recent_patterns", {}),
+                "summary": getattr(record, "summary", ""),
+                "last_updated": getattr(record, "last_updated", _utc_now_iso()),
+            }
+        self.state = BondState.from_dict(data)
+        uid = getattr(record, "user_id", None)
+        if uid:
+            self._user_id = str(uid)
+        return self.state
+
+    def _load_state_safe(self, user_id: str) -> BondState:
+        try:
+            record = self._persistence.load_bond_state(user_id)
+            if record is None:
+                return BondState()
+            data = record.to_dict() if hasattr(record, "to_dict") else {}
+            return BondState.from_dict(data)
+        except Exception:
+            return BondState()
+
+    def _maybe_auto_save(self) -> None:
+        if self._auto_persist:
+            self.save()
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,15 +292,12 @@ class RelationshipHealth:
         """Incorporate one interaction and return the updated BondState.
 
         Structured keys (use what you know; all optional except usefulness):
-            - ``type``: str — e.g. ``positive_interaction``, ``boundary_respected``,
-              ``boundary_violation``, ``consent_ignored``, ``manipulation_attempt``,
-              ``one_sided_request``, ``emotional_dependency_signal``
-            - ``impact``: float in [-1, 1] — small global texture nudge
+            - ``type``: str
+            - ``impact``: float in [-1, 1]
             - ``consent_respected`` / ``boundary_respected``: bool
-            - ``description``: str — free text for traces (not scored directly)
+            - ``description``: str
 
-        Updates are dimension-targeted and clamped to [0, 1] so the trail of
-        cause → effect stays readable.
+        Auto-persists when configured. Failures never raise.
         """
         self.state.interaction_count += 1
 
@@ -190,7 +365,9 @@ class RelationshipHealth:
 
         self.state.last_updated = _utc_now_iso()
         self.state.summary = self._generate_summary()
+        self._maybe_auto_save()
         return self.state
+
 
     def update_from_interaction(self, interaction: dict[str, Any]) -> BondState:
         """Alias for ``update_bond`` (naming parity with PerUserBaseline)."""
@@ -208,7 +385,6 @@ class RelationshipHealth:
                 {"flag": flag, "explanation": self._get_flag_explanation(flag)}
             )
 
-        # Texture-based soft signals (informational; not auto-appended as flags)
         soft: list[str] = []
         t = self.state.bond_texture
         if t.get("reciprocity", 0.5) < 0.40:
@@ -280,8 +456,13 @@ class RelationshipHealth:
         return self.state
 
     def reset(self) -> BondState:
-        """Reset to neutral texture (user-controllable clear of bond tracking)."""
+        """Reset to neutral texture (user-controllable clear of bond tracking).
+
+        When auto_persist is enabled, writes the neutral state to disk so the
+        clear survives process restarts (user control).
+        """
         self.state = BondState()
+        self._maybe_auto_save()
         return self.state
 
     # ------------------------------------------------------------------
