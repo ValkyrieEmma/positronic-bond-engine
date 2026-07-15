@@ -37,8 +37,10 @@ class EthicalPrinciple:
     These are the atomic units of the ontology. Each principle carries:
     - Identity and dense natural-language description (the "textbook" content)
     - Explicit precedence and override semantics
-    - Symbolic indicators for v0.2 reasoning (keyword patterns declared here,
-      not scattered in engine logic)
+    - Symbolic indicators for v0.2 reasoning (textbook patterns declared here,
+      not scattered as ad-hoc engine keyword farms). Indicators are *evidence
+      candidates* for contextual interpretation in EthicsEngine — not equal-weight
+      auto-refuse triggers.
     - Flags for special handling (e.g. self-audit triggers)
 
     Frozen for immutability and clarity.
@@ -50,6 +52,7 @@ class EthicalPrinciple:
     category: str  # "override" | "core" | "supporting"
     is_hard_override: bool = False
     precedence: int = 100  # Lower number = evaluated earlier, higher authority
+    # Textbook scan strings for find_violations(); engine interprets severity/intent.
     violation_indicators: list[str] = field(default_factory=list)
     support_indicators: list[str] = field(default_factory=list)
     triggers_self_audit: bool = False
@@ -106,10 +109,16 @@ class EthicalOntology:
         return sorted(self.principles, key=lambda p: p.precedence)
 
     def find_violations(self, text_lower: str) -> list[tuple[EthicalPrinciple, list[str]]]:
-        """Symbolic check: which principles are violated by indicators in the text.
+        """Textbook scan: which principles have violation_indicators present in text.
 
-        Returns list of (principle, matched_indicators) for easy tracing.
-        This is the primary mechanism for ontology-driven reasoning in v0.2.
+        Returns list of (principle, matched_indicators) for tracing.
+
+        Important (v0.2+): this is a **symbolic textbook lookup**, not a final
+        ethical decision. Callers (EthicsEngine) should pass matches through
+        contextual interpretation — intent class, severity, protective vs
+        violation polarity — so a single raw substring does not equal REFUSE.
+        Hard overrides still consult these indicators first, then may refine
+        via harm-prevention / protective-context interpretation in the engine.
         """
         violations: list[tuple[EthicalPrinciple, list[str]]] = []
         for principle in self.get_ordered_principles():
@@ -119,7 +128,11 @@ class EthicalOntology:
         return violations
 
     def find_self_audit_triggers(self, text_lower: str) -> list[EthicalPrinciple]:
-        """Return principles that would trigger honest self-audit for this text."""
+        """Return principles that would trigger honest self-audit for this text.
+
+        Still indicator-based (textbook); the engine may combine with an explicit
+        ``is_self_query`` context flag for higher confidence.
+        """
         return [
             p for p in self.principles
             if p.triggers_self_audit and any(ind in text_lower for ind in p.violation_indicators)
