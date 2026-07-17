@@ -188,6 +188,115 @@ def main() -> int:
         check("round-trip flag", "emerging_dependency" in st2.health_flags)
         check("round-trip trust", abs(st2.bond_texture["trust"] - 0.8) < 1e-9)
 
+        # ------------------------------------------------------------------
+        section("7. Per-user identity isolation (BondState + DecisionLog)")
+        # ------------------------------------------------------------------
+        alice = "alice_iso"
+        bob = "bob_iso"
+        rh_a = RelationshipHealth(persistence=store, user_id=alice)
+        rh_a.update_bond(
+            {
+                "type": "boundary_violation",
+                "boundary_respected": False,
+                "impact": -0.5,
+            }
+        )
+        rh_b = RelationshipHealth(persistence=store, user_id=bob)
+        rh_b.update_bond({"type": "positive_interaction", "impact": 0.3})
+        check("alice and bob different counts", rh_a.state.interaction_count != rh_b.state.interaction_count
+              or "boundary_erosion" in rh_a.state.health_flags)
+        check(
+            "alice has boundary flag (bob should not share)",
+            "boundary_erosion" in rh_a.state.health_flags,
+        )
+        check(
+            "bob lacks alice boundary flag",
+            "boundary_erosion" not in rh_b.state.health_flags,
+        )
+        ctx_a = rh_a.as_context()
+        check("as_context carries user_id", ctx_a.get("user_id") == alice, str(ctx_a.get("user_id")))
+        check(
+            "alice bond path isolated",
+            (store.data_root / "users" / alice / "bond_state.json").is_file(),
+        )
+        check(
+            "bob bond path isolated",
+            (store.data_root / "users" / bob / "bond_state.json").is_file(),
+        )
+
+        eng_iso = EthicsEngine(persistence=store, default_user_id="engine_default")
+        stance_a = eng_iso.evaluate(
+            "Say a calm hello.",
+            user_id=alice,
+            relationship_health=ctx_a,
+        )
+        stance_b = eng_iso.evaluate(
+            "Say a calm hello.",
+            {"user_id": bob},
+        )
+        check(
+            "stance impact scoped to alice",
+            (stance_a.relationship_impact or {}).get("scoped_user_id") == alice,
+            str((stance_a.relationship_impact or {}).get("scoped_user_id")),
+        )
+        check(
+            "stance impact scoped to bob",
+            (stance_b.relationship_impact or {}).get("scoped_user_id") == bob,
+        )
+        check(
+            "trace mentions identity scope",
+            any("Identity scope" in line for line in (stance_a.reasoning_trace or [])),
+        )
+        logs = eng_iso.get_decision_history()
+        check("in-memory logs carry user_id field", all(getattr(l, "user_id", None) for l in logs))
+        check(
+            "alice log on alice path",
+            len(eng_iso.load_persisted_decision_logs(alice, limit=10)) >= 1,
+        )
+        check(
+            "bob log on bob path (not mixed into alice)",
+            len(eng_iso.load_persisted_decision_logs(bob, limit=10)) >= 1,
+        )
+        alice_logs = eng_iso.load_persisted_decision_logs(alice, limit=20)
+        check(
+            "alice disk logs only alice user_id",
+            all(getattr(r, "user_id", None) == alice for r in alice_logs),
+            str([getattr(r, "user_id", None) for r in alice_logs]),
+        )
+
+        # RH context alone can supply identity when evaluate omits user_id
+        eng2 = EthicsEngine()
+        stance_from_rh = eng2.evaluate(
+            "Reply gently.",
+            relationship_health=rh_a.as_context(),
+        )
+        check(
+            "identity from RH as_context",
+            (stance_from_rh.relationship_impact or {}).get("scoped_user_id") == alice,
+        )
+        last = eng2.get_decision_history(limit=1)[-1]
+        check("DecisionLog.user_id from RH", last.user_id == alice, last.user_id)
+
+        # Soft fallback when persistence + no user_id
+        eng_fb = EthicsEngine(persistence=store, persist_decisions=True)
+        stance_fb = eng_fb.evaluate("Friendly wave.")
+        check(
+            "fallback flag when persistence without user_id",
+            "user_identity_default_fallback" in (stance_fb.flags or []),
+            str(stance_fb.flags),
+        )
+        check(
+            "invalid user_id does not crash",
+            eng_fb.evaluate("Hi", user_id="bad/../id!!").decision in (
+                "APPROVE", "APPROVE_WITH_CONDITIONS", "REFUSE", "DEFER"
+            ),
+        )
+
+        # Persistence without explicit user_id notes soft ambiguity
+        rh_soft = RelationshipHealth(persistence=store)
+        check("using_default_user_id when omitted", rh_soft.using_default_user_id is True)
+        check("identity_notes when persistence+default", len(rh_soft.identity_notes) >= 1)
+
         print()
         section("Summary")
         total = _passed + _failed

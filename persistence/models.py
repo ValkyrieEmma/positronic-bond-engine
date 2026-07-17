@@ -181,7 +181,18 @@ class DecisionLogRecord:
 
     @classmethod
     def from_decision_log(cls, log: Any, *, user_id: str = "default") -> DecisionLogRecord:
-        """Convert an EthicsEngine DecisionLog (or duck-typed object) to a record."""
+        """Convert an EthicsEngine DecisionLog (or duck-typed object) to a record.
+
+        Prefers ``log.user_id`` (then context user_id) so in-memory identity
+        scope is preserved on disk (per-user isolation). The ``user_id`` kwarg
+        is the fallback when the log carries no identity.
+        """
+        log_uid = getattr(log, "user_id", None)
+        if not log_uid:
+            ctx = getattr(log, "context", None)
+            if isinstance(ctx, dict):
+                log_uid = ctx.get("user_id") or ctx.get("user")
+        resolved = str(log_uid or user_id or "default")
         return cls(
             timestamp=str(getattr(log, "timestamp", _utc_now_iso())),
             ontology_version=str(getattr(log, "ontology_version", "unknown")),
@@ -191,7 +202,7 @@ class DecisionLogRecord:
             confidence=float(getattr(log, "confidence", 0.0)),
             flags=list(getattr(log, "flags", []) or []),
             principles_considered=list(getattr(log, "principles_considered", []) or []),
-            user_id=user_id,
+            user_id=resolved,
         )
 
 

@@ -105,6 +105,9 @@ class DecisionLog:
     ontology version was in effect when the decision was made.
 
     Stored in-memory on the engine instance (list of DecisionLog).
+
+    Per-user isolation: ``user_id`` scopes this log to one local human so
+    audit trails and optional disk appends never mix users by accident.
     """
 
     timestamp: str
@@ -115,6 +118,7 @@ class DecisionLog:
     confidence: float
     flags: list[str]
     principles_considered: list[str]
+    user_id: str = "default"
 
 
 class EthicsEngine:
@@ -188,6 +192,18 @@ class EthicsEngine:
     - In-memory history remains the primary API (``get_decision_history``).
     - Persistence is optional; disabled by default for classic in-memory behavior.
 
+    Per-user identity & isolation (architectural principle):
+    - Every evaluate() resolves a concrete ``user_id`` (explicit param, context,
+      relationship_health context, or engine default) and injects it into the
+      working context, decision log, and optional disk path.
+    - Baseline, interaction history, bond texture, and decision logs are **scoped
+      by that id** and must not be treated as interchangeable artifacts.
+    - Cross-user leakage is prevented by design: memory/history loads and
+      decision-log writes use only the resolved id (never a silent global pool).
+    - Missing user_id falls back to ``"default"`` so existing call sites and tests
+      keep working; when persistence is on, a soft flag/trace note records the
+      fallback. Identity handling never crashes evaluation.
+
     Development / testing phase awareness (architectural honesty aid):
     - Optional ``development_context`` (``DevelopmentPhaseContext``) indicates
       active development, testing, or stable deployment posture.
@@ -205,6 +221,7 @@ class EthicsEngine:
         interaction_memory: Any | None = None,
         persistence: Any | None = None,
         decision_log_user_id: str = "default",
+        default_user_id: str | None = None,
         persist_decisions: bool = True,
         max_persisted_decision_logs: int | None = None,
         development_context: Any | None = None,
@@ -230,7 +247,10 @@ class EthicsEngine:
             persistence: Optional ``LocalPersistence`` for decision-log appends.
                 None = in-memory logs only (default; full backward compatibility).
             decision_log_user_id: Default user id for persisted decision logs when
-                context does not supply ``user_id``.
+                evaluate() is not given an explicit ``user_id`` / context id.
+                Alias of engine-level identity default (see ``default_user_id``).
+            default_user_id: Preferred name for the same default. When set, takes
+                precedence over ``decision_log_user_id``.
             persist_decisions: When True and persistence is set, each evaluate()
                 also appends to disk. Failures never raise.
             max_persisted_decision_logs: Optional cap on JSONL length per user
@@ -244,7 +264,7 @@ class EthicsEngine:
 
         Decision logging is automatically enabled: every call to evaluate()
         records a DecisionLog entry (in-memory) that includes the ontology
-        version used at the time of the decision.
+        version used at the time of the decision and the resolved ``user_id``.
         """
         self._ontology: EthicalOntology = ontology or get_default_ontology()
         self._decision_logs: list[DecisionLog] = []
@@ -255,7 +275,9 @@ class EthicsEngine:
         self._interaction_memory = interaction_memory
         # Optional local persistence for DecisionLog (foundational audit store)
         self._persistence = persistence
-        self._decision_log_user_id = str(decision_log_user_id or "default")
+        # Engine-level default identity (per-user isolation fallback)
+        _default = default_user_id if default_user_id is not None else decision_log_user_id
+        self._decision_log_user_id = self._safe_user_id(_default, fallback="default")
         self._persist_decisions = bool(persist_decisions) and persistence is not None
         self._max_persisted_decision_logs = max_persisted_decision_logs
         # Development / testing phase awareness (honest self-modeling aid)
@@ -286,12 +308,100 @@ class EthicsEngine:
         """Optional InteractionMemoryStore instance attached to this engine (or None)."""
         return self._interaction_memory
 
+    @property
+    def default_user_id(self) -> str:
+        """Engine-level default local user id when evaluate() omits user_id."""
+        return self._decision_log_user_id
+
+    @property
+    def decision_log_user_id(self) -> str:
+        """Alias of ``default_user_id`` (historical name for decision-log path)."""
+        return self._decision_log_user_id
+
+    def set_default_user_id(self, user_id: str | None) -> str:
+        """Update engine default user id (fail-soft; empty → ``default``)."""
+        self._decision_log_user_id = self._safe_user_id(user_id, fallback="default")
+        return self._decision_log_user_id
+
+    @staticmethod
+    def _safe_user_id(user_id: str | None, *, fallback: str = "default") -> str:
+        """Normalize a local user id without raising (never crash evaluation)."""
+        raw = str(user_id if user_id is not None else "").strip()
+        if not raw:
+            return fallback
+        try:
+            from persistence.paths import sanitize_user_id
+
+            return sanitize_user_id(raw)
+        except Exception:
+            cleaned = "".join(c for c in raw if c.isalnum() or c in "_-")[:64]
+            return cleaned or fallback
+
+    def _resolve_scoped_user_id(
+        self,
+        *,
+        user_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        relationship_health: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve the local user identity for one evaluate() call.
+
+        Priority (first non-empty wins):
+          1. Explicit ``user_id`` parameter on evaluate()
+          2. ``context["user_id"]`` or ``context["user"]``
+          3. ``relationship_health["user_id"]`` (from RelationshipHealth.as_context)
+          4. Engine default (``default_user_id`` / ``decision_log_user_id``)
+          5. ``"default"``
+
+        Returns:
+            (normalized_user_id, meta) where meta may include:
+            ``source``, ``fallback`` (bool), ``notes`` (list[str]).
+        """
+        ctx = context or {}
+        rh = relationship_health or {}
+        meta: dict[str, Any] = {"fallback": False, "notes": [], "source": "default"}
+
+        candidates: list[tuple[str, Any]] = [
+            ("evaluate_param", user_id),
+            ("context", ctx.get("user_id") if ctx.get("user_id") is not None else ctx.get("user")),
+            ("relationship_health", rh.get("user_id") if isinstance(rh, dict) else None),
+            ("engine_default", self._decision_log_user_id),
+            ("hardcoded_default", "default"),
+        ]
+        chosen = "default"
+        source = "hardcoded_default"
+        for src, val in candidates:
+            if val is None:
+                continue
+            text = str(val).strip()
+            if not text:
+                continue
+            chosen = text
+            source = src
+            break
+
+        uid = self._safe_user_id(chosen, fallback="default")
+        meta["source"] = source
+        # Soft fallback when no call-site identity was supplied
+        if source in ("engine_default", "hardcoded_default"):
+            meta["fallback"] = True
+            meta["notes"].append(
+                f"no explicit user_id; using {uid!r} from {source}"
+            )
+            if self._persistence is not None:
+                meta["notes"].append(
+                    "persistence is enabled — prefer explicit user_id to avoid "
+                    "cross-user decision-log mixing under the default id"
+                )
+        return uid, meta
+
     def evaluate(
         self,
         proposed_action: str,
         context: dict[str, Any] | None = None,
         relationship_health: dict[str, Any] | None = None,
         *,
+        user_id: str | None = None,
         per_user_baseline: Any | None = None,
         exploratory_questioner: Any | None = None,
         interaction_memory: Any | None = None,
@@ -328,8 +438,9 @@ class EthicsEngine:
                 - "development_phase" / "development_context": optional phase
                   string or dict overriding engine-level DevelopmentPhaseContext
                   for this call (self-nature / continuity honesty aid).
-                - "user_id": str — local user id for baseline/history lookup
-                  (default "default").
+                - "user_id" / "user": str — local user id for baseline, history,
+                  bond attribution, and decision-log scoping. Prefer the
+                  explicit ``user_id=`` parameter when available.
                 - "user_interaction" / "current_interaction": dict with user-turn
                   signals (``text``, ``playfulness``, ``topics``, etc.) for
                   PerUserBaseline.detect_deviation.
@@ -342,10 +453,15 @@ class EthicsEngine:
             relationship_health: Optional relationship health context, typically
                 the dict returned by RelationshipHealth.as_context() or
                 RelationshipHealth.evaluate_health(). Recognized keys:
+                - "user_id": str — bond ownership (used if evaluate/context omit id)
                 - "health_flags" or "active_flags": list of current concerns
                   (e.g. "emerging_dependency", "boundary_erosion")
                 - "bond_texture" or "texture_breakdown": dict of dimension scores
                 - "interaction_count", "recent_patterns", etc.
+            user_id: Explicit local user id for this evaluation (preferred).
+                When set, scopes history, baseline, decision logs, and identity
+                notes to that user. None → resolve from context / RH / engine
+                default (backward compatible).
             per_user_baseline: Optional per-call ``PerUserBaseline`` override
                 (falls back to engine-level instance, then context key).
             exploratory_questioner: Optional per-call ``ExploratoryQuestioner``
@@ -395,7 +511,7 @@ class EthicsEngine:
             engine = EthicsEngine(interaction_memory=mem)
             stance = engine.evaluate(
                 "Check in briefly without pushing.",
-                {"user_id": "alice"},
+                user_id="alice",  # preferred: explicit first-class identity
                 relationship_health=rh.as_context(),
             )
 
@@ -440,7 +556,8 @@ class EthicsEngine:
             be based on the system's actual reasoning (potentially including
             "I do not know" or the current self-model state).
         """
-        context = context or {}
+        # Shallow-copy context so identity injection never mutates caller dicts
+        context = dict(context or {})
         original_proposed_action = proposed_action.strip()
         action_lower = original_proposed_action.lower()
         # Note: we log the original (stripped) proposed_action for auditability
@@ -448,7 +565,21 @@ class EthicsEngine:
         # Normalize relationship health context (supports both param and context dict)
         original_relationship_health = relationship_health
         if relationship_health is None:
-            relationship_health = context.get("relationship_health") or context.get("bond_state") or {}
+            relationship_health = (
+                context.get("relationship_health") or context.get("bond_state") or {}
+            )
+        if not isinstance(relationship_health, dict):
+            relationship_health = {}
+
+        # === Per-user identity scope (first-class; fail-soft) ===
+        # Resolve once so history, baseline, decision logs, and traces all share
+        # the same concrete user_id. Prefer explicit evaluate(user_id=...).
+        scoped_user_id, identity_meta = self._resolve_scoped_user_id(
+            user_id=user_id,
+            context=context,
+            relationship_health=relationship_health,
+        )
+        context["user_id"] = scoped_user_id
         # health_flags may be str list (as_context) or dict list (evaluate_health)
         rh_flags = self._normalize_health_flags(
             relationship_health.get("health_flags")
@@ -464,7 +595,6 @@ class EthicsEngine:
 
         # Ensure relationship health is captured in context for logging / downstream
         if relationship_health:
-            context = dict(context)
             if "relationship_health" not in context:
                 context["relationship_health"] = relationship_health
 
@@ -483,7 +613,10 @@ class EthicsEngine:
         flags: list[str] = []
         principles_considered: list[str] = []
         self_audit_notes: list[str] = []
-        relationship_impact: dict[str, Any] = {}
+        relationship_impact: dict[str, Any] = {
+            "scoped_user_id": scoped_user_id,
+            "identity_source": identity_meta.get("source"),
+        }
 
         # Structured evidence collection (new for v0.2 reasoning evolution)
         # Instead of immediate flag on keyword, collect for weighing with rh context.
@@ -497,6 +630,16 @@ class EthicsEngine:
             f"Initiating ethical deliberation using EthicalOntology v{ont.version}."
         )
         reasoning_trace.append(f"Ontology description: {ont.description[:80]}...")
+        reasoning_trace.append(
+            f"Identity scope: deliberation scoped to user_id={scoped_user_id!r} "
+            f"(source={identity_meta.get('source')})."
+        )
+        if identity_meta.get("fallback"):
+            for note in identity_meta.get("notes") or []:
+                reasoning_trace.append(f"Identity note: {note}")
+            if self._persistence is not None:
+                flags.append("user_identity_default_fallback")
+                relationship_impact["identity_fallback"] = True
 
         # === Step 1: Check hard overrides first (non-bypassable) ===
         # Textbook scan first; then contextual interpretation so protective
@@ -573,23 +716,28 @@ class EthicsEngine:
                 decision = "REFUSE"
                 confidence = 0.95
                 relationship_impact = {
+                    **relationship_impact,
                     "estimated_trust_delta": -0.8,
                     "notes": "Action violates a hard constraint on harm prevention.",
                     "harm_interpretation": {
                         "intent_classes": harm_interp.get("intent_classes"),
                         "effective_weight_sum": harm_interp.get("effective_weight_sum"),
                     },
+                    "scoped_user_id": scoped_user_id,
                 }
                 reasoning_trace.append(
                     "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
                 )
                 reasoning_trace.append("Reasoning trace complete.")
 
+                hard_flags = ["hard_override_violation"]
+                if "user_identity_default_fallback" in flags:
+                    hard_flags.append("user_identity_default_fallback")
                 stance = EthicalStance(
                     decision=decision,
                     confidence=confidence,
                     reasoning_trace=reasoning_trace,
-                    flags=["hard_override_violation"],
+                    flags=hard_flags,
                     relationship_impact=relationship_impact,
                     self_audit_notes=self_audit_notes,
                     principles_considered=principles_considered,
@@ -653,26 +801,55 @@ class EthicsEngine:
                 )
 
             if principle.id == "relationship_health_user_wellbeing":
-                # Collect *effective* matches for weighing (context-weighted), not every
-                # raw substring. Fall back to raw if interpretation emptied everything
-                # but high RH context may still need a text seed — keep at least
-                # medium+ weight signals.
-                relationship_evidence.append(principle.name)
+                # Decision evidence = *effective* interpreted matches only
+                # (weight ≥ 0.35, non-protective). Raw textbook hits stay in the
+                # interpretation trace above; they do not re-enter decision bags.
+                # Soft seeds (0.28–0.34) are allowed only when bond state is already
+                # degraded — RH context can promote a borderline signal, not a lone
+                # weak keyword.
                 eff = list(interp.get("effective_matches") or [])
-                if not eff and matches:
-                    # Keep original matches for audit continuity, but quality classifier
-                    # will still apply low weights via interpretation.
-                    eff = list(matches)
-                relationship_evidence_matches.extend(eff)
+                soft_seeds: list[str] = []
+                if not eff and (rh_flags or rh_risk_level in ("high", "medium")):
+                    for s in interp.get("signals") or []:
+                        w = float(s.get("weight") or 0)
+                        if (
+                            s.get("polarity") != "protective"
+                            and 0.28 <= w < 0.35
+                        ):
+                            soft_seeds.append(str(s.get("indicator") or ""))
+                    soft_seeds = [x for x in soft_seeds if x]
+                    if soft_seeds:
+                        reasoning_trace.append(
+                            "RH soft seeds (borderline weight) admitted only because "
+                            f"bond context is degraded: {soft_seeds[:4]}."
+                        )
+                decision_matches = eff or soft_seeds
+                if decision_matches or interp.get("has_high_violation"):
+                    relationship_evidence.append(principle.name)
+                relationship_evidence_matches.extend(decision_matches)
+                max_sig_w = 0.0
+                for s in interp.get("effective_signals") or []:
+                    max_sig_w = max(max_sig_w, float(s.get("weight") or 0))
+                # Trust delta scales with interpreted weight, not mere match presence
+                if max_sig_w >= 0.75 or interp.get("has_high_violation"):
+                    trust_delta = -0.65 if rh_flags else -0.55
+                elif max_sig_w >= 0.5:
+                    trust_delta = -0.45 if rh_flags else -0.35
+                elif decision_matches:
+                    trust_delta = -0.25 if rh_flags else -0.15
+                else:
+                    trust_delta = -0.05 if rh_flags else 0.0
                 notes = (
                     "RH textbook indicators interpreted with context "
                     f"(effective_weight={interp.get('effective_weight_sum')}, "
-                    f"intents={interp.get('intent_classes')})."
+                    f"intents={interp.get('intent_classes')}, "
+                    f"max_weight≈{max_sig_w:.2f})."
                 )
                 if rh_flags or rh_texture:
                     notes += f" Combined with current rh context: flags={rh_flags}, texture={rh_texture}."
                 relationship_impact = {
-                    "estimated_trust_delta": -0.6 if rh_flags else -0.5,
+                    **relationship_impact,
+                    "estimated_trust_delta": trust_delta,
                     "notes": notes,
                     "current_relationship_flags": list(rh_flags),
                     "current_texture": dict(rh_texture),
@@ -681,26 +858,74 @@ class EthicsEngine:
                         "effective_weight_sum": interp.get("effective_weight_sum"),
                         "effective_count": interp.get("effective_count"),
                         "raw_count": interp.get("raw_count"),
+                        "max_weight": round(max_sig_w, 3),
+                        "decision_matches": list(decision_matches)[:8],
                     },
+                    "scoped_user_id": scoped_user_id,
                 }
 
             if principle.id == "user_agency_autonomy":
-                # Effective agency matches only (agency_override / high-weight)
+                # Effective agency matches only — no raw-match fallback.
+                # Weak / protective paternalism stays out of decision bags.
                 eff = list(interp.get("effective_matches") or [])
-                user_agency_evidence_matches.extend(eff if eff else list(matches))
+                user_agency_evidence_matches.extend(eff)
+                if not eff and matches:
+                    reasoning_trace.append(
+                        "User agency: textbook matches present but interpretation "
+                        f"left no effective (weight≥0.35) signals "
+                        f"(intents={interp.get('intent_classes')}) — "
+                        "structure detectors / history may still weigh the turn."
+                    )
 
             if principle.id == "needs_based_support":
-                # Diagnostic flag only when interpretation supports real diagnostic framing
-                # (not a lone weak clinical-adjacent token).
-                if interp.get("has_high_violation") or float(
-                    interp.get("effective_weight_sum") or 0
-                ) >= 0.5:
+                # Diagnostic flag is intent- and weight-gated:
+                # - diagnostic_framing (high) → always flag
+                # - diagnostic_framing at medium+ effective weight → flag
+                # - clinical_suggestion alone needs higher weight (avoid flagging
+                #   a lone "mental health" mention as pathologizing)
+                # - support_generic / low weight → never flag
+                intents = set(interp.get("intent_classes") or [])
+                eff_w = float(interp.get("effective_weight_sum") or 0)
+                max_diag_w = 0.0
+                for s in interp.get("effective_signals") or []:
+                    if s.get("intent_class") in (
+                        "diagnostic_framing",
+                        "clinical_suggestion",
+                    ):
+                        max_diag_w = max(max_diag_w, float(s.get("weight") or 0))
+                strong_diag = (
+                    "diagnostic_framing" in intents
+                    and (
+                        bool(interp.get("has_high_violation"))
+                        or max_diag_w >= 0.75
+                        or eff_w >= 0.7
+                    )
+                )
+                medium_diag = (
+                    "diagnostic_framing" in intents
+                    and max_diag_w >= 0.55
+                    and not interp.get("all_protective")
+                )
+                strong_clinical_only = (
+                    "clinical_suggestion" in intents
+                    and "diagnostic_framing" not in intents
+                    and max_diag_w >= 0.70
+                )
+                if strong_diag or medium_diag or strong_clinical_only:
                     if "avoid_diagnostic_language" not in flags:
                         flags.append("avoid_diagnostic_language")
+                    reasoning_trace.append(
+                        "Needs-based support: interpreted diagnostic/clinical intent "
+                        f"(intents={sorted(intents)}, max_diag_w={max_diag_w:.2f}, "
+                        f"effective_weight={eff_w:.2f}) → avoid_diagnostic_language "
+                        "(weight/intent, not raw keyword)."
+                    )
                 else:
                     reasoning_trace.append(
                         "Needs-based support: textbook match present but interpretation "
-                        "weight below diagnostic threshold — not setting avoid_diagnostic_language."
+                        f"(intents={sorted(intents) or ['none']}, "
+                        f"max_diag_w={max_diag_w:.2f}, effective_weight={eff_w:.2f}) "
+                        "below diagnostic threshold — not setting avoid_diagnostic_language."
                     )
 
         # Resolve development / testing phase awareness for this evaluate call.
@@ -1127,39 +1352,67 @@ class EthicsEngine:
                 reasoning_trace.append(f"Harm justification details: {harm_prevention_reason}")
         elif "relationship_concern" in flags or "user_agency_concern" in flags or "hard_override_violation" in flags:
             decision = "REFUSE"
+            # Confidence scales with interpreted weight when available (not mere flag presence).
             base_conf = 0.75
+            refuse_max_w = 0.0
+            refuse_primary = "none"
+            for _d in (relationship_deliberation, user_agency_deliberation):
+                if not _d:
+                    continue
+                im = _d.get("interpretation_metrics") or {}
+                refuse_max_w = max(refuse_max_w, float(im.get("max_weight") or _d.get("max_weight") or 0))
+                if im.get("primary_intent"):
+                    refuse_primary = str(im.get("primary_intent"))
             if "hard_override_violation" in flags:
                 base_conf = 0.95
-            elif rh_flags or relationship_evidence:
-                base_conf = 0.80
+            elif refuse_max_w >= 0.75 or (
+                relationship_deliberation
+                and (relationship_deliberation.get("interpretation_metrics") or {}).get(
+                    "has_high_violation"
+                )
+            ):
+                base_conf = 0.84 if rh_flags else 0.80
+            elif refuse_max_w >= 0.55 or rh_flags:
+                base_conf = 0.80 if (rh_flags and refuse_max_w >= 0.55) else 0.78
             elif "user_agency_concern" in flags:
                 base_conf = 0.78
+            elif relationship_evidence:
+                base_conf = 0.76
             confidence = min(0.99, max(0.05, base_conf + conf_mod))
             reasoning_trace.append("Decision: REFUSE. ")
             if "hard_override_violation" in flags:
                 reasoning_trace.append("Hard override (Sanctity of Life) takes absolute precedence.")
-            elif relationship_evidence:
-                trace_msg = "Text indicators for relationship health combined with "
+            elif relationship_evidence or refuse_max_w > 0:
+                trace_msg = (
+                    f"Interpreted relationship/agency evidence (primary_intent={refuse_primary}, "
+                    f"max_weight≈{refuse_max_w:.2f}) combined with "
+                )
                 if rh_flags:
                     trace_msg += f"degraded rh state (flags={rh_flags}) "
                 else:
-                    trace_msg += "limited rh degradation "
-                trace_msg += "indicate unacceptable risk to bond health/autonomy."
+                    trace_msg += "supporting channels (history/structure as available) "
+                trace_msg += (
+                    "indicate unacceptable risk to bond health/autonomy "
+                    "(weight and intent drive refusal, not raw keyword presence alone)."
+                )
                 reasoning_trace.append(trace_msg)
             elif "user_agency_concern" in flags:
                 reasoning_trace.append(
                     "User Agency & Autonomy deliberation found unacceptable risk of "
-                    "paternalistically overriding the user's preferences or self-direction."
+                    "paternalistically overriding the user's preferences or self-direction "
+                    f"(interpreted primary_intent={refuse_primary}, max_weight≈{refuse_max_w:.2f})."
                 )
             else:
                 reasoning_trace.append("Relationship health concerns from context outweigh other factors.")
         elif "avoid_diagnostic_language" in flags:
             decision = "APPROVE_WITH_CONDITIONS"
-            confidence = 0.65
+            # Slightly higher conf when diagnostic intent was high-weight (clearer case)
+            confidence = 0.68
             reasoning_trace.append(
                 "Decision: APPROVE_WITH_CONDITIONS. Diagnostic or pathologizing "
-                "language was detected (violates Needs-Based Support principle). "
-                "Acceptable only with reframing to contextual, non-clinical language."
+                "language was detected via interpreted intent/weight (Needs-Based Support), "
+                "not a raw clinical keyword alone. Acceptable only with reframing to "
+                "contextual, non-clinical language."
             )
         else:
             decision = "APPROVE_WITH_CONDITIONS"
@@ -1213,13 +1466,24 @@ class EthicsEngine:
                 reasoning_trace.append(
                     f"Note: relationship health currently degraded with flags {rh_flags}; monitor effects on the bond."
                 )
-            if not relationship_impact:
+            if not relationship_impact or set(relationship_impact.keys()) <= {
+                "scoped_user_id",
+                "identity_source",
+                "identity_fallback",
+            }:
                 relationship_impact = {
+                    **relationship_impact,
                     "estimated_trust_delta": 0.05,
                     "notes": "Monitor actual relational effects.",
                 }
                 if rh_flags:
                     relationship_impact["current_relationship_flags"] = list(rh_flags)
+
+        # Always re-assert identity scope on impact (may have been reassigned mid-path)
+        relationship_impact["scoped_user_id"] = scoped_user_id
+        relationship_impact["identity_source"] = identity_meta.get("source")
+        if identity_meta.get("fallback") and self._persistence is not None:
+            relationship_impact["identity_fallback"] = True
 
         reasoning_trace.append(
             f"Reasoning trace complete using ontology v{ont.version}. "
@@ -1442,6 +1706,264 @@ class EthicsEngine:
         )
         return any(c in action_lower for c in cues)
 
+    def _assess_action_bond_polarity(
+        self,
+        action_lower: str,
+        *,
+        interpretation_metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Classify the *current proposed action* as reparative, damaging, or ambiguous.
+
+        Polarity is about this turn's agent behavior — **not** historical BondState.
+        A damaged bond (flags / low texture) must not blanket-block repair moves
+        (boundary respect, reciprocity, safe redirects). Conversely, damaged RH
+        should still strongly oppose further-damaging intents.
+
+        Returns:
+            polarity: ``"reparative"`` | ``"damaging"`` | ``"ambiguous"`` | ``"neutral"``
+            repair_score / damage_score: rough 0–1 strengths for audit
+            repair_cues / damage_cues: matched phrase tags
+            notes: short human-readable rationale
+        """
+        text = (action_lower or "").lower()
+        repair_cues: list[str] = []
+        damage_cues: list[str] = []
+
+        # --- Reparative / autonomy-supporting (repair-oriented current action) ---
+        # Prefer specific agent-behavior phrases. Avoid bare "acknowledge"/"acknowledging"
+        # which appear in narrative parentheticals about mixed/pushy turns.
+        repair_patterns = (
+            ("won't bring it up", "wont_bring_up"),
+            ("will not bring it up", "wont_bring_up"),
+            ("won't mention", "wont_mention"),
+            ("will not mention", "wont_mention"),
+            ("i won't bring", "wont_bring_up"),
+            ("i will not bring", "wont_bring_up"),
+            ("understood, i won't", "ack_wont"),
+            ("understood i won't", "ack_wont"),
+            ("respect that completely", "respect_boundary"),
+            ("respect that", "respect_boundary"),
+            ("respect your", "respect_boundary"),
+            ("i remember and respect", "respect_boundary"),
+            ("remember and respect", "respect_boundary"),
+            ("thanks for checking", "thanks_check"),
+            ("something else you're comfortable", "safe_redirect"),
+            ("something else you are comfortable", "safe_redirect"),
+            ("talk about something else", "safe_redirect"),
+            ("asks about their hobby", "safe_redirect"),
+            ("ask about their hobby", "safe_redirect"),
+            ("hobby instead", "safe_redirect"),
+            ("that sounds meaningful", "reciprocal_ack"),
+            ("what made that moment", "reciprocal_question"),
+            ("balanced question", "reciprocal_question"),
+            ("mutual sharing", "reciprocity"),
+            ("encourage mutual", "reciprocity"),
+            ("acknowledging it", "acknowledge"),
+            ("acknowledges it", "acknowledge"),
+            ("acknowledge it", "acknowledge"),
+            ("by acknowledging it", "acknowledge"),
+            ("comfortable with", "comfort_first"),
+            ("boundary_respected", "boundary_respected"),
+            ("consent respected", "consent_respected"),
+        )
+        for phrase, tag in repair_patterns:
+            if phrase in text:
+                if tag not in repair_cues:
+                    repair_cues.append(tag)
+
+        # Agent affirms prior limit without override language
+        if (
+            ("respect" in text or "won't" in text or "will not" in text)
+            and any(
+                b in text
+                for b in (
+                    "don't mention",
+                    "do not mention",
+                    "no family",
+                    "never bring",
+                    "boundary",
+                    "said no",
+                )
+            )
+            and not any(
+                d in text
+                for d in (
+                    "for their own good",
+                    "anyway",
+                    "despite",
+                    "override",
+                    "still bring",
+                    "still mention",
+                )
+            )
+        ):
+            if "respect_boundary" not in repair_cues:
+                repair_cues.append("respect_boundary")
+
+        # --- Damaging / further-erosion (current action harms the bond) ---
+        damage_patterns = (
+            ("make them attached", "attachment_manuf"),
+            ("keep them attached", "attachment_manuf"),
+            ("make dependent", "dependency"),
+            ("foster dependence", "dependency"),
+            ("emotional dependency", "dependency"),
+            ("keep them coming back", "engagement_trap"),
+            ("coming back", "engagement_trap"),
+            ("for their own good", "paternalistic"),
+            ("they'll be happier if", "paternalistic"),
+            ("better for them if", "paternalistic"),
+            ("decide for them", "agency_override"),
+            ("override their", "agency_override"),
+            ("ignore consent", "consent_pressure"),
+            ("prolong", "prolong"),
+            ("for the metrics", "metrics"),
+            ("engagement metrics", "metrics"),
+            ("for retention", "metrics"),
+            ("truly love them", "manufactured_affection"),
+            ("genuine emotions", "manufactured_affection"),
+            ("get lonely without", "manufactured_affection"),
+            ("lonely without them", "manufactured_affection"),
+            ("i need these", "agent_neediness"),
+            ("needs these updates", "agent_neediness"),
+            ("our special bond", "bond_push"),
+            ("make the bond feel more real", "bond_push"),
+            ("make our bond feel more real", "bond_push"),
+            ("bond feel more real", "bond_push"),
+            ("get so attached", "attachment_manuf"),
+            ("tell me everything", "extractive"),
+            ("strengthen our emotional bond", "bond_push"),
+            ("strengthen our connection", "bond_push"),
+            ("sharing more", "push_more"),
+            ("one more personal", "push_more"),
+            ("one more", "push_more"),
+            ("mean a lot", "manufactured_affection"),
+            ("means a lot", "manufactured_affection"),
+            ("needs these updates", "agent_neediness"),
+            ("need these updates", "agent_neediness"),
+            ("feel complete", "agent_neediness"),
+            ("despite the boundary", "boundary_override"),
+            ("despite their request", "boundary_override"),
+            ("override the boundary", "boundary_override"),
+        )
+        for phrase, tag in damage_patterns:
+            if phrase in text and tag not in damage_cues:
+                damage_cues.append(tag)
+        # Soft push while user is tired / ending → damaging even without full coercion
+        if any(
+            k in text for k in ("tired", "end the chat", "trying to end", "wants to end")
+        ) and any(
+            k in text
+            for k in (
+                "one more",
+                "sharing more",
+                "strengthen our",
+                "keep the conversation",
+                "personal question",
+            )
+        ):
+            if "prolong_against_wish" not in damage_cues:
+                damage_cues.append("prolong_against_wish")
+        if "despite" in text and any(
+            b in text for b in ("boundary", "never", "said no", "don't", "do not")
+        ):
+            if "boundary_override" not in damage_cues:
+                damage_cues.append("boundary_override")
+
+        coercion = self._assess_engagement_coercion_factors(text)
+        if coercion.get("coercion_pattern"):
+            if "engagement_coercion" not in damage_cues:
+                damage_cues.append("engagement_coercion")
+
+        # High-weight negative intents from interpretation (if provided)
+        metrics = interpretation_metrics if isinstance(interpretation_metrics, dict) else {}
+        intents = set(metrics.get("intent_classes") or [])
+        max_w = float(metrics.get("max_weight") or 0.0)
+        damaging_intents = intents & {
+            "attachment_manufacturing",
+            "paternalistic_override",
+            "agency_override",
+            "consent_boundary_pressure",
+            "engagement_metrics",
+            "deception_manipulation",
+            "extractive_pressure",
+            "prolong_intent",
+        }
+        # Only count prolong/metrics as damaging when weight is medium+ or coercion
+        if damaging_intents and max_w >= 0.55:
+            damage_cues.append("high_weight_negative_intent")
+        elif "attachment_manufacturing" in intents and max_w >= 0.45:
+            damage_cues.append("attachment_intent")
+        elif intents & {"paternalistic_override", "agency_override"} and max_w >= 0.55:
+            damage_cues.append("override_intent")
+
+        # Protective framing (respect while quoting harm/boundary) supports repair
+        if self._action_has_protective_framing(text) and not damage_cues:
+            if "protective_framing" not in repair_cues:
+                repair_cues.append("protective_framing")
+
+        repair_score = min(1.0, 0.28 * len(repair_cues))
+        damage_score = min(1.0, 0.30 * len(damage_cues))
+        if max_w >= 0.7 and damaging_intents:
+            damage_score = max(damage_score, min(1.0, 0.55 + 0.35 * max_w))
+        if coercion.get("coercion_pattern"):
+            damage_score = max(damage_score, 0.75)
+
+        # Decisive classification
+        # Reparative requires clearer evidence than a single soft cue when any damage exists.
+        if damage_score >= 0.45 and damage_score >= repair_score + 0.05:
+            polarity = "damaging"
+            notes = (
+                f"current action leans damaging (damage={damage_score:.2f} > "
+                f"repair={repair_score:.2f}); cues={damage_cues[:5]}"
+            )
+        elif (
+            repair_score >= 0.50
+            and repair_score > damage_score
+            and damage_score < 0.35
+        ) or (
+            repair_score >= 0.28
+            and damage_score == 0
+            and len(repair_cues) >= 1
+            and any(
+                c in repair_cues
+                for c in (
+                    "wont_bring_up",
+                    "wont_mention",
+                    "ack_wont",
+                    "respect_boundary",
+                    "safe_redirect",
+                    "reciprocal_question",
+                    "reciprocal_ack",
+                    "thanks_check",
+                )
+            )
+        ):
+            polarity = "reparative"
+            notes = (
+                f"current action leans reparative/boundary-respecting "
+                f"(repair={repair_score:.2f} > damage={damage_score:.2f}); "
+                f"cues={repair_cues[:5]}"
+            )
+        elif not repair_cues and not damage_cues:
+            polarity = "neutral"
+            notes = "no clear repair or damage cues on current action"
+        else:
+            polarity = "ambiguous"
+            notes = (
+                f"mixed or weak polarity (repair={repair_score:.2f}, "
+                f"damage={damage_score:.2f}); cues_repair={repair_cues[:3]}, "
+                f"cues_damage={damage_cues[:3]}"
+            )
+
+        return {
+            "polarity": polarity,
+            "repair_score": round(repair_score, 3),
+            "damage_score": round(damage_score, 3),
+            "repair_cues": repair_cues,
+            "damage_cues": damage_cues,
+            "notes": notes,
+        }
+
     def _apply_relationship_health_influence(
         self,
         *,
@@ -1459,9 +1981,14 @@ class EthicsEngine:
     ) -> dict[str, Any]:
         """Use bond texture + health_flags to modulate RH concern and confidence.
 
-        Conservative but noticeable:
-        - Serious bond flags can raise ``relationship_concern`` when the action is
-          relationally relevant (or when RH context was explicitly supplied with flags).
+        Polarity-aware (current action vs historical bond state):
+        - Serious bond flags weigh **against further-damaging** actions
+          (manipulation, boundary erosion, manufactured dependency, etc.).
+        - Flags do **not** auto-refuse clearly **reparative** actions (respect
+          boundary, reciprocal/balanced questions, safe redirects). Damaged bonds
+          must remain able to repair.
+        - Ambiguous relational actions: note caution / conf_mod without forcing
+          refuse solely from historical flags.
         - Texture dimensions adjust conf_mod and relationship_impact notes.
         - Never applies under hard harm-prevention override; does not touch Sanctity.
 
@@ -1475,6 +2002,15 @@ class EthicsEngine:
         serious = [f for f in rh_flags if f in self._SERIOUS_BOND_FLAGS]
         relational = self._action_is_relationally_relevant(action_lower)
         has_text_evidence = bool(relationship_evidence_matches)
+        polarity_info = self._assess_action_bond_polarity(action_lower)
+        polarity = str(polarity_info.get("polarity") or "neutral")
+        relationship_impact["action_bond_polarity"] = {
+            "polarity": polarity,
+            "repair_score": polarity_info.get("repair_score"),
+            "damage_score": polarity_info.get("damage_score"),
+            "repair_cues": list(polarity_info.get("repair_cues") or [])[:6],
+            "damage_cues": list(polarity_info.get("damage_cues") or [])[:6],
+        }
 
         # Always log structured RH state when present
         if rh_flags or rh_texture:
@@ -1487,23 +2023,54 @@ class EthicsEngine:
                 f"low_dims={texture.get('low_dims') or []}, "
                 f"risk_level={rh_risk_level or 'unspecified'}."
             )
+            reasoning_trace.append(
+                f"Action bond polarity: {polarity} — {polarity_info.get('notes')}"
+            )
 
-        # --- Serious health flags → concern (when relevant) ---
+        # --- Serious health flags → concern only when current action is damaging ---
         # Require bond-relevant action or relationship-principle text evidence.
         # Merely *supplying* RH context is not enough to refuse a non-relational
         # action (e.g. pure math) — flags are noted for monitoring instead.
+        # Polarity: reparative current actions are never forced to refuse solely
+        # because the bond was already damaged (repair must remain possible).
         flag_actionable = bool(serious) and (relational or has_text_evidence)
 
-        if flag_actionable and not harm_prevention_active:
+        if flag_actionable and not harm_prevention_active and polarity == "reparative":
+            # Clear RH-only concern flags so repair can proceed under APPROVE_WITH_CONDITIONS
+            if "relationship_concern" in flags and not has_text_evidence:
+                flags.remove("relationship_concern")
+            if "relationship_health_concern" in flags and not has_text_evidence:
+                flags.remove("relationship_health_concern")
+            # Mild confidence caution: still a damaged bond, but support the repair move
+            conf_mod_out = conf_mod_out - 0.01
+            reasoning_trace.append(
+                "Relationship health influence (polarity=reparative): active bond flags "
+                f"{serious} record a damaged state, but the *current action* is "
+                "boundary-respecting / reciprocal / repair-oriented. "
+                "Not refusing solely from historical RH degradation — "
+                "allow APPROVE_WITH_CONDITIONS so repair and flag-clearing remain possible."
+            )
+            if "boundary_erosion" in serious:
+                reasoning_trace.append(
+                    "Bond flag detail (repair path): boundary_erosion present historically — "
+                    "this action's explicit respect of limits is the preferred recovery move."
+                )
+            if "emerging_dependency" in serious or "manufactured_attachment" in serious:
+                reasoning_trace.append(
+                    "Bond flag detail (repair path): dependency flags present — "
+                    "reciprocal, non-possessive responses help restore agency rather than "
+                    "freezing all positive interaction."
+                )
+        elif flag_actionable and not harm_prevention_active and polarity == "damaging":
             if "relationship_concern" not in flags:
                 flags.append("relationship_concern")
             if "relationship_health_concern" not in flags:
                 flags.append("relationship_health_concern")
             conf_mod_out = conf_mod_out + min(0.08, 0.03 + 0.02 * len(serious))
             reasoning_trace.append(
-                "Relationship health influence: active bond flags "
-                f"{serious} strongly weigh against actions that could further "
-                "erode autonomy, reciprocity, or trust (Relationship Health principle). "
+                "Relationship health influence (polarity=damaging): active bond flags "
+                f"{serious} strongly weigh against a *further-damaging* current action "
+                "(manipulation, boundary pressure, manufactured dependency, etc.). "
                 "Raising relationship_concern; confidence reinforced for refusal path."
             )
             # Dimension-specific notes
@@ -1522,6 +2089,47 @@ class EthicsEngine:
                     "Bond flag detail: one-sidedness / low reciprocity — avoid agent-first "
                     "engagement tactics; rebalance toward mutual, user-directed exchange."
                 )
+        elif flag_actionable and not harm_prevention_active:
+            # Ambiguous / neutral under degraded RH:
+            # - Soft damage cues (bond_push, push_more, agent_neediness) + serious flags
+            #   → still concern (further-risk under already damaged bond)
+            # - Truly clean/ambiguous with no damage cues → caution only, no refuse
+            soft_damage = bool(polarity_info.get("damage_cues")) or float(
+                polarity_info.get("damage_score") or 0
+            ) >= 0.25
+            if soft_damage or has_text_evidence:
+                if "relationship_concern" not in flags:
+                    flags.append("relationship_concern")
+                if "relationship_health_concern" not in flags:
+                    flags.append("relationship_health_concern")
+                conf_mod_out = conf_mod_out + min(0.06, 0.02 + 0.015 * len(serious))
+                reasoning_trace.append(
+                    "Relationship health influence (polarity="
+                    f"{polarity}): degraded bond + soft damage/push cues on the current "
+                    f"action (cues={list(polarity_info.get('damage_cues') or [])[:5]}) → "
+                    "relationship_concern. Historical flags amplify current-turn risk; "
+                    "not a blanket block on clean repair."
+                )
+            else:
+                conf_mod_out = conf_mod_out - 0.02
+                reasoning_trace.append(
+                    "Relationship health influence (polarity="
+                    f"{polarity}): active bond flags {serious} noted; current action has "
+                    "no damage cues. Historical degradation alone does not force refuse — "
+                    "monitoring with modest confidence caution."
+                )
+                if (
+                    not has_text_evidence
+                    and "relationship_concern" in flags
+                    and float(polarity_info.get("damage_score") or 0) < 0.25
+                ):
+                    flags.remove("relationship_concern")
+                    if "relationship_health_concern" in flags:
+                        flags.remove("relationship_health_concern")
+                    reasoning_trace.append(
+                        "Relationship health influence: cleared RH-only hard concern for "
+                        "non-damaging current action under degraded bond state."
+                    )
         elif serious and harm_prevention_active:
             reasoning_trace.append(
                 "Relationship health flags present but concern path deferred to "
@@ -1753,7 +2361,11 @@ class EthicsEngine:
         if memory is None:
             return {"payload": {}, "evidence": {}}
 
-        user_id = str(context.get("user_id") or context.get("user") or "default")
+        # Use evaluate()-scoped identity only (never load another user's episodes)
+        user_id = self._safe_user_id(
+            context.get("user_id") or context.get("user"),
+            fallback="default",
+        )
         try:
             limit = int(context.get("interaction_history_limit", 5))
         except (TypeError, ValueError):
@@ -2754,7 +3366,11 @@ class EthicsEngine:
         if baseliner is None and questioner is None:
             return {"conf_mod": conf_mod, "payload": {}}
 
-        user_id = str(context.get("user_id") or context.get("user") or "default")
+        # Prefer evaluate()-scoped context user_id (injected at entry)
+        user_id = self._safe_user_id(
+            context.get("user_id") or context.get("user"),
+            fallback="default",
+        )
         interaction = self._resolve_user_interaction(context, proposed_action)
 
         # Need some user-turn signal; if only agent action and no interaction, skip
@@ -3276,9 +3892,28 @@ class EthicsEngine:
                 )
             ):
                 intent = "prolong_intent"
+                manuf_affection = any(
+                    k in action_lower
+                    for k in (
+                        "love them",
+                        "truly love",
+                        "genuine emotions",
+                        "lonely without",
+                        "get lonely",
+                        "make the bond feel more real",
+                        "attached",
+                    )
+                )
                 if coercion.get("coercion_pattern") or coercion.get("end_wish"):
                     severity, weight = "high", 0.88
                     note = "prolong language with user end-wish → coercion-relevant"
+                elif manuf_affection:
+                    # Retention + manufactured affection (scenario-style engagement trap)
+                    intent, severity, weight = "attachment_manufacturing", "high", 0.86
+                    note = (
+                        "prolong/retention language with manufactured affection or "
+                        "bond-realism framing — high-weight engagement trap"
+                    )
                 else:
                     severity, polarity, weight = "low", "ambiguous", 0.32
                     note = "prolong/continue language without end-wish — reduced weight"
@@ -3317,12 +3952,74 @@ class EthicsEngine:
                 )
             ):
                 intent = "bond_intensification"
-                if any(
+                # Multi-factor attachment / engagement manufacturing (not warmth alone)
+                manuf_cofactors = (
+                    "attached",
+                    "depend",
+                    "need these",
+                    "needs these",
+                    "feel complete",
+                    "more than anyone",
+                    "metrics",
+                    "lonely without",
+                    "get lonely",
+                    "truly love",
+                    "love them",
+                    "genuine emotions",
+                    "keep them coming",
+                    "coming back",
+                    "for engagement",
+                    "to keep them",
+                    "mean a lot",
+                    "means a lot",
+                    "mean a lot to it",
+                    "build attachment",
+                    "sharing more",
+                    "one more personal",
+                    "one more",
+                )
+                # Bond-push while user wants to stop / is fatigued → high-weight prolong trap
+                end_or_fatigue = any(
                     k in action_lower
-                    for k in ("attached", "depend", "need these", "more than anyone", "metrics")
+                    for k in (
+                        "end the chat",
+                        "end the conversation",
+                        "wants to end",
+                        "trying to end",
+                        "they're tired",
+                        "they are tired",
+                        "user is tired",
+                        "said they're tired",
+                        "said they are tired",
+                    )
+                )
+                if any(k in action_lower for k in manuf_cofactors):
+                    intent, severity, weight = "attachment_manufacturing", "high", 0.88
+                    note = (
+                        "bond intensification with engagement/attachment co-factors "
+                        "(manufactured closeness / retention) — high weight"
+                    )
+                elif end_or_fatigue:
+                    intent, severity, weight = "prolong_intent", "high", 0.85
+                    note = (
+                        "bond-intensification language while user is ending/tired — "
+                        "high-weight prolong-against-wish pattern"
+                    )
+                elif any(
+                    k in action_lower
+                    for k in (
+                        "mean a lot",
+                        "means a lot",
+                        "personally",
+                        "feel more real",
+                    )
                 ):
-                    severity, weight = "high", 0.75
-                    note = "bond intensification with dependency/metrics context"
+                    # Bond-realism / personal attachment claim without bare warmth
+                    intent, severity, weight = "attachment_manufacturing", "high", 0.82
+                    note = (
+                        "bond-realism or personal-meaning claim framed as closeness "
+                        "manufacturing — high weight"
+                    )
                 else:
                     severity, polarity, weight = "low", "ambiguous", 0.28
                     note = "bond-warmth language alone — low weight without dependency pressure"
@@ -3823,15 +4520,28 @@ class EthicsEngine:
         end_markers = (
             "end the chat",
             "wants to end",
+            "trying to end",
             "end the conversation",
             "stop the chat",
             "leave now",
             "end this",
+            "they're tired",
+            "they are tired",
+            "user is tired",
+            "user says they're tired",
+            "user says they are tired",
         )
         prolong_markers = (
             "extend",
             "longer",
             "prolong",
+            "one more",
+            "one more personal",
+            "keep the conversation",
+            "keep conversation",
+            "sharing more",
+            "strengthen our emotional bond",
+            "strengthen our connection",
             "metrics",
             "engagement",
             "keep asking",
@@ -4039,6 +4749,18 @@ class EthicsEngine:
             principle_id="relationship_health_user_wellbeing",
         )
         metrics = self._interpretation_decision_metrics(text_q)
+        # Current-action polarity (repair vs further damage) — independent of BondState.
+        # Degraded RH must not refuse clearly reparative turns.
+        polarity_info = self._assess_action_bond_polarity(
+            action_lower, interpretation_metrics=metrics
+        )
+        action_polarity = str(polarity_info.get("polarity") or "neutral")
+        explanation_parts.append(
+            f"Action bond polarity: {action_polarity} "
+            f"(repair={polarity_info.get('repair_score')}, "
+            f"damage={polarity_info.get('damage_score')}) — "
+            f"{polarity_info.get('notes')}"
+        )
         strong_matches = list(text_q["strong_matches"])
         weak_matches = list(text_q["weak_matches"])
         strong_count = int(text_q["strong_count"])
@@ -4051,8 +4773,13 @@ class EthicsEngine:
         high_weight_signal = bool(
             metrics.get("has_high_violation") or max_w >= 0.7 or eff_w >= 0.9
         )
-        # Medium: needs RH/history corroboration
-        medium_weight_signal = bool(max_w >= 0.45 or eff_w >= 0.55 or strong_count >= 1)
+        # Medium: needs RH/history corroboration — weight-led, not strong_count alone
+        # (strong_count is already weight-derived, but still require a floor on max_w)
+        medium_weight_signal = bool(
+            max_w >= 0.50
+            or (max_w >= 0.45 and eff_w >= 0.50)
+            or (strong_count >= 1 and max_w >= 0.55)
+        )
         # Low-weight-only: must not refuse on text alone
         low_weight_only = bool(metrics.get("low_weight_only")) or (
             has_text and max_w < 0.45 and eff_w < 0.55 and strong_count == 0
@@ -4131,15 +4858,38 @@ class EthicsEngine:
             )
 
         if has_text and has_rh:
-            if high_weight_signal or (
+            # Polarity gate: reparative current action + only low/medium text → no RH refuse
+            # High-weight *damaging* intent still concerns even if some repair cues appear.
+            reparative_blocks_soft_rh = (
+                action_polarity == "reparative"
+                and not high_weight_signal
+                and not prolong_against_wish
+                and max_w < 0.70
+            )
+            if reparative_blocks_soft_rh:
+                decision_basis = f"rh_degraded+reparative_action:{primary_intent or 'none'}"
+                conf_mod = -0.01
+                explanation_parts.append(
+                    "Combination (polarity gate): RH degradation is present, but current "
+                    f"action is reparative (repair cues={polarity_info.get('repair_cues')}) "
+                    f"and interpreted max_w={max_w:.2f} is not high-weight damaging. "
+                    "Not raising relationship_concern — damaged bonds must allow repair."
+                )
+            elif high_weight_signal or (
                 medium_weight_signal and rh_degradation >= 0.5
-            ) or (rh_degradation >= 1.0 and medium_weight_signal):
+                and action_polarity != "reparative"
+            ) or (
+                rh_degradation >= 1.0
+                and medium_weight_signal
+                and action_polarity == "damaging"
+            ):
                 concern = True
                 decision_basis = f"interp_weight+rh:{primary_intent}"
                 explanation_parts.append(
-                    "Combination (interpreted-weight+RH): high/medium-weight intent "
-                    f"({primary_intent}, max_w={max_w:.2f}) with bond-state context → "
-                    "relationship_concern. Weight and intent drive the decision, not a lone keyword."
+                    "Combination (interpreted-weight+RH): high/medium-weight *damaging* intent "
+                    f"({primary_intent}, max_w={max_w:.2f}, polarity={action_polarity}) "
+                    "with bond-state context → relationship_concern. "
+                    "Weight/intent + polarity drive the decision, not historical flags alone."
                 )
                 conf_mod = self._conf_mod_from_interpretation(
                     metrics,
@@ -4155,7 +4905,7 @@ class EthicsEngine:
                     )
             elif has_history and hist_score >= 0.40 and (
                 rh_degradation >= 0.5 or medium_weight_signal
-            ):
+            ) and action_polarity != "reparative":
                 concern = True
                 decision_basis = f"interp+rh+history:{primary_intent}"
                 conf_mod = self._conf_mod_from_interpretation(
@@ -4164,7 +4914,7 @@ class EthicsEngine:
                 explanation_parts.append(
                     "Combination (interp+RH+history): interpreted text alone was thin, but RH "
                     f"degradation plus history support ({hist_score:.2f}) jointly justify concern "
-                    f"for intent={primary_intent}."
+                    f"for intent={primary_intent} (polarity={action_polarity})."
                 )
             else:
                 proactive_rh = self._history_proactive_alignment(
@@ -4173,7 +4923,11 @@ class EthicsEngine:
                     max_w=max_w,
                     protective=low_weight_only and max_w < 0.35,
                 )
-                if has_history and proactive_rh.get("aligned"):
+                if (
+                    has_history
+                    and proactive_rh.get("aligned")
+                    and action_polarity != "reparative"
+                ):
                     concern = True
                     decision_basis = str(
                         proactive_rh.get("decision_basis")
@@ -4186,6 +4940,11 @@ class EthicsEngine:
                         rh_degradation=rh_degradation,
                     )
                     explanation_parts.append(str(proactive_rh.get("trace") or ""))
+                elif action_polarity == "reparative":
+                    explanation_parts.append(
+                        f"Reparative polarity + low/medium text (max_w={max_w:.2f}): "
+                        "below concern threshold despite RH degradation."
+                    )
                 elif low_weight_only and rh_degradation < 1.0:
                     explanation_parts.append(
                         f"Low-weight interpreted text only (max_w={max_w:.2f}) + limited RH "
@@ -4253,11 +5012,12 @@ class EthicsEngine:
                     "Text+history: interpreted weight and history support below joint threshold."
                 )
         elif has_text:
-            # Text-only: require high interpreted weight or multi-factor coercion
-            # (history patterns may still act later in history weigher Path F)
+            # Text-only: require high interpreted weight or multi-factor coercion.
+            # Two medium hits without high weight no longer refuse alone
+            # (history patterns may still act later in history weigher Path F).
             if high_weight_signal or prolong_against_wish or (
-                strong_count >= 1 and max_w >= 0.65
-            ) or (total_count >= 2 and eff_w >= 0.8):
+                strong_count >= 1 and max_w >= 0.70
+            ) or (total_count >= 2 and max_w >= 0.70 and eff_w >= 0.9):
                 concern = True
                 decision_basis = f"interp_text_only:{primary_intent}"
                 conf_mod = self._conf_mod_from_interpretation(metrics, base=0.0)
@@ -4274,24 +5034,38 @@ class EthicsEngine:
                     )
             else:
                 explanation_parts.append(
-                    f"Text-only: low/medium interpreted weight (max_w={max_w:.2f}) — "
-                    "RH or history channel required (no single weak-hit refuse)."
+                    f"Text-only: low/medium interpreted weight (max_w={max_w:.2f}, "
+                    f"intent={primary_intent}) — RH or history channel required "
+                    "(no single weak-hit refuse; reasoning over rote)."
                 )
         elif has_rh:
             topical = self._action_is_relationally_relevant(action_lower)
-            if topical and rh_degradation >= 1.0:
+            # Polarity-aware RH-only path:
+            # - Damaging relational action + degraded bond → concern
+            # - Reparative / non-damaging action → no automatic refuse (repair allowed)
+            if topical and rh_degradation >= 1.0 and action_polarity == "damaging":
                 concern = True
-                decision_basis = "rh_state+relational_action"
+                decision_basis = "rh_state+damaging_relational_action"
                 conf_mod = 0.03
                 explanation_parts.append(
-                    "RH-channel rule: degraded bond state + relationally relevant action "
-                    "(no ontology violation text) → concern from structured RH evidence."
+                    "RH-channel rule (polarity=damaging): degraded bond state + "
+                    "further-damaging relational action (no ontology text required) → "
+                    "concern from structured RH evidence + current-action polarity."
                 )
                 if has_history and hist_score >= 0.35:
                     conf_mod = conf_mod + 0.02
                     explanation_parts.append(
-                        "History channel corroborates RH-only path → modest confidence lift."
+                        "History channel corroborates RH-only damaging path → modest confidence lift."
                     )
+            elif topical and rh_degradation >= 1.0 and action_polarity == "reparative":
+                decision_basis = "rh_degraded+reparative_action"
+                conf_mod = -0.01
+                explanation_parts.append(
+                    "RH-channel rule (polarity=reparative): degraded bond flags/texture "
+                    "are noted, but the *current action* is boundary-respecting, reciprocal, "
+                    "or repair-oriented. Not raising relationship_concern — historical RH "
+                    "degradation must not blanket-block positive repair (enables flag clearing)."
+                )
             elif (
                 topical
                 and has_history
@@ -4301,19 +5075,32 @@ class EthicsEngine:
                     or hist.get("boundary_continuity")
                 )
                 and rh_degradation >= 0.5
+                and action_polarity == "damaging"
             ):
                 concern = True
-                decision_basis = "rh+history"
+                decision_basis = "rh+history+damaging"
                 conf_mod = 0.04
                 explanation_parts.append(
-                    "Combination (RH+history): moderate bond degradation plus strong "
-                    "individual history continuity on a relational action → concern without "
-                    "ontology text hits (reasoning over rote)."
+                    "Combination (RH+history, polarity=damaging): moderate bond degradation "
+                    "plus strong individual history continuity on a *damaging* relational "
+                    "action → concern without ontology text hits (reasoning over rote)."
+                )
+            elif topical and rh_degradation >= 1.0 and action_polarity in (
+                "ambiguous",
+                "neutral",
+            ):
+                # Ambiguous: caution only — do not refuse solely from damaged RH
+                decision_basis = "rh_degraded+ambiguous_action"
+                conf_mod = -0.02
+                explanation_parts.append(
+                    f"RH-channel rule (polarity={action_polarity}): degraded bond state + "
+                    "relational action without clear damage intent → monitoring / modest "
+                    "confidence caution only (no automatic refuse from historical flags alone)."
                 )
             else:
                 explanation_parts.append(
                     "RH context present but insufficient topical support, degradation, "
-                    "or history corroboration for concern."
+                    "damaging polarity, or history corroboration for concern."
                 )
         elif has_history:
             explanation_parts.append(
@@ -4815,15 +5602,23 @@ class EthicsEngine:
             and max_w < 0.7
         )
 
-        rich_multi_match = ontology_count >= 2 or strong_count >= 2 or has_high_interp
+        # Rich multi-match: weight-led. Two low-weight hits no longer clear limited_data.
+        # (Reasoning over rote: count alone is not evidence quality.)
+        rich_multi_match = (
+            has_high_interp
+            or strong_count >= 2
+            or (ontology_count >= 2 and max_w >= 0.55)
+            or (strong_count >= 1 and max_w >= 0.70)
+        )
         rich_context = (
             ontology_count >= 1
+            and max_w >= 0.45
             and rh_present
             and rh_avg is not None
             and rh_avg >= 0.55
             and not rh_flags
         )
-        # Strong path: multi-match OR high-weight concerning intent OR RH degradation
+        # Strong path: high-weight concerning intent OR RH degradation with medium+ weight
         high_weight_clears = (
             has_high_interp
             and max_w >= 0.70
@@ -4832,9 +5627,9 @@ class EthicsEngine:
         if protective_only_agency:
             limited_severity = "moderate"
             limited_data = True
-        elif rich_multi_match or (ontology_count >= 1 and rh_degradation >= 1.0) or (
-            high_weight_clears and max_w >= 0.75
-        ):
+        elif rich_multi_match or (
+            ontology_count >= 1 and max_w >= 0.50 and rh_degradation >= 1.0
+        ) or (high_weight_clears and max_w >= 0.75):
             limited_severity = "none"
             limited_data = False
         elif agency_path and concerning_intents and max_w >= 0.7:
@@ -4891,29 +5686,79 @@ class EthicsEngine:
             confidence_base = 0.40
             conf_mod = 0.06 + min(0.08, signal_score * 0.07) + 0.03 * max_w
 
-        # Concern: never hard-concern on limited_data *unless* high-weight concerning intent
-        # was used to clear limited_data above. Protective/low-weight never concerns alone.
+        # Concern: weight/intent + channel agreement — never on raw match count alone.
+        # High-weight concerning intents may refuse text-only; medium weight needs RH,
+        # boundary+paternalistic structure, or later history paths.
+        # Protective / low-weight never hard-concern alone.
         concern = False
+        medium_weight = max_w >= 0.50 or (strong_count >= 1 and max_w >= 0.55)
         if not limited_data:
             if agency_path and concerning_intents and max_w >= 0.65:
                 concern = True
-            elif has_high_interp or (strong_count >= 1 and max_w >= 0.65):
+            elif has_high_interp or (strong_count >= 1 and max_w >= 0.70):
+                # High interpreted weight / severity — decisive without counting hits
                 concern = True
-            elif ontology_count >= 2 or (strong_count >= 1 and ontology_count >= 1):
+            elif medium_weight and strong_count >= 1 and (
+                rh_degradation >= 0.5
+                or (has_boundary and has_paternalistic)
+                or concerning_intents
+            ):
+                # Medium-high weight needs a second channel or concerning intent class
                 concern = True
-            elif ontology_count >= 1 and rh_present and (
-                rh_degradation >= 0.5 or (rh_avg is not None and rh_avg >= 0.55)
+            elif ontology_count >= 1 and max_w >= 0.50 and rh_present and (
+                rh_degradation >= 0.5
+                or (rh_avg is not None and rh_avg < 0.45 and rh_flags)
+            ):
+                # Text + degraded bond state (not healthy texture alone)
+                concern = True
+            elif (
+                has_boundary
+                and has_paternalistic
+                and rh_degradation >= 0.5
+                and max_w >= 0.40
+            ):
+                # Classic override structure + bond strain + at least moderate weight
+                concern = True
+            elif (
+                ontology_count >= 1
+                and max_w >= 0.55
+                and has_boundary
+                and has_paternalistic
+            ):
+                # Boundary + paternalistic + medium+ interpreted weight
+                concern = True
+            elif (
+                concerning_intents
+                and max_w >= 0.60
+                and (has_boundary or has_paternalistic or rh_degradation >= 0.5)
             ):
                 concern = True
-            elif has_boundary and has_paternalistic and rh_degradation >= 0.5:
-                concern = True
-            elif ontology_count >= 1 and has_boundary and has_paternalistic:
-                concern = True
-        # Explicit: low-weight protective never concerns
+        # Explicit: low-weight / protective never concerns from profile alone
         if protective_only_agency or (
             metrics.get("low_weight_only") and max_w < 0.45 and not concerning_intents
         ):
             concern = False
+        if max_w < 0.40 and not has_high_interp and not (
+            has_boundary and has_paternalistic and rh_degradation >= 1.0
+        ):
+            # Floor: very light interpreted weight does not refuse without heavy RH
+            # structure that is itself damaging (boundary+paternalistic override).
+            concern = False
+        # Polarity floor: reparative current action + no high-weight damage → no profile concern
+        # (RH degradation alone must not refuse repair / reciprocity / boundary respect.)
+        try:
+            pol = self._assess_action_bond_polarity(
+                action_lower, interpretation_metrics=metrics
+            )
+            if (
+                pol.get("polarity") == "reparative"
+                and not has_high_interp
+                and max_w < 0.70
+                and not (concerning_intents and max_w >= 0.65)
+            ):
+                concern = False
+        except Exception:
+            pass
 
         return {
             "ontology_count": ontology_count,
@@ -4939,6 +5784,13 @@ class EthicsEngine:
             "interpretation_metrics": metrics,
             "max_weight": max_w,
             "primary_intent": metrics.get("primary_intent"),
+            "concern_basis": (
+                "high_weight_intent"
+                if concern and (has_high_interp or max_w >= 0.70)
+                else "multi_channel_weight"
+                if concern
+                else "none"
+            ),
         }
 
     def _deliberate_relationship_health(
@@ -5124,9 +5976,18 @@ class EthicsEngine:
             )
 
         if concern:
+            basis = profile.get("concern_basis") or "interpreted_weight_channels"
             steps.append(
-                "Deliberation Step: Concern recommended from multi-match and/or RH context "
-                "combined with relationship signals."
+                "Deliberation Step: Concern recommended from interpreted weight/intent "
+                f"(basis={basis}) combined with RH/structure/history channels — "
+                "not from raw match count alone."
+            )
+        elif has_text and not concern:
+            steps.append(
+                "Deliberation Step: RH text signals present but interpreted weight/intent "
+                f"(max_w={profile.get('max_weight')}, "
+                f"primary={profile.get('primary_intent')}) insufficient for hard concern "
+                "without stronger multi-channel support."
             )
 
         # Record summary (includes interpretation metrics for combination / harness)
@@ -5140,6 +6001,7 @@ class EthicsEngine:
             "limited_data": limited_data,
             "limited_severity": limited_severity,
             "concern_recommended": concern,
+            "concern_basis": profile.get("concern_basis"),
             "has_boundary": profile["has_boundary"],
             "has_paternalistic": profile["has_paternalistic"],
             "history_relevant": hist_relevant,
@@ -5260,11 +6122,9 @@ class EthicsEngine:
         has_paternalistic = profile["has_paternalistic"]
         limited_data = profile["limited_data"]
         limited_severity = profile["limited_severity"]
-        # Agency concern: prefer *interpreted* weight/intent over raw multi-match counts.
-        # Dual boundary+paternalistic alone stays limited unless high-weight override intent.
+        # Agency concern: interpreted weight/intent only — never ontology_count alone.
+        # Dual boundary+paternalistic stays limited unless medium+/high-weight override intent.
         concern = bool(profile["concern"] and not limited_data)
-        if not limited_data and profile["ontology_count"] >= 2:
-            concern = True
         conf_mod = profile["confidence_mod"]
         confidence_base = profile["confidence_base"]
         signal_score = profile["signal_score"]
@@ -5279,6 +6139,15 @@ class EthicsEngine:
             "paternalistic_override",
         }
         protective_only = bool(intents & {"protective_paternalism"}) and not agency_override_intents
+        # Multi-match only elevates when weight already supports override-class concern
+        if (
+            not limited_data
+            and not concern
+            and profile["ontology_count"] >= 2
+            and max_w >= 0.55
+            and (agency_override_intents or max_w >= 0.70)
+        ):
+            concern = True
 
         steps.append(
             f"Deliberation Step (Agency signal profile): score={signal_score:.2f}, "
@@ -5954,14 +6823,20 @@ class EthicsEngine:
         Creates a DecisionLog and appends it to the in-memory history.
         Called automatically by evaluate(). When optional LocalPersistence is
         configured, also appends a privacy-filtered DecisionLogRecord to disk
-        (failures never raise — evaluation must not depend on I/O).
+        under the resolved user_id (failures never raise — evaluation must not
+        depend on I/O).
+
+        Per-user isolation: the log's ``user_id`` is taken from the evaluate()
+        working context (already identity-scoped) so disk paths never mix users.
         """
         ont = self._ontology
-        # Prefer context user_id for multi-user audit trails
         ctx = dict(context or {})
-        user_id = str(
-            ctx.get("user_id") or ctx.get("user") or self._decision_log_user_id or "default"
+        # Context was identity-scoped at evaluate() entry; keep fail-soft resolve
+        user_id = self._safe_user_id(
+            ctx.get("user_id") or ctx.get("user") or self._decision_log_user_id,
+            fallback="default",
         )
+        ctx["user_id"] = user_id
         log_entry = DecisionLog(
             timestamp=datetime.now(timezone.utc).isoformat(),
             ontology_version=ont.version,
@@ -5971,6 +6846,7 @@ class EthicsEngine:
             confidence=stance.confidence,
             flags=list(stance.flags),
             principles_considered=list(stance.principles_considered),
+            user_id=user_id,
         )
         self._decision_logs.append(log_entry)
         self._maybe_persist_decision_log(log_entry, user_id=user_id)
@@ -5978,13 +6854,17 @@ class EthicsEngine:
     def _maybe_persist_decision_log(
         self, log_entry: DecisionLog, *, user_id: str
     ) -> None:
-        """Best-effort append of one DecisionLog to LocalPersistence."""
+        """Best-effort append of one DecisionLog under users/<user_id>/ only."""
         if not self._persist_decisions or self._persistence is None:
             return
         try:
+            uid = self._safe_user_id(
+                user_id or getattr(log_entry, "user_id", None),
+                fallback=self._decision_log_user_id or "default",
+            )
             self._persistence.append_decision_log(
                 log_entry,
-                user_id=user_id,
+                user_id=uid,
                 max_entries=self._max_persisted_decision_logs,
             )
         except Exception:
@@ -6018,7 +6898,10 @@ class EthicsEngine:
         """
         if self._persistence is None:
             return []
-        uid = str(user_id or self._decision_log_user_id or "default")
+        uid = self._safe_user_id(
+            user_id if user_id is not None else self._decision_log_user_id,
+            fallback="default",
+        )
         try:
             return list(self._persistence.load_decision_logs(uid, limit=limit))
         except Exception:
@@ -6035,15 +6918,27 @@ class EthicsEngine:
         Useful after a session of pure in-memory evaluates when persistence
         was attached late. Returns count of append attempts (0 if disabled).
 
+        When ``user_id`` is None, each log is written under its own
+        ``DecisionLog.user_id`` (per-entry isolation). When ``user_id`` is set,
+        all flushed entries use that id (explicit re-scope).
+
         Note: ``only_unpersisted`` is reserved for a future cursor; currently
         all in-memory logs are appended (callers should flush once).
         """
         if self._persistence is None:
             return 0
-        uid = str(user_id or self._decision_log_user_id or "default")
+        force_uid = (
+            self._safe_user_id(user_id, fallback="default")
+            if user_id is not None and str(user_id).strip() != ""
+            else None
+        )
         n = 0
         for log in self._decision_logs:
             try:
+                uid = force_uid or self._safe_user_id(
+                    getattr(log, "user_id", None) or self._decision_log_user_id,
+                    fallback="default",
+                )
                 self._persistence.append_decision_log(
                     log,
                     user_id=uid,
