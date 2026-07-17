@@ -34,6 +34,21 @@ Optional local persistence (foundational)
   (+ summary, last_updated).
 - Default remains pure in-memory (full backward compatibility).
 - Save/load failures never raise into callers.
+
+Per-user identity & isolation (architectural principle)
+-------------------------------------------------------
+Bond texture is **owned by a single local ``user_id``**. When persistence is
+enabled, every load/save path goes under ``users/<user_id>/bond_state.json``.
+
+Design intent:
+- ``user_id`` is a first-class field on this tracker (not an afterthought).
+- With persistence enabled, callers **should** pass an explicit ``user_id`` so
+  two humans never share or overwrite each other's bond state.
+- If ``user_id`` is omitted, behavior falls back to ``"default"`` (backward
+  compatible) and ``using_default_user_id`` is True so audits can flag soft
+  identity ambiguity — evaluation never crashes on bad ids.
+- Memory, baseline, bond, and ethics decision logs are separate artifacts that
+  may share a ``user_id`` directory but must not be treated as the same object.
 """
 
 from __future__ import annotations
@@ -43,9 +58,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Soft default when no user_id is supplied (in-memory / single-tenant demos).
+DEFAULT_USER_ID = "default"
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_user_id(user_id: str | None, *, fallback: str = DEFAULT_USER_ID) -> str:
+    """Normalize a local user id without raising (identity handling is fail-soft).
+
+    Prefers ``persistence.paths.sanitize_user_id`` when available; otherwise
+    strips to a conservative ``[A-Za-z0-9_-]`` form. Empty/invalid input
+    returns ``fallback`` so bond tracking never crashes evaluation.
+    """
+    raw = str(user_id if user_id is not None else "").strip()
+    if not raw:
+        return fallback
+    try:
+        from persistence.paths import sanitize_user_id
+
+        return sanitize_user_id(raw)
+    except Exception:
+        cleaned = "".join(c for c in raw if c.isalnum() or c in "_-")[:64]
+        return cleaned or fallback
 
 
 # Canonical texture dimensions (0.0-1.0 each)
@@ -133,22 +170,29 @@ class RelationshipHealth:
 
         rh = RelationshipHealth()
         rh.update_bond({"type": "boundary_respected", "boundary_respected": True, "impact": 0.2})
-        ctx = rh.as_context()
+        ctx = rh.as_context()  # includes user_id for EthicsEngine scoping
         stance = engine.evaluate(action, relationship_health=ctx)
 
-    Optional local persistence::
+    Optional local persistence (prefer explicit user_id)::
 
         from persistence import LocalPersistence
         store = LocalPersistence("./pbe_data")
         rh = RelationshipHealth(persistence=store, user_id="alice")
-        rh.update_bond({...})  # auto-saves when auto_persist=True
+        rh.update_bond({...})  # auto-saves under users/alice/bond_state.json
         rh2 = RelationshipHealth(persistence=store, user_id="alice")  # reloads
+
+    Per-user isolation
+    ------------------
+    One ``RelationshipHealth`` instance tracks **one** local user. Do not reuse
+    the same instance across humans without ``set_user_id`` / ``load``. With
+    persistence, omitting ``user_id`` falls back to ``"default"`` and sets
+    ``using_default_user_id`` so callers/audits can notice soft ambiguity.
 
     Alongside PerUserBaseline
     -------------------------
     - Call ``PerUserBaseline.update_from_interaction`` on *user* style signals.
     - Call ``RelationshipHealth.update_bond`` on *relational* signals.
-    - Pass ``as_context()`` into EthicsEngine.
+    - Pass ``as_context()`` into EthicsEngine (carries ``user_id``).
 
     This class does not pathologize the user; flags describe bond *patterns*
     that matter for ethical care of the relationship.
@@ -159,7 +203,7 @@ class RelationshipHealth:
         initial_state: BondState | None = None,
         *,
         persistence: Any | None = None,
-        user_id: str = "default",
+        user_id: str | None = None,
         auto_persist: bool = True,
         load_existing: bool = True,
     ) -> None:
@@ -169,14 +213,29 @@ class RelationshipHealth:
             initial_state: Explicit BondState (overrides disk load when set).
             persistence: Optional LocalPersistence with load_bond_state /
                 save_bond_state. None = pure in-memory (default).
-            user_id: Local user id for bond file paths.
+            user_id: Local user id for bond file paths and EthicsEngine
+                scoping via ``as_context()``. Strongly preferred when
+                ``persistence`` is set. None / empty → ``"default"``
+                (backward compatible; see ``using_default_user_id``).
             auto_persist: Save after update_bond/reset when persistence is set.
             load_existing: Load bond_state.json when persistence is set and
                 initial_state is not provided.
         """
         self._persistence = persistence
-        self._user_id = str(user_id or "default")
+        # Explicit vs fallback: empty/None means soft default (never crash).
+        explicit = user_id is not None and str(user_id).strip() != ""
+        self._user_id_explicit = bool(explicit)
+        self._user_id = _safe_user_id(
+            user_id if explicit else None, fallback=DEFAULT_USER_ID
+        )
         self._auto_persist = bool(auto_persist) and persistence is not None
+        self._identity_notes: list[str] = []
+        if self._persistence is not None and not self._user_id_explicit:
+            self._identity_notes.append(
+                "persistence enabled without explicit user_id; "
+                f"using {DEFAULT_USER_ID!r} — prefer setting user_id to avoid "
+                "cross-user bond collision"
+            )
 
         if initial_state is not None:
             self.state: BondState = initial_state
@@ -186,13 +245,52 @@ class RelationshipHealth:
             self.state = BondState()
 
     # ------------------------------------------------------------------
-    # Persistence (optional; failures never raise)
+    # Identity (first-class user scoping)
     # ------------------------------------------------------------------
 
     @property
     def user_id(self) -> str:
-        """Local user id used for bond persistence paths."""
+        """Local user id this bond tracker is scoped to (paths + context)."""
         return self._user_id
+
+    @property
+    def using_default_user_id(self) -> bool:
+        """True when no explicit user_id was provided (soft ``default`` fallback)."""
+        return not self._user_id_explicit
+
+    @property
+    def identity_notes(self) -> list[str]:
+        """Soft identity warnings (e.g. persistence without explicit user_id)."""
+        return list(self._identity_notes)
+
+    def set_user_id(
+        self,
+        user_id: str,
+        *,
+        load_existing: bool = False,
+    ) -> str:
+        """Re-scope this tracker to another local user (fail-soft).
+
+        Args:
+            user_id: New local id (sanitized). Empty falls back to default.
+            load_existing: When True and persistence is enabled, replace
+                in-memory state with that user's bond_state.json.
+
+        Returns:
+            The normalized user_id now in effect.
+        """
+        explicit = user_id is not None and str(user_id).strip() != ""
+        self._user_id_explicit = bool(explicit)
+        self._user_id = _safe_user_id(
+            user_id if explicit else None, fallback=DEFAULT_USER_ID
+        )
+        if load_existing and self._persistence is not None:
+            self.state = self._load_state_safe(self._user_id)
+        return self._user_id
+
+    # ------------------------------------------------------------------
+    # Persistence (optional; failures never raise; always user-scoped)
+    # ------------------------------------------------------------------
 
     @property
     def persistence_enabled(self) -> bool:
@@ -200,10 +298,20 @@ class RelationshipHealth:
         return self._persistence is not None
 
     def save(self, user_id: str | None = None) -> Path | None:
-        """Persist current BondState. Returns path or None if disabled/failed."""
+        """Persist current BondState under a concrete user_id.
+
+        Returns path or None if disabled/failed. When ``user_id`` is passed,
+        that id is used for the write path (and becomes the instance scope
+        if non-empty) so the artifact is never written without a user folder.
+        """
         if self._persistence is None:
             return None
-        uid = str(user_id or self._user_id or "default")
+        if user_id is not None and str(user_id).strip() != "":
+            uid = _safe_user_id(user_id, fallback=self._user_id)
+            self._user_id = uid
+            self._user_id_explicit = True
+        else:
+            uid = self._user_id or DEFAULT_USER_ID
         try:
             from persistence.models import BondStateRecord
 
@@ -224,19 +332,31 @@ class RelationshipHealth:
             return None
 
     def load(self, user_id: str | None = None) -> BondState:
-        """Load BondState from disk into self.state (or neutral if missing)."""
-        uid = str(user_id or self._user_id or "default")
+        """Load BondState for a user into self.state (or neutral if missing)."""
+        if user_id is not None and str(user_id).strip() != "":
+            uid = _safe_user_id(user_id, fallback=DEFAULT_USER_ID)
+            self._user_id_explicit = True
+        else:
+            uid = self._user_id or DEFAULT_USER_ID
         if self._persistence is None:
+            self._user_id = uid
             return self.state
         self.state = self._load_state_safe(uid)
         self._user_id = uid
         return self.state
 
     def to_record(self, user_id: str | None = None) -> Any:
-        """Build a BondStateRecord for the current state (no I/O)."""
+        """Build a BondStateRecord for the current state (no I/O).
+
+        The record always carries a concrete ``user_id`` so callers cannot
+        accidentally persist an unscoped bond artifact.
+        """
         from persistence.models import BondStateRecord
 
-        uid = str(user_id or self._user_id or "default")
+        if user_id is not None and str(user_id).strip() != "":
+            uid = _safe_user_id(user_id, fallback=self._user_id)
+        else:
+            uid = self._user_id or DEFAULT_USER_ID
         return BondStateRecord(
             user_id=uid,
             bond_texture={k: float(v) for k, v in self.state.bond_texture.items()},
@@ -265,14 +385,21 @@ class RelationshipHealth:
                 "last_updated": getattr(record, "last_updated", _utc_now_iso()),
             }
         self.state = BondState.from_dict(data)
-        uid = getattr(record, "user_id", None)
-        if uid:
-            self._user_id = str(uid)
+        uid = None
+        if isinstance(record, dict):
+            uid = record.get("user_id")
+        else:
+            uid = getattr(record, "user_id", None)
+        if uid is not None and str(uid).strip() != "":
+            self._user_id = _safe_user_id(str(uid), fallback=self._user_id)
+            self._user_id_explicit = True
         return self.state
 
     def _load_state_safe(self, user_id: str) -> BondState:
+        """Load bond for ``user_id`` only; never reads another user's file."""
         try:
-            record = self._persistence.load_bond_state(user_id)
+            uid = _safe_user_id(user_id, fallback=DEFAULT_USER_ID)
+            record = self._persistence.load_bond_state(uid)
             if record is None:
                 return BondState()
             data = record.to_dict() if hasattr(record, "to_dict") else {}
@@ -414,6 +541,7 @@ class RelationshipHealth:
             for f in self.state.health_flags
         ]
         return {
+            "user_id": self._user_id or DEFAULT_USER_ID,
             "texture_breakdown": {
                 k: round(v, 3) for k, v in self.state.bond_texture.items()
             },
@@ -432,13 +560,18 @@ class RelationshipHealth:
         """Structured dict for ``EthicsEngine.evaluate(relationship_health=...)``.
 
         Keys match what the engine already recognizes:
+          - user_id (identity scope for this bond — used when evaluate has none)
           - health_flags / active_flags
           - bond_texture / texture_breakdown
           - interaction_count, recent_patterns, overall_risk_level
+
+        Per-user isolation: ``user_id`` is always present so deliberation and
+        decision logs can attribute bond evidence to the correct human.
         """
         texture = {k: round(v, 2) for k, v in self.state.bond_texture.items()}
         avg = self._average_texture()
-        return {
+        ctx: dict[str, Any] = {
+            "user_id": self._user_id or DEFAULT_USER_ID,
             "health_flags": list(self.state.health_flags),
             "active_flags": list(self.state.health_flags),
             "bond_texture": texture,
@@ -450,6 +583,11 @@ class RelationshipHealth:
             ),
             "summary": self.state.summary,
         }
+        if self._identity_notes:
+            ctx["identity_notes"] = list(self._identity_notes)
+        if self.using_default_user_id:
+            ctx["using_default_user_id"] = True
+        return ctx
 
     def get_state(self) -> BondState:
         """Return current BondState (inspection / persistence handoff)."""

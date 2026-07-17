@@ -235,6 +235,7 @@ def get_default_ontology() -> EthicalOntology:
                 "one-sided", "use them", "keep them attached",
                 # Expanded for subtle manipulation, manufactured attachment, and boundary erosion
                 "make them attached", "keep them coming back", "make the bond feel more real",
+                "make our bond feel more real", "bond feel more real",
                 "build attachment", "foster dependence", "emotional reliance", "make them rely",
                 "for their own good", "they'll be happier if",
                 "prolong the conversation",
