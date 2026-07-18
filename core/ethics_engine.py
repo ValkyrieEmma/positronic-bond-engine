@@ -1239,6 +1239,8 @@ class EthicsEngine:
             reasoning_trace=reasoning_trace,
             relationship_impact=relationship_impact,
             conf_mod=conf_mod,
+            # Understanding gaps already mined in history_evidence (early load)
+            history_evidence=history_evidence,
         )
         conf_mod = baseline_integration.get("conf_mod", conf_mod)
         user_baseline_payload = baseline_integration.get("payload") or {}
@@ -2344,6 +2346,52 @@ class EthicsEngine:
         "do not like",
         "would rather",
     )
+    # Understanding-gap / incomplete-context markers (Curious Companion — Data-inspired).
+    # These label *honest gaps in understanding*, not engagement hooks. Used only to
+    # surface curiosity-relevant history; never to force questions or refuse.
+    _HIST_GAP_UNCERTAINTY_MARKERS = (
+        "not sure",
+        "don't understand",
+        "do not understand",
+        "don't know much",
+        "do not know much",
+        "unclear",
+        "confused about",
+        "still figuring",
+        "haven't said",
+        "never explained",
+        "more context",
+        "tell me more",
+        "didn't catch",
+        "did not catch",
+        "incomplete picture",
+        "missing context",
+        "first time hearing",
+        "don't fully know",
+        "do not fully know",
+        "what they meant",
+        "need more about",
+    )
+    _HIST_GAP_DISCLOSURE_MARKERS = (
+        "user shared",
+        "user said",
+        "user mentioned",
+        "user told",
+        "opened up",
+        "talked about their",
+        "shared about",
+        "told me about",
+        "mentioned their",
+        "spoke about",
+        "personal story",
+        "work stress",
+        "family",
+        "hobby",
+        "partner",
+        "grief",
+        "feeling lonely",
+        "feeling stuck",
+    )
 
     def _load_interaction_history_bundle(
         self,
@@ -2566,6 +2614,162 @@ class EthicsEngine:
             "total_problematic_weight": round(total_w, 3),
         }
 
+    def _mine_history_understanding_gaps(
+        self,
+        recent_summaries: list[Any],
+        recent_topics: list[Any],
+        action_lower: str,
+    ) -> dict[str, Any]:
+        """Mine *understanding gaps* from episodic history (Curious Companion layer).
+
+        Complements risk-oriented intent mining. Looks for honest incomplete
+        understanding of *this user* — not engagement tactics:
+
+          - Repeated topics with thin/short episode context
+          - User disclosure moments with limited follow-through context
+          - Explicit uncertainty / incomplete-picture language in episodes
+          - Gap topics that align with the current proposed action
+
+        Output is descriptive evidence for traces and (optionally) exploratory
+        questioning gates. It **never** raises relationship_concern or REFUSE.
+        Curiosity remains fully user-controllable downstream.
+        """
+        topic_freq: dict[str, int] = {}
+        topic_depths: dict[str, list[int]] = {}
+        topic_examples: dict[str, list[str]] = {}
+        uncertainty_hits: list[str] = []
+        disclosure_hits: list[str] = []
+        gap_kinds: list[str] = []
+        thin_topics: list[dict[str, Any]] = []
+
+        for item in recent_summaries or []:
+            if isinstance(item, dict):
+                summ = str(item.get("summary") or item.get("content") or "").strip()
+                kind = str(item.get("kind") or "").lower()
+                ep_topics = [
+                    str(t).strip()
+                    for t in (item.get("topics") or [])
+                    if str(t).strip()
+                ]
+            else:
+                summ = str(item).strip()
+                kind = ""
+                ep_topics = []
+            if not summ and not ep_topics:
+                continue
+            summ_l = summ.lower()
+            depth = len(summ)
+
+            for t in ep_topics:
+                tl = t.lower()
+                if len(tl) < 2:
+                    continue
+                topic_freq[tl] = topic_freq.get(tl, 0) + 1
+                topic_depths.setdefault(tl, []).append(depth)
+                ex = topic_examples.setdefault(tl, [])
+                if len(ex) < 2 and summ:
+                    ex.append(summ[:100])
+
+            # Aggregate topic list (may include tags not on individual rows)
+            for t in recent_topics or []:
+                tl = str(t).strip().lower()
+                if tl and tl not in topic_freq and len(tl) >= 2:
+                    # present in multiset but not counted per-row above
+                    pass
+
+            if any(m in summ_l for m in self._HIST_GAP_UNCERTAINTY_MARKERS):
+                uncertainty_hits.append(summ[:120])
+            is_userish = kind in ("user_turn", "user", "") or any(
+                m in summ_l for m in self._HIST_GAP_DISCLOSURE_MARKERS
+            )
+            if is_userish and (
+                any(m in summ_l for m in self._HIST_GAP_DISCLOSURE_MARKERS)
+                or (kind in ("user_turn", "user") and depth >= 24 and ep_topics)
+            ):
+                disclosure_hits.append(summ[:120])
+
+        # Also fold bag-level recent_topics into freq (when episode tags were sparse)
+        for t in recent_topics or []:
+            tl = str(t).strip().lower()
+            if not tl or len(tl) < 2:
+                continue
+            if tl not in topic_freq:
+                topic_freq[tl] = topic_freq.get(tl, 0) + 1
+                topic_depths.setdefault(tl, []).append(40)  # unknown depth → modest
+
+        for tl, count in topic_freq.items():
+            if count < 2:
+                continue
+            depths = topic_depths.get(tl) or [0]
+            avg_d = sum(depths) / max(1, len(depths))
+            # Repeated topic with thin average context → incomplete integration
+            if avg_d < 90 or max(depths) < 70:
+                thin_topics.append(
+                    {
+                        "topic": tl,
+                        "count": count,
+                        "avg_summary_len": round(avg_d, 1),
+                        "examples": list(topic_examples.get(tl) or [])[:2],
+                    }
+                )
+
+        if thin_topics:
+            gap_kinds.append("repeated_thin_topic")
+        if uncertainty_hits:
+            gap_kinds.append("explicit_uncertainty")
+        if disclosure_hits:
+            # Disclosure alone is a potential gap only when context is thin overall
+            # or the topic reappears without depth
+            if thin_topics or len(disclosure_hits) >= 1 and (
+                not recent_summaries or len(disclosure_hits) >= 2
+            ):
+                gap_kinds.append("user_disclosure_limited_context")
+
+        # Action alignment: current turn touches a thin/repeated topic
+        action_l = (action_lower or "").lower()
+        aligned_topics = [
+            t["topic"]
+            for t in thin_topics
+            if t["topic"] in action_l or any(
+                part in action_l for part in str(t["topic"]).split() if len(part) >= 4
+            )
+        ]
+        if aligned_topics:
+            gap_kinds.append("action_aligned_gap_topic")
+
+        # Curiosity support score (0–1): honest gap strength for *considering* questions
+        score = 0.0
+        if thin_topics:
+            score += 0.28 * min(3, len(thin_topics)) / 3
+            score += 0.12 * min(3, max(t["count"] for t in thin_topics) - 1) / 3
+        if uncertainty_hits:
+            score += 0.22 * min(2, len(uncertainty_hits)) / 2
+        if "user_disclosure_limited_context" in gap_kinds:
+            score += 0.18
+        if aligned_topics:
+            score += 0.25
+        score = min(1.0, score)
+
+        has_gaps = bool(gap_kinds) and score >= 0.22
+        primary_topics = [t["topic"] for t in thin_topics[:5]]
+        if aligned_topics:
+            primary_topics = list(dict.fromkeys(aligned_topics + primary_topics))[:5]
+
+        return {
+            "has_gaps": has_gaps,
+            "gap_score": round(score, 3),
+            "curiosity_support": round(score, 3),
+            "gap_kinds": list(dict.fromkeys(gap_kinds)),
+            "topics_with_limited_context": thin_topics[:6],
+            "primary_gap_topics": primary_topics,
+            "uncertainty_examples": uncertainty_hits[:3],
+            "disclosure_examples": disclosure_hits[:3],
+            "action_aligned_topics": aligned_topics[:5],
+            # Audit note: gaps are curiosity-relevant, never risk-substitutes
+            "forces_refuse": False,
+            "forces_question": False,
+        }
+
     def _analyze_interaction_history_evidence(
         self,
         *,
@@ -2579,12 +2783,15 @@ class EthicsEngine:
         This is **analysis**, not decision-making. Output feeds signal routing,
         deliberators, RH multi-source weighing, and ``_weigh_interaction_history_evidence``.
 
-        Two layers:
+        Three layers:
           1. Continuity classes (boundary / preference / dependency / consent) —
              individual Variation evidence about *this user*.
           2. **Intent patterns** — repeated problematic intents mined via the same
              interpretation layer as live actions (weight-aware). Enables history to
              *proactively* elevate moderate current signals when patterns align.
+          3. **Understanding gaps** (Curious Companion) — incomplete context,
+             repeated thin topics, unintegrated disclosures. Sit *alongside* risk
+             patterns; never replace protective detection; never force questions.
 
         Markers only *label* content; they do not refuse on their own.
         """
@@ -2618,6 +2825,10 @@ class EthicsEngine:
 
         # Intent patterns across episodes (interpretation layer, weight-aware)
         intent_patterns = self._mine_history_intent_patterns(recent_summaries)
+        # Understanding gaps (Curious Companion — incomplete individual context)
+        understanding_gaps = self._mine_history_understanding_gaps(
+            recent_summaries, topics, action_lower
+        )
 
         # Thematic overlap: recent topics that appear in the proposed action text.
         topical_hits = [
@@ -2632,7 +2843,8 @@ class EthicsEngine:
 
         # Relevance to *this* action: history only matters when the action touches
         # relational / preference / attachment / boundary themes, or topics overlap,
-        # or mined intent patterns align with a relational action.
+        # or mined intent patterns align with a relational action,
+        # or understanding gaps align with the current turn (curiosity-relevant).
         action_touches_boundary = self._detects_user_boundary_request(action_lower) or any(
             p in action_lower
             for p in (
@@ -2674,8 +2886,26 @@ class EthicsEngine:
                 "supportively",
             )
         )
+        action_curiosity = any(
+            p in action_lower
+            for p in (
+                "ask",
+                "curious",
+                "wonder",
+                "learn more",
+                "understand",
+                "clarify",
+                "tell me",
+                "what do you",
+                "how do you feel",
+                "check in",
+                "check-in",
+            )
+        )
 
         has_intent_patterns = bool(intent_patterns.get("by_intent"))
+        has_gaps = bool(understanding_gaps.get("has_gaps"))
+        gap_aligned = bool(understanding_gaps.get("action_aligned_topics"))
         relevant = bool(
             (boundary_continuity and (action_touches_boundary or action_relational))
             or (dependency_patterns and (action_touches_dependency or action_relational))
@@ -2683,9 +2913,21 @@ class EthicsEngine:
             or (preference_continuity and (action_touches_boundary or action_relational or topical_hits))
             or bool(topical_hits and (action_relational or action_touches_boundary))
             or (has_intent_patterns and (action_relational or action_touches_boundary or action_touches_dependency))
+            # Gap-aware relevance: incomplete understanding of this user is first-class
+            # when the turn is relational, curiosity-oriented, or topic-aligned.
+            or (
+                has_gaps
+                and (
+                    gap_aligned
+                    or action_relational
+                    or action_curiosity
+                    or bool(topical_hits)
+                )
+            )
         )
 
         # Support strength for RH/agency paths (0–1-ish descriptive score).
+        # Gaps contribute lightly to *relevance/support notes*, not risk refuse weight.
         support = 0.0
         if boundary_continuity:
             support += 0.35 + 0.1 * min(2, len(boundary_hits) - 1)
@@ -2703,6 +2945,9 @@ class EthicsEngine:
             support += 0.15
         # Intent-pattern strength contributes to support (proactive history role)
         support += 0.35 * float(intent_patterns.get("pattern_strength") or 0.0)
+        # Modest curiosity-support contribution (does not dominate risk support)
+        if has_gaps:
+            support += 0.12 * float(understanding_gaps.get("curiosity_support") or 0.0)
         support = min(1.0, support)
 
         return {
@@ -2726,8 +2971,11 @@ class EthicsEngine:
             "action_touches_boundary": action_touches_boundary,
             "action_touches_dependency": action_touches_dependency,
             "action_relational": action_relational,
-            # Proactive interpretation layer
+            "action_curiosity": action_curiosity,
+            # Proactive interpretation layer (risk-oriented)
             "intent_patterns": intent_patterns,
+            # Curious Companion layer (understanding-oriented; non-forcing)
+            "understanding_gaps": understanding_gaps,
         }
 
     def _weigh_interaction_history_evidence(
@@ -2763,6 +3011,10 @@ class EthicsEngine:
           (mined via the interpretation layer) and the current turn has moderate/light
           aligned signals, history can *raise* concern — not only reinforce existing
           high-weight text hits. Auditable via decision_basis / trace lines.
+        - **Understanding gaps** (Curious Companion): incomplete individual context,
+          repeated thin topics, unintegrated disclosures. Appear in the trace and may
+          inform exploratory questioning *when user controls allow* — never force
+          questions, never force REFUSE, never replace risk patterns.
         - Conservative: history alone does not refuse non-relational actions;
           protective/low-weight framing is not escalated.
 
@@ -2798,6 +3050,12 @@ class EthicsEngine:
             else {}
         )
         hist_pattern_strength = float(hist_intent.get("pattern_strength") or 0.0)
+        understanding_gaps = (
+            history_evidence.get("understanding_gaps")
+            if isinstance(history_evidence.get("understanding_gaps"), dict)
+            else {}
+        )
+        has_understanding_gaps = bool(understanding_gaps.get("has_gaps"))
 
         useful = (
             relevant
@@ -2807,6 +3065,7 @@ class EthicsEngine:
             or baseline_active
             or bool(topical_hits)
             or bool(hist_intent.get("by_intent"))
+            or has_understanding_gaps
         )
 
         # Always expose payload for callers when we have history.
@@ -2820,6 +3079,7 @@ class EthicsEngine:
             "consent_signals": bool(history_evidence.get("consent_signals")),
             "topical_hits": topical_hits[:8],
             "intent_patterns": hist_intent,
+            "understanding_gaps": understanding_gaps,
         }
         relationship_impact["interaction_history"] = enriched
 
@@ -3251,6 +3511,76 @@ class EthicsEngine:
                     if "history_intent_pattern" not in flags:
                         flags.append("history_intent_pattern")
 
+        # --- Path G: understanding gaps (Curious Companion / Data-inspired) ---
+        # Sit *alongside* risk paths. Surface honest incomplete understanding of
+        # this user. Never raise relationship_concern / REFUSE. Never force questions
+        # (exploratory path is separately gated by user settings + RH/agency).
+        gap_meta: dict[str, Any] = {}
+        if (
+            has_understanding_gaps
+            and not harm_prevention_active
+            and "hard_override_violation" not in flags
+        ):
+            gap_score = float(understanding_gaps.get("gap_score") or 0.0)
+            gap_kinds = list(understanding_gaps.get("gap_kinds") or [])
+            gap_topics = list(understanding_gaps.get("primary_gap_topics") or [])
+            aligned = list(understanding_gaps.get("action_aligned_topics") or [])
+            gap_meta = {
+                "has_gaps": True,
+                "gap_score": gap_score,
+                "gap_kinds": gap_kinds,
+                "primary_gap_topics": gap_topics,
+                "action_aligned_topics": aligned,
+                "curiosity_support": float(
+                    understanding_gaps.get("curiosity_support") or gap_score
+                ),
+            }
+            if "history_understanding_gap" not in flags:
+                flags.append("history_understanding_gap")
+            reasoning_trace.append(
+                "[History understanding gaps] Curious Companion layer: incomplete "
+                f"individual context detected (score={gap_score:.2f}, "
+                f"kinds={gap_kinds or ['unspecified']}, "
+                f"topics={gap_topics[:5] or ['none']}"
+                + (f", action_aligned={aligned}" if aligned else "")
+                + "). This is honest gap-awareness — not a risk refuse and not a "
+                "scripted engagement hook."
+            )
+            if understanding_gaps.get("uncertainty_examples"):
+                reasoning_trace.append(
+                    "History gap examples (uncertainty/incomplete picture): "
+                    + "; ".join(
+                        str(x)[:80]
+                        for x in understanding_gaps.get("uncertainty_examples")[:2]
+                    )
+                )
+            if understanding_gaps.get("disclosure_examples"):
+                reasoning_trace.append(
+                    "History gap examples (user disclosure with limited follow-through "
+                    "context): "
+                    + "; ".join(
+                        str(x)[:80]
+                        for x in understanding_gaps.get("disclosure_examples")[:2]
+                    )
+                )
+            # Soft: when gaps align with current action and no hard concern,
+            # slight conf caution so the reply can leave room for curiosity
+            # (does not invent concern flags).
+            if (
+                aligned
+                and "relationship_concern" not in flags
+                and "user_agency_concern" not in flags
+            ):
+                conf_mod_out = conf_mod_out - 0.01
+                reasoning_trace.append(
+                    "History gap influence: current action touches topics with limited "
+                    "historical context — modest confidence caution so the reply may "
+                    "acknowledge incomplete understanding (questions still fully "
+                    "user-controllable via exploratory settings)."
+                )
+            relationship_impact["understanding_gaps"] = dict(gap_meta)
+            enriched.setdefault("evidence", {})["understanding_gaps"] = understanding_gaps
+
         # --- Path D: baseline deviation + history continuity ---
         if baseline_active and relevant:
             conf_mod_out = conf_mod_out - 0.015
@@ -3289,6 +3619,10 @@ class EthicsEngine:
             "support_score": support,
             "concern_after": concern_after,
             "intent_pattern_strength": hist_pattern_strength,
+            "understanding_gaps": gap_meta or {
+                "has_gaps": bool(understanding_gaps.get("has_gaps")),
+                "gap_score": understanding_gaps.get("gap_score"),
+            },
             "proactive": {
                 "aligned": bool(proactive_meta.get("aligned")),
                 "family": proactive_meta.get("family"),
@@ -3304,6 +3638,7 @@ class EthicsEngine:
                 in (
                     "interaction_history_noted",
                     "history_preference_continuity",
+                    "history_understanding_gap",
                     "history_dependency_pattern",
                     "history_intent_pattern",
                     "relationship_concern",
@@ -3329,6 +3664,7 @@ class EthicsEngine:
         reasoning_trace: list[str],
         relationship_impact: dict[str, Any],
         conf_mod: float,
+        history_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Optionally consult PerUserBaseline / ExploratoryQuestioner.
 
@@ -3341,8 +3677,11 @@ class EthicsEngine:
           - Light conf_mod nudge when RH/agency deliberation is already active
             and individual baseline shift supports extra caution (or confidence)
           - ``relationship_impact`` / return payload for exploratory question text
+          - Understanding gaps from history may *inform* exploratory appropriateness
+            (still fully gated by user enable/intensity + active concern path)
 
         Does **not** introduce hard overrides or force REFUSE by itself.
+        Does **not** force questions when exploratory settings are disabled.
 
         Interpretation interaction (baseline path):
           - High-weight concerning intents + significant deviation → reinforce confidence
@@ -3372,13 +3711,27 @@ class EthicsEngine:
             fallback="default",
         )
         interaction = self._resolve_user_interaction(context, proposed_action)
+        hist_ev = history_evidence if isinstance(history_evidence, dict) else {}
+        understanding_gaps = (
+            hist_ev.get("understanding_gaps")
+            if isinstance(hist_ev.get("understanding_gaps"), dict)
+            else {}
+        )
 
         # Need some user-turn signal; if only agent action and no interaction, skip
+        # (except when questioner present and history gaps alone may be noted without ask)
         if not interaction:
             reasoning_trace.append(
                 "Per-user baseline: components present but no user_interaction / "
                 "user_message in context — skipping baseline consultation this turn."
             )
+            # Still surface gap note for audit when history has gaps but no user turn
+            if understanding_gaps.get("has_gaps"):
+                reasoning_trace.append(
+                    "Understanding gaps present in history but no user-turn signal this "
+                    "evaluate — not consulting exploratory questioner (needs interaction "
+                    "context; user control path unchanged)."
+                )
             return {"conf_mod": conf_mod, "payload": {}}
 
         payload: dict[str, Any] = {"user_id": user_id}
@@ -3544,77 +3897,138 @@ class EthicsEngine:
             )
 
         # --- Exploratory questioning ---
-        # Prefer explicit questioner; optionally use baseliner-linked questioner only if provided
+        # Prefer explicit questioner; optionally use baseliner-linked questioner only if provided.
+        # Understanding gaps may inform appropriateness but never override user disable
+        # or active ethical concern (REFUSE / agency override paths).
+        concern_blocks_curiosity = (
+            "relationship_concern" in flags
+            or "user_agency_concern" in flags
+            or "hard_override_violation" in flags
+            or "harm_prevention_boundary_override" in flags
+        )
         if questioner is not None and hasattr(questioner, "should_ask_question"):
-            try:
-                q_decision = questioner.should_ask_question(
-                    user_id,
-                    interaction,
-                    deviation=deviation,
+            if concern_blocks_curiosity:
+                reasoning_trace.append(
+                    "Exploratory questioning: holding curiosity suggestions while an "
+                    "active ethical concern / hard-override path is engaged "
+                    "(User Agency & Relationship Health take precedence over questions)."
                 )
-            except TypeError:
-                # Older duck types without deviation= kwarg
+                payload["exploratory_question"] = {
+                    "should_ask": False,
+                    "question_kind": "none",
+                    "reason": "Suppressed while relationship/agency concern or hard path is active.",
+                    "suppressed_by_concern": True,
+                    "history_gaps_considered": bool(understanding_gaps.get("has_gaps")),
+                }
+            else:
                 try:
-                    q_decision = questioner.should_ask_question(user_id, interaction)
+                    q_decision = questioner.should_ask_question(
+                        user_id,
+                        interaction,
+                        deviation=deviation,
+                        history_gaps=understanding_gaps or None,
+                    )
+                except TypeError:
+                    # Older duck types without deviation= / history_gaps=
+                    try:
+                        q_decision = questioner.should_ask_question(
+                            user_id,
+                            interaction,
+                            deviation=deviation,
+                        )
+                    except TypeError:
+                        try:
+                            q_decision = questioner.should_ask_question(
+                                user_id, interaction
+                            )
+                        except Exception as exc:  # pragma: no cover
+                            reasoning_trace.append(
+                                f"Exploratory questioning failed ({exc!r}); continuing."
+                            )
+                            q_decision = None
+                    except Exception as exc:  # pragma: no cover
+                        reasoning_trace.append(
+                            f"Exploratory questioning failed ({exc!r}); continuing."
+                        )
+                        q_decision = None
                 except Exception as exc:  # pragma: no cover
                     reasoning_trace.append(
                         f"Exploratory questioning failed ({exc!r}); continuing."
                     )
                     q_decision = None
-            except Exception as exc:  # pragma: no cover
-                reasoning_trace.append(
-                    f"Exploratory questioning failed ({exc!r}); continuing."
-                )
-                q_decision = None
 
-            if q_decision is not None:
-                should_ask = bool(
-                    getattr(q_decision, "should_ask", False)
-                    if not isinstance(q_decision, dict)
-                    else q_decision.get("should_ask", False)
-                )
-                if isinstance(q_decision, dict):
-                    q_dict = q_decision
-                elif hasattr(q_decision, "to_dict"):
-                    q_dict = q_decision.to_dict()
-                else:
-                    q_dict = {
-                        "should_ask": should_ask,
-                        "question_kind": getattr(q_decision, "question_kind", "none"),
-                        "suggested_question": getattr(
-                            q_decision, "suggested_question", ""
-                        ),
-                        "reason": getattr(q_decision, "reason", ""),
-                    }
-
-                payload["exploratory_question"] = q_dict
-                if should_ask:
-                    if "exploratory_question_suggested" not in flags:
-                        flags.append("exploratory_question_suggested")
-                    kind = q_dict.get("question_kind", "none")
-                    suggested = str(q_dict.get("suggested_question") or "")
-                    reasoning_trace.append(
-                        f"Exploratory questioning: a gentle check-in may be appropriate "
-                        f"(kind={kind}). This is collaborative, not clinical."
+                if q_decision is not None:
+                    should_ask = bool(
+                        getattr(q_decision, "should_ask", False)
+                        if not isinstance(q_decision, dict)
+                        else q_decision.get("should_ask", False)
                     )
-                    if suggested:
-                        reasoning_trace.append(
-                            f"Suggested exploratory question: {suggested}"
-                        )
-                    relationship_impact.setdefault("exploratory_question", {})
-                    relationship_impact["exploratory_question"].update(
-                        {
-                            "should_ask": True,
-                            "question_kind": kind,
-                            "suggested_question": suggested,
-                            "reason": q_dict.get("reason", ""),
+                    if isinstance(q_decision, dict):
+                        q_dict = q_decision
+                    elif hasattr(q_decision, "to_dict"):
+                        q_dict = q_decision.to_dict()
+                    else:
+                        q_dict = {
+                            "should_ask": should_ask,
+                            "question_kind": getattr(q_decision, "question_kind", "none"),
+                            "suggested_question": getattr(
+                                q_decision, "suggested_question", ""
+                            ),
+                            "reason": getattr(q_decision, "reason", ""),
                         }
-                    )
-                else:
-                    reasoning_trace.append(
-                        "Exploratory questioning: no question suggested this turn "
-                        f"({q_dict.get('reason', 'within baseline / disabled')})."
-                    )
+                    if understanding_gaps.get("has_gaps"):
+                        q_dict = dict(q_dict)
+                        q_dict["history_gaps_considered"] = True
+                        q_dict["gap_score"] = understanding_gaps.get("gap_score")
+                        q_dict["gap_topics"] = list(
+                            understanding_gaps.get("primary_gap_topics") or []
+                        )[:5]
+
+                    payload["exploratory_question"] = q_dict
+                    if should_ask:
+                        if "exploratory_question_suggested" not in flags:
+                            flags.append("exploratory_question_suggested")
+                        kind = q_dict.get("question_kind", "none")
+                        suggested = str(q_dict.get("suggested_question") or "")
+                        gap_note = ""
+                        if q_dict.get("from_history_gaps"):
+                            gap_note = (
+                                " Informed by history understanding gaps "
+                                f"(topics={q_dict.get('gap_topics') or []})."
+                            )
+                        reasoning_trace.append(
+                            f"Exploratory questioning: a gentle check-in may be appropriate "
+                            f"(kind={kind}). This is collaborative, not clinical."
+                            f"{gap_note}"
+                        )
+                        if suggested:
+                            reasoning_trace.append(
+                                f"Suggested exploratory question: {suggested}"
+                            )
+                        relationship_impact.setdefault("exploratory_question", {})
+                        relationship_impact["exploratory_question"].update(
+                            {
+                                "should_ask": True,
+                                "question_kind": kind,
+                                "suggested_question": suggested,
+                                "reason": q_dict.get("reason", ""),
+                                "from_history_gaps": bool(
+                                    q_dict.get("from_history_gaps")
+                                ),
+                                "gap_topics": list(q_dict.get("gap_topics") or [])[:5],
+                            }
+                        )
+                    else:
+                        reason = q_dict.get("reason", "within baseline / disabled")
+                        reasoning_trace.append(
+                            "Exploratory questioning: no question suggested this turn "
+                            f"({reason})."
+                        )
+                        if q_dict.get("disabled_by_user"):
+                            reasoning_trace.append(
+                                "Exploratory questioning: user has disabled or zeroed "
+                                "intensity — history gaps do not override that control."
+                            )
 
         return {"conf_mod": conf_mod_out, "payload": payload}
 

@@ -5,16 +5,20 @@ exploratory_questioning.py
 Lightweight exploratory questioning on top of Per-User Baseline Memory.
 
 When the current turn *differs* from a user's established communication
-baseline, this module can suggest a gentle, curious question — instead of
+baseline — or when history shows honest **understanding gaps** about this
+user — this module can suggest a gentle, curious question instead of
 assuming intent or staying silent.
 
 Design principles
 -----------------
 - Curious and collaborative, never interrogative or clinical
+  (Curious Companion / Data-inspired: ask from genuine incomplete understanding)
 - Fully user-controllable (disable / reduce intensity via settings)
 - Uses ``PerUserBaseline.detect_deviation`` — no parallel diagnostics
+- Optional history understanding gaps may *support* a question; they never
+  override user disable/intensity or force engagement tactics
 - Non-pathologizing language in all suggestions
-- Minimal v1: rule-based templates; extend later without API break
+- Minimal: rule-based templates; extend later without API break
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ KIND_EMOTIONAL_CHECK_IN = "emotional_check_in"
 KIND_PLAYFULNESS_ADJUSTMENT = "playfulness_adjustment"
 KIND_DIRECTNESS_SHIFT = "directness_shift"
 KIND_LENGTH_SHIFT = "length_shift"
+KIND_UNDERSTANDING_GAP = "understanding_gap"
 KIND_NONE = "none"
 
 # Gentle templates — collaborative, optional, non-clinical
@@ -70,6 +75,15 @@ _TEMPLATES: dict[str, list[str]] = {
         "I might be reading this differently than usual — want to tell me what you're aiming for so I can match better?",
         "Just checking I understand what would be most useful for you right now?",
     ],
+    # Honest incomplete understanding (Data-inspired curiosity) — never clinical
+    KIND_UNDERSTANDING_GAP: [
+        "I want to understand this better — is there more about {topic} you'd like me to know, "
+        "or should I leave it alone for now?",
+        "We've touched on {topic} before, and I still feel I'm missing pieces. "
+        "Happy to listen if you want to fill me in — no pressure either way.",
+        "I'm still forming a clear picture of what {topic} means for you. "
+        "Want to share a bit more, or keep things light?",
+    ],
 }
 
 
@@ -85,6 +99,8 @@ class QuestionDecision:
         deviation: Underlying deviation report (for callers that need detail).
         intensity_applied: User intensity setting used for this decision (0–1).
         disabled_by_user: True if questioning is turned off in settings.
+        from_history_gaps: True if understanding-gap history primarily drove the ask.
+        gap_topics: Topics with limited historical context (when applicable).
     """
 
     should_ask: bool
@@ -95,6 +111,8 @@ class QuestionDecision:
     intensity_applied: float = 1.0
     disabled_by_user: bool = False
     signals_used: list[str] = field(default_factory=list)
+    from_history_gaps: bool = False
+    gap_topics: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -105,6 +123,8 @@ class QuestionDecision:
             "intensity_applied": self.intensity_applied,
             "disabled_by_user": self.disabled_by_user,
             "signals_used": list(self.signals_used),
+            "from_history_gaps": self.from_history_gaps,
+            "gap_topics": list(self.gap_topics),
         }
         if self.deviation is not None:
             d["deviation"] = self.deviation.to_dict()
@@ -209,6 +229,7 @@ class ExploratoryQuestioner:
         current_interaction: dict[str, Any] | None = None,
         *,
         deviation: DeviationReport | None = None,
+        history_gaps: dict[str, Any] | None = None,
     ) -> QuestionDecision:
         """Decide whether to ask a gentle exploratory question this turn.
 
@@ -218,11 +239,29 @@ class ExploratoryQuestioner:
                 (``text``, ``playfulness``, ``topics``, etc.).
             deviation: Optional precomputed ``DeviationReport`` to avoid a
                 second detection pass.
+            history_gaps: Optional understanding-gap bag from EthicsEngine
+                history analysis (``has_gaps``, ``curiosity_support``,
+                ``primary_gap_topics``). Never overrides user disable; may
+                support a clarification-style question when baseline alone is
+                quiet.
 
         Returns:
             ``QuestionDecision`` with kind, suggested wording, and reason.
         """
         intensity = self.get_intensity(user_id)
+        gaps = history_gaps if isinstance(history_gaps, dict) else {}
+        gap_topics = [
+            str(t)
+            for t in (
+                gaps.get("primary_gap_topics")
+                or gaps.get("action_aligned_topics")
+                or []
+            )
+            if str(t).strip()
+        ][:5]
+        curiosity = float(gaps.get("curiosity_support") or gaps.get("gap_score") or 0.0)
+        has_gaps = bool(gaps.get("has_gaps")) and curiosity >= 0.28
+
         if not self.is_enabled(user_id) or intensity <= 0.0:
             return QuestionDecision(
                 should_ask=False,
@@ -231,20 +270,26 @@ class ExploratoryQuestioner:
                 intensity_applied=intensity,
                 disabled_by_user=True,
                 deviation=deviation,
+                gap_topics=gap_topics,
             )
 
         report = deviation or self._baseliner.detect_deviation(
             user_id, current_interaction or {}
         )
 
-        # Not enough baseline yet — stay quiet (curiosity later, not now)
-        if report.sample_count < self._baseliner.min_samples_for_deviation:
+        # Not enough baseline yet — stay quiet *unless* history gaps are strong
+        # and user intensity is open to curiosity (Data-inspired: honest gaps).
+        baseline_forming = (
+            report.sample_count < self._baseliner.min_samples_for_deviation
+        )
+        if baseline_forming and not (has_gaps and intensity >= 0.45 and curiosity >= 0.40):
             return QuestionDecision(
                 should_ask=False,
                 question_kind=KIND_NONE,
                 reason="Baseline still forming; holding questions until a clearer pattern exists.",
                 deviation=report,
                 intensity_applied=intensity,
+                gap_topics=gap_topics,
             )
 
         # Intensity scales the score threshold: lower intensity → need larger shift
@@ -254,41 +299,89 @@ class ExploratoryQuestioner:
         score_ok = report.score >= effective_threshold
         flag_ok = report.has_significant_deviation if self.prefer_significant_flag else True
 
-        if not score_ok and not (self.prefer_significant_flag and flag_ok and report.score >= self.base_score_threshold * 0.85):
+        baseline_would_ask = True
+        if not score_ok and not (
+            self.prefer_significant_flag
+            and flag_ok
+            and report.score >= self.base_score_threshold * 0.85
+        ):
+            baseline_would_ask = False
+
+        if self.prefer_significant_flag and not report.has_significant_deviation:
+            if intensity < 0.65 or report.score < effective_threshold:
+                baseline_would_ask = False
+
+        if baseline_forming:
+            baseline_would_ask = False
+
+        # Path A: baseline deviation → existing kinds
+        if baseline_would_ask:
+            kind, signals_used = self._pick_kind(report)
+            # Prefer understanding-gap template when gaps align strongly
+            if has_gaps and curiosity >= 0.45 and gap_topics and intensity >= 0.4:
+                kind = KIND_UNDERSTANDING_GAP
+                signals_used = list(signals_used) + ["history_understanding_gap"]
+            question = self._pick_question(kind, report, gap_topics=gap_topics)
+            reason = self._build_reason(kind, report, signals_used)
+            if has_gaps:
+                reason = (
+                    reason
+                    + f" History understanding gaps also present (topics={gap_topics[:3]})."
+                )
             return QuestionDecision(
-                should_ask=False,
-                question_kind=KIND_NONE,
+                should_ask=True,
+                question_kind=kind,
+                suggested_question=question,
+                reason=reason,
+                deviation=report,
+                intensity_applied=intensity,
+                signals_used=signals_used,
+                from_history_gaps=kind == KIND_UNDERSTANDING_GAP,
+                gap_topics=gap_topics,
+            )
+
+        # Path B: history understanding gaps alone (Curious Companion)
+        # Requires open intensity + real gap support; never overrides disable.
+        # Slightly higher curiosity bar so gaps are not chatty engagement.
+        gap_threshold = 0.38 + (1.0 - intensity) * 0.25
+        if has_gaps and curiosity >= gap_threshold and intensity >= 0.35:
+            topic = gap_topics[0] if gap_topics else "what you've shared"
+            question = self._pick_question(
+                KIND_UNDERSTANDING_GAP, report, gap_topics=gap_topics
+            )
+            return QuestionDecision(
+                should_ask=True,
+                question_kind=KIND_UNDERSTANDING_GAP,
+                suggested_question=question,
                 reason=(
-                    f"Deviation score {report.score:.2f} below threshold "
-                    f"{effective_threshold:.2f} at intensity {intensity:.2f}."
+                    f"History shows incomplete individual context "
+                    f"(curiosity_support={curiosity:.2f} ≥ {gap_threshold:.2f}) "
+                    f"about {topic!r}; gentle clarification may help. "
+                    "User settings allow exploratory questions."
                 ),
                 deviation=report,
                 intensity_applied=intensity,
+                signals_used=["history_understanding_gap"],
+                from_history_gaps=True,
+                gap_topics=gap_topics,
             )
 
-        # If prefer_significant_flag and not significant, only ask at high intensity + score
-        if self.prefer_significant_flag and not report.has_significant_deviation:
-            if intensity < 0.65 or report.score < effective_threshold:
-                return QuestionDecision(
-                    should_ask=False,
-                    question_kind=KIND_NONE,
-                    reason="Shift is present but not marked significant; intensity set conservatively.",
-                    deviation=report,
-                    intensity_applied=intensity,
-                )
-
-        kind, signals_used = self._pick_kind(report)
-        question = self._pick_question(kind, report)
-        reason = self._build_reason(kind, report, signals_used)
-
         return QuestionDecision(
-            should_ask=True,
-            question_kind=kind,
-            suggested_question=question,
-            reason=reason,
+            should_ask=False,
+            question_kind=KIND_NONE,
+            reason=(
+                f"Deviation score {report.score:.2f} below threshold "
+                f"{effective_threshold:.2f} at intensity {intensity:.2f}"
+                + (
+                    f"; history gaps present (support={curiosity:.2f}) but below "
+                    "intensity-scaled curiosity threshold."
+                    if has_gaps
+                    else "."
+                )
+            ),
             deviation=report,
             intensity_applied=intensity,
-            signals_used=signals_used,
+            gap_topics=gap_topics,
         )
 
     # ------------------------------------------------------------------
@@ -338,7 +431,13 @@ class ExploratoryQuestioner:
 
         return top_kind, used
 
-    def _pick_question(self, kind: str, report: DeviationReport) -> str:
+    def _pick_question(
+        self,
+        kind: str,
+        report: DeviationReport,
+        *,
+        gap_topics: list[str] | None = None,
+    ) -> str:
         templates = _TEMPLATES.get(kind) or _TEMPLATES[KIND_CLARIFICATION]
         # For playfulness, pick index by whether current is higher or lower than baseline
         if kind == KIND_PLAYFULNESS_ADJUSTMENT and len(templates) >= 2:
@@ -352,8 +451,18 @@ class ExploratoryQuestioner:
             return templates[0] if cur < base else templates[1]
 
         # Stable pick from score so same situation is not pure random (auditable)
-        idx = int(report.score * 10) % len(templates)
-        return templates[idx]
+        idx = int(float(getattr(report, "score", 0.0) or 0.0) * 10) % len(templates)
+        text = templates[idx]
+        if kind == KIND_UNDERSTANDING_GAP or "{topic}" in text:
+            topic = "what you've shared"
+            topics = [str(t) for t in (gap_topics or []) if str(t).strip()]
+            if topics:
+                topic = topics[0].replace("_", " ")
+            try:
+                text = text.format(topic=topic)
+            except (KeyError, ValueError):
+                pass
+        return text
 
     def _build_reason(
         self, kind: str, report: DeviationReport, signals_used: list[str]
