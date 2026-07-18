@@ -640,6 +640,27 @@ class RelationshipHealth:
                 self.state.recent_patterns[key] = (
                     int(self.state.recent_patterns.get(key, 0) or 0) + 1
                 )
+            # Soft open-topic continuity marker (inspectable; never a health risk flag)
+            open_from_gaps = list(
+                (gaps or {}).get("open_topics")
+                or (gaps or {}).get("topic_continuity", {}).get("open_topic_names")
+                or topics
+            )
+            if open_from_gaps:
+                self.state.recent_patterns["open_topic_continuity"] = (
+                    int(self.state.recent_patterns.get("open_topic_continuity", 0) or 0) + 1
+                )
+                audit_open = [
+                    (o.get("topic") if isinstance(o, dict) else o)
+                    for o in open_from_gaps[:4]
+                ]
+                for t in audit_open:
+                    if not t:
+                        continue
+                    ok = f"open_topic:{str(t)[:32]}"
+                    self.state.recent_patterns[ok] = (
+                        int(self.state.recent_patterns.get(ok, 0) or 0) + 1
+                    )
 
             applied_deltas = {
                 dim: round(float(self.state.bond_texture.get(dim, 0)) - before.get(dim, 0), 4)
@@ -657,6 +678,11 @@ class RelationshipHealth:
             audit["applied"] = True
             audit["deltas"] = applied_deltas
             audit["nudge_count_after"] = nudge_count + 1
+            audit["open_topic_continuity"] = True
+            audit["open_topics"] = [
+                (o.get("topic") if isinstance(o, dict) else o)
+                for o in open_from_gaps[:5]
+            ]
             audit["texture_after"] = {
                 k: round(float(v), 3) for k, v in self.state.bond_texture.items()
             }
