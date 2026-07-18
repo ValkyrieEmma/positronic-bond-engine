@@ -16,6 +16,11 @@ Architecture placement
   modules can *consume* as context (e.g. recent topics for baseline updates,
   short summaries for ethics context, continuity for companions).
 
+EthicsEngine consumes this feed for (among other things):
+  - risk-oriented continuity (boundaries, dependency, preferences)
+  - **understanding gaps** (Curious Companion): repeated thin topics,
+    limited context around user disclosures — analyzed in the engine, not here
+
 Persistence
 -----------
 Built on ``LocalPersistence`` / ``JsonFileBackend`` — files live under::
@@ -316,6 +321,12 @@ class InteractionMemoryStore:
         for r in recent:
             for t in r.topics:
                 topic_counts[t] = topic_counts.get(t, 0) + 1
+        # Lightweight topic frequency for consumers (EthicsEngine may deepen
+        # into understanding-gap analysis from the same episode list).
+        repeated_topics = sorted(
+            (t for t, c in topic_counts.items() if c >= 2),
+            key=lambda t: (-topic_counts[t], t),
+        )[:8]
         return {
             "interaction_history": {
                 "user_id": user_id,
@@ -332,6 +343,10 @@ class InteractionMemoryStore:
                 "recent_topics": sorted(
                     topic_counts.keys(), key=lambda t: (-topic_counts[t], t)
                 )[:12],
+                "repeated_topics": repeated_topics,
+                "topic_counts": {
+                    t: topic_counts[t] for t in repeated_topics
+                },
             }
         }
 
