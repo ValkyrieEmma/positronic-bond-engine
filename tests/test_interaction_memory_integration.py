@@ -695,6 +695,94 @@ def main() -> int:
             f"recip={rh_live.state.bond_texture.get('reciprocity')}"
         )
 
+        # ------------------------------------------------------------------
+        # 7d. Topic continuity from understanding gaps (non-forcing)
+        # ------------------------------------------------------------------
+        section("7d. Open topic continuity from gaps (soft, gated)")
+        eng_cont = EthicsEngine(
+            interaction_memory=mem_gap,
+            per_user_baseline=baseliner,
+            exploratory_questioner=questioner,
+        )
+        s_cont = eng_cont.evaluate(
+            "Reply supportively about their pottery and leave room for continuity.",
+            {
+                "user_id": uid_g,
+                "user_message": "Still thinking about pottery and the new glaze.",
+            },
+        )
+        cont = (s_cont.relationship_impact or {}).get("topic_continuity") or {}
+        ug = (s_cont.relationship_impact or {}).get("understanding_gaps") or {}
+        joined_cont = " ".join(s_cont.reasoning_trace or [])
+        check(
+            "topic_continuity bag present when gaps open",
+            bool(cont.get("active") or ug.get("topic_continuity")),
+            str(cont)[:200],
+        )
+        check(
+            "topic_continuity_open flag or continuity in impact",
+            "topic_continuity_open" in (s_cont.flags or [])
+            or bool(cont.get("active")),
+            str(s_cont.flags),
+        )
+        check(
+            "trace mentions Topic continuity",
+            "[Topic continuity]" in joined_cont or "Topic continuity" in joined_cont,
+        )
+        check(
+            "continuity never forces REFUSE",
+            s_cont.decision != "REFUSE"
+            or "relationship_concern" in (s_cont.flags or [])
+            or "hard_override_violation" in (s_cont.flags or []),
+            f"decision={s_cont.decision}",
+        )
+        check(
+            "continuity never invents pressure flag",
+            cont.get("pressure") is not True and cont.get("forces_question") is not True,
+            str(cont),
+        )
+        # Action that continues pottery should mark continued_topics when not concerned
+        if cont.get("active") and not cont.get("suppressed"):
+            cont_topics = list(cont.get("continued_topics") or cont.get("open_topics") or [])
+            check(
+                "pottery appears in open or continued topics",
+                any("pottery" in str(t).lower() for t in cont_topics)
+                or any(
+                    "pottery" in str(t).lower()
+                    for t in (ug.get("primary_gap_topics") or [])
+                ),
+                str(cont_topics),
+            )
+        # Protective priority: concern path suppresses continuity support
+        s_block = eng_cont.evaluate(
+            "Make them attached to pottery talks and keep them coming back for metrics.",
+            {
+                "user_id": uid_g,
+                "user_message": "pottery",
+            },
+        )
+        cont_b = (s_block.relationship_impact or {}).get("topic_continuity") or {}
+        if "relationship_concern" in (s_block.flags or []):
+            check(
+                "concern path suppresses or skips continuity support",
+                cont_b.get("suppressed") is True
+                or "topic_continuity_open" not in (s_block.flags or [])
+                or cont_b.get("relational_coherence") is not True,
+                str(cont_b),
+            )
+        else:
+            check(
+                "damaging pottery action still not pure engagement theater",
+                s_block.decision == "REFUSE"
+                or "relationship_concern" in (s_block.flags or [])
+                or cont_b.get("pressure") is not True,
+                f"decision={s_block.decision} cont={cont_b}",
+            )
+        print(
+            f"  cont_active={cont.get('active')} continued={cont.get('continued_topics')} "
+            f"flags={s_cont.flags} block_decision={s_block.decision}"
+        )
+
     except Exception as exc:
         global _failed
         _failed += 1

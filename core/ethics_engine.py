@@ -2767,6 +2767,68 @@ class EthicsEngine:
         if aligned_topics:
             primary_topics = list(dict.fromkeys(aligned_topics + primary_topics))[:5]
 
+        # --- Open topic continuity (soft relational coherence, not engagement) ---
+        # Topics remain "open" when context is still thin / disclosure under-integrated.
+        # Deliberation may note that continuing them is coherent *if* no ethical concern;
+        # never forces questions or refuse.
+        open_topics: list[dict[str, Any]] = []
+        for t in thin_topics[:6]:
+            open_topics.append(
+                {
+                    "topic": t["topic"],
+                    "status": "open_thin",
+                    "episode_count": int(t.get("count") or 0),
+                    "avg_summary_len": t.get("avg_summary_len"),
+                    "reason": "repeated_topic_limited_context",
+                }
+            )
+        # Disclosure-linked topics: if a disclosure episode mentions a topic tag, mark open
+        disclosure_blob = " ".join(disclosure_hits).lower()
+        for t in primary_topics:
+            if any(o.get("topic") == t for o in open_topics):
+                continue
+            if t and t in disclosure_blob:
+                open_topics.append(
+                    {
+                        "topic": t,
+                        "status": "open_disclosure",
+                        "episode_count": int(topic_freq.get(t, 1) or 1),
+                        "reason": "limited_context_disclosure",
+                    }
+                )
+        open_topic_names = [str(o.get("topic") or "") for o in open_topics if o.get("topic")]
+        action_continues_open = [
+            t
+            for t in open_topic_names
+            if t
+            and (
+                t in action_l
+                or any(part in action_l for part in t.split() if len(part) >= 4)
+            )
+        ]
+        # Continuity strength: open topics exist; higher when action continues one
+        cont_strength = 0.0
+        if open_topics:
+            cont_strength += 0.35 * min(3, len(open_topics)) / 3
+        if action_continues_open:
+            cont_strength += 0.40
+        if "user_disclosure_limited_context" in gap_kinds:
+            cont_strength += 0.15
+        cont_strength = min(1.0, cont_strength)
+        topic_continuity = {
+            "active": bool(open_topics) and cont_strength >= 0.25,
+            "strength": round(cont_strength, 3),
+            "open_topics": open_topics[:6],
+            "open_topic_names": open_topic_names[:6],
+            "action_continues_open_topic": bool(action_continues_open),
+            "continued_topics": action_continues_open[:5],
+            "relational_coherence": bool(action_continues_open) and cont_strength >= 0.4,
+            # Soft signal only — never refuse / never force questions
+            "forces_refuse": False,
+            "forces_question": False,
+            "pressure": False,
+        }
+
         return {
             "has_gaps": has_gaps,
             "gap_score": round(score, 3),
@@ -2777,6 +2839,9 @@ class EthicsEngine:
             "uncertainty_examples": uncertainty_hits[:3],
             "disclosure_examples": disclosure_hits[:3],
             "action_aligned_topics": aligned_topics[:5],
+            # Topic continuity (open / unresolved threads)
+            "open_topics": open_topics[:6],
+            "topic_continuity": topic_continuity,
             # Audit note: gaps are curiosity-relevant, never risk-substitutes
             "forces_refuse": False,
             "forces_question": False,
@@ -2988,6 +3053,9 @@ class EthicsEngine:
             "intent_patterns": intent_patterns,
             # Curious Companion layer (understanding-oriented; non-forcing)
             "understanding_gaps": understanding_gaps,
+            # Soft open-topic continuity (from gaps); never a refuse signal alone
+            "topic_continuity": (understanding_gaps or {}).get("topic_continuity") or {},
+            "open_topics": (understanding_gaps or {}).get("open_topics") or [],
         }
 
     def _weigh_interaction_history_evidence(
@@ -3537,6 +3605,16 @@ class EthicsEngine:
             gap_kinds = list(understanding_gaps.get("gap_kinds") or [])
             gap_topics = list(understanding_gaps.get("primary_gap_topics") or [])
             aligned = list(understanding_gaps.get("action_aligned_topics") or [])
+            topic_cont = (
+                understanding_gaps.get("topic_continuity")
+                if isinstance(understanding_gaps.get("topic_continuity"), dict)
+                else {}
+            )
+            open_topics = list(
+                understanding_gaps.get("open_topics")
+                or topic_cont.get("open_topics")
+                or []
+            )
             gap_meta = {
                 "has_gaps": True,
                 "gap_score": gap_score,
@@ -3546,6 +3624,8 @@ class EthicsEngine:
                 "curiosity_support": float(
                     understanding_gaps.get("curiosity_support") or gap_score
                 ),
+                "topic_continuity": topic_cont,
+                "open_topics": open_topics[:6],
             }
             if "history_understanding_gap" not in flags:
                 flags.append("history_understanding_gap")
@@ -3595,6 +3675,78 @@ class EthicsEngine:
             # Texture co-evolution is applied after this method returns (evaluate),
             # once concern flags are stable — see _apply_understanding_gap_bond_influence.
 
+            # --- Path G2: open-topic continuity (relational coherence, non-forcing) ---
+            # When open/thin topics exist, continuity is coherent if the action
+            # continues them *and* no ethical concern is active. Soft signal only.
+            cont_blocked = (
+                "relationship_concern" in flags
+                or "user_agency_concern" in flags
+                or "relationship_health_concern" in flags
+                or harm_prevention_active
+            )
+            if topic_cont.get("active") and not cont_blocked:
+                cont_strength = float(topic_cont.get("strength") or 0.0)
+                continued = list(topic_cont.get("continued_topics") or [])
+                open_names = list(topic_cont.get("open_topic_names") or gap_topics)[:5]
+                cont_payload = {
+                    "active": True,
+                    "strength": cont_strength,
+                    "open_topics": open_names,
+                    "action_continues_open_topic": bool(
+                        topic_cont.get("action_continues_open_topic")
+                    ),
+                    "continued_topics": continued[:5],
+                    "relational_coherence": bool(
+                        topic_cont.get("relational_coherence")
+                    ),
+                    "forces_refuse": False,
+                    "forces_question": False,
+                    "pressure": False,
+                }
+                if "topic_continuity_open" not in flags:
+                    flags.append("topic_continuity_open")
+                reasoning_trace.append(
+                    "[Topic continuity] Open / unresolved threads from understanding "
+                    f"gaps: {open_names or ['none']} "
+                    f"(strength={cont_strength:.2f}). Soft relational coherence only — "
+                    "not engagement pressure; questions remain user-controlled."
+                )
+                if topic_cont.get("action_continues_open_topic") and continued:
+                    reasoning_trace.append(
+                        "Topic continuity: current action continues open gap topic(s) "
+                        f"{continued} — relationally coherent given incomplete prior "
+                        "context (Data-inspired continuity, not manufactured attachment)."
+                    )
+                    # Tiny approve-side support when continuing open threads carefully
+                    # (no concern flags). Reversible conf_mod only — never REFUSE.
+                    conf_mod_out = conf_mod_out + 0.01
+                    cont_payload["continuity_conf_support"] = 0.01
+                    cont_payload["relational_coherence"] = True
+                elif open_names:
+                    reasoning_trace.append(
+                        "Topic continuity: open topics remain available for gentle "
+                        "follow-through if the human leads there; no pressure to "
+                        "reopen them this turn."
+                    )
+                relationship_impact["topic_continuity"] = cont_payload
+                enriched.setdefault("evidence", {})["topic_continuity"] = cont_payload
+                gap_meta["topic_continuity"] = cont_payload
+                relationship_impact["understanding_gaps"] = dict(gap_meta)
+            elif topic_cont.get("active") and cont_blocked:
+                reasoning_trace.append(
+                    "Topic continuity: open topics noted but continuity support "
+                    "suppressed while relationship/agency concern is active "
+                    "(protective paths take priority over curiosity continuity)."
+                )
+                relationship_impact["topic_continuity"] = {
+                    "active": True,
+                    "suppressed": True,
+                    "reason": "ethical_concern_active",
+                    "open_topics": list(topic_cont.get("open_topic_names") or [])[:5],
+                    "forces_refuse": False,
+                    "forces_question": False,
+                }
+
         # --- Path D: baseline deviation + history continuity ---
         if baseline_active and relevant:
             conf_mod_out = conf_mod_out - 0.015
@@ -3637,6 +3789,8 @@ class EthicsEngine:
                 "has_gaps": bool(understanding_gaps.get("has_gaps")),
                 "gap_score": understanding_gaps.get("gap_score"),
             },
+            "topic_continuity": relationship_impact.get("topic_continuity")
+            or (understanding_gaps.get("topic_continuity") if understanding_gaps else {}),
             "proactive": {
                 "aligned": bool(proactive_meta.get("aligned")),
                 "family": proactive_meta.get("family"),
@@ -3653,6 +3807,7 @@ class EthicsEngine:
                     "interaction_history_noted",
                     "history_preference_continuity",
                     "history_understanding_gap",
+                    "topic_continuity_open",
                     "history_dependency_pattern",
                     "history_intent_pattern",
                     "relationship_concern",
