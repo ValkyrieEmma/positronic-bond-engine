@@ -49,6 +49,12 @@ Design intent:
   identity ambiguity — evaluation never crashes on bad ids.
 - Memory, baseline, bond, and ethics decision logs are separate artifacts that
   may share a ``user_id`` directory but must not be treated as the same object.
+
+Curious Companion (understanding gaps)
+--------------------------------------
+``note_understanding_gaps`` may apply a **small, reversible** texture nudge when
+history shows incomplete individual context. Influence is gated by health flags
+and ethical concern; it never forces questions or creates dependency flags.
 """
 
 from __future__ import annotations
@@ -499,6 +505,170 @@ class RelationshipHealth:
     def update_from_interaction(self, interaction: dict[str, Any]) -> BondState:
         """Alias for ``update_bond`` (naming parity with PerUserBaseline)."""
         return self.update_bond(interaction)
+
+    # ------------------------------------------------------------------
+    # Understanding gaps → gentle texture co-evolution (Curious Companion)
+    # ------------------------------------------------------------------
+
+    # Serious flags that block gap→texture nudges (avoid dependency/pressure)
+    _GAP_BLOCKING_FLAGS = frozenset(
+        {
+            "emerging_dependency",
+            "manufactured_attachment",
+            "one_sided_engagement",
+            "boundary_erosion",
+        }
+    )
+    # Per-call max texture delta and lifetime soft cap on nudges
+    _GAP_MAX_DIM_DELTA = 0.025
+    _GAP_NUDGE_SOFT_CAP = 8
+
+    @staticmethod
+    def propose_understanding_gap_influence(
+        gaps: dict[str, Any] | None,
+        *,
+        health_flags: list[str] | None = None,
+        concern_active: bool = False,
+        user_agency_concern: bool = False,
+        nudge_count: int = 0,
+    ) -> dict[str, Any]:
+        """Propose small, reversible texture deltas from understanding gaps.
+
+        Pure function for audit / EthicsEngine impact bags. Does not mutate state.
+        Positive, non-pathologizing: favors reciprocal openness and honesty about
+        incomplete understanding — never dependency or engagement pressure.
+        """
+        gaps = gaps if isinstance(gaps, dict) else {}
+        flags = [str(f) for f in (health_flags or [])]
+        proposal: dict[str, Any] = {
+            "would_apply": False,
+            "deltas": {},
+            "skipped_reason": None,
+            "gap_score": float(gaps.get("curiosity_support") or gaps.get("gap_score") or 0.0),
+            "topics": list(gaps.get("primary_gap_topics") or gaps.get("action_aligned_topics") or [])[:5],
+            "forces_questions": False,
+        }
+        if not gaps.get("has_gaps"):
+            proposal["skipped_reason"] = "no_gaps"
+            return proposal
+        if concern_active or user_agency_concern:
+            proposal["skipped_reason"] = "ethical_concern_active"
+            return proposal
+        blocking = [f for f in flags if f in RelationshipHealth._GAP_BLOCKING_FLAGS]
+        if blocking:
+            proposal["skipped_reason"] = "blocking_health_flags"
+            proposal["blocking_flags"] = blocking
+            return proposal
+        score = float(proposal["gap_score"] or 0.0)
+        if score < 0.28:
+            proposal["skipped_reason"] = "gap_score_below_threshold"
+            return proposal
+        if int(nudge_count) >= RelationshipHealth._GAP_NUDGE_SOFT_CAP:
+            proposal["skipped_reason"] = "nudge_cap_reached"
+            return proposal
+
+        # Small scale: ~0.012–0.025, diminished after several nudges
+        scale = min(
+            RelationshipHealth._GAP_MAX_DIM_DELTA,
+            0.012 + 0.014 * min(1.0, score),
+        )
+        if int(nudge_count) >= 4:
+            scale *= 0.5
+        # Reciprocity / honesty / mutual benefit only — not trust-engineering,
+        # never reduce autonomy_respect
+        deltas = {
+            "reciprocity": round(scale, 4),
+            "emotional_honesty": round(scale * 0.9, 4),
+            "mutual_benefit": round(scale * 0.75, 4),
+        }
+        proposal["would_apply"] = True
+        proposal["deltas"] = deltas
+        proposal["scale"] = round(scale, 4)
+        proposal["rationale"] = (
+            "Curious Companion: incomplete individual context gently favors "
+            "openness to reciprocal understanding and topic continuity — "
+            "not attachment manufacturing or question forcing."
+        )
+        return proposal
+
+    def note_understanding_gaps(
+        self,
+        gaps: dict[str, Any] | None,
+        *,
+        concern_active: bool = False,
+        user_agency_concern: bool = False,
+    ) -> dict[str, Any]:
+        """Apply (or skip) a gentle BondState texture nudge from understanding gaps.
+
+        Safeguards:
+          - No-op when ethical concern flags are active (RH / User Agency)
+          - No-op when dependency / boundary-erosion health flags are present
+          - Small deltas only; soft lifetime cap; diminishing returns
+          - Never sets dependency flags; never forces exploratory questions
+          - Never reduces autonomy_respect
+
+        Returns an audit dict (applied deltas or skip reason) for traces.
+        Failures never raise.
+        """
+        try:
+            nudge_count = int(self.state.recent_patterns.get("understanding_gap_nudge", 0) or 0)
+            proposal = self.propose_understanding_gap_influence(
+                gaps,
+                health_flags=list(self.state.health_flags),
+                concern_active=concern_active,
+                user_agency_concern=user_agency_concern,
+                nudge_count=nudge_count,
+            )
+            audit = dict(proposal)
+            audit["applied"] = False
+            audit["user_id"] = self._user_id
+            if not proposal.get("would_apply"):
+                return audit
+
+            before = {k: float(v) for k, v in self.state.bond_texture.items()}
+            for dim, delta in (proposal.get("deltas") or {}).items():
+                self._adjust_texture(str(dim), float(delta))
+            # Soft pattern counters (inspectable; not health flags)
+            self.state.recent_patterns["understanding_gap_nudge"] = nudge_count + 1
+            self.state.recent_patterns["understanding_gap_openness"] = (
+                int(self.state.recent_patterns.get("understanding_gap_openness", 0) or 0) + 1
+            )
+            topics = list(proposal.get("topics") or [])
+            if topics:
+                # Record that continuity interest exists for a topic (not pressure)
+                key = f"gap_topic:{str(topics[0])[:32]}"
+                self.state.recent_patterns[key] = (
+                    int(self.state.recent_patterns.get(key, 0) or 0) + 1
+                )
+
+            applied_deltas = {
+                dim: round(float(self.state.bond_texture.get(dim, 0)) - before.get(dim, 0), 4)
+                for dim in (proposal.get("deltas") or {})
+            }
+            self.state.last_updated = _utc_now_iso()
+            # Keep summary non-clinical; note openness rather than pathology
+            base_sum = self._generate_summary()
+            self.state.summary = (
+                f"{base_sum} Curious Companion: mild texture openness from "
+                f"understanding gaps (topics={topics[:3] or ['n/a']})."
+            )[:400]
+            self._maybe_auto_save()
+
+            audit["applied"] = True
+            audit["deltas"] = applied_deltas
+            audit["nudge_count_after"] = nudge_count + 1
+            audit["texture_after"] = {
+                k: round(float(v), 3) for k, v in self.state.bond_texture.items()
+            }
+            return audit
+        except Exception:
+            return {
+                "applied": False,
+                "skipped_reason": "internal_error",
+                "would_apply": False,
+                "deltas": {},
+                "forces_questions": False,
+            }
 
     def detect_emerging_patterns(self) -> dict[str, Any]:
         """Return active pattern flags with short, non-clinical explanations.

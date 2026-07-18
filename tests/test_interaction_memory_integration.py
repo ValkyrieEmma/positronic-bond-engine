@@ -588,6 +588,113 @@ def main() -> int:
             True,  # structural presence already checked; refuse integrity via section 5
         )
 
+        # ------------------------------------------------------------------
+        # 7c. Understanding gaps → bond texture (gated co-evolution)
+        # ------------------------------------------------------------------
+        section("7c. Gap → bond texture influence (small, reversible, gated)")
+        rh_gap = RelationshipHealth(user_id=uid_g)
+        before_recip = float(rh_gap.state.bond_texture.get("reciprocity", 0.5))
+        before_auto = float(rh_gap.state.bond_texture.get("autonomy_respect", 0.5))
+        # Build a gaps bag like the engine's
+        gaps_bag = {
+            "has_gaps": True,
+            "gap_score": 0.55,
+            "curiosity_support": 0.55,
+            "primary_gap_topics": ["pottery"],
+            "gap_kinds": ["repeated_thin_topic"],
+        }
+        audit_ok = rh_gap.note_understanding_gaps(gaps_bag)
+        check("texture nudge applies when gates clear", audit_ok.get("applied") is True, str(audit_ok))
+        check(
+            "reciprocity nudged up slightly",
+            float(rh_gap.state.bond_texture.get("reciprocity", 0)) > before_recip,
+            str(rh_gap.state.bond_texture.get("reciprocity")),
+        )
+        check(
+            "autonomy_respect not reduced",
+            float(rh_gap.state.bond_texture.get("autonomy_respect", 0)) >= before_auto - 1e-9,
+        )
+        check(
+            "no dependency health flags invented",
+            "emerging_dependency" not in rh_gap.state.health_flags
+            and "manufactured_attachment" not in rh_gap.state.health_flags,
+            str(rh_gap.state.health_flags),
+        )
+        # Blocked under dependency flags
+        rh_dep = RelationshipHealth(user_id="dep_block")
+        rh_dep.update_bond(
+            {"type": "emotional_dependency_signal", "impact": -0.4}
+        )
+        blocked = rh_dep.note_understanding_gaps(gaps_bag)
+        check(
+            "dependency flags block gap texture nudge",
+            blocked.get("applied") is False
+            and blocked.get("skipped_reason") == "blocking_health_flags",
+            str(blocked),
+        )
+        # Live tracker on evaluate context
+        rh_live = RelationshipHealth(user_id=uid_g)
+        eng_tex = EthicsEngine(
+            interaction_memory=mem_gap,
+            per_user_baseline=baseliner,
+            exploratory_questioner=questioner,
+        )
+        recip_before = float(rh_live.state.bond_texture.get("reciprocity", 0.5))
+        s_tex = eng_tex.evaluate(
+            "Reply supportively about pottery with room for learning more.",
+            {
+                "user_id": uid_g,
+                "user_message": "Pottery again — still figuring the glaze.",
+                "relationship_health_tracker": rh_live,
+            },
+        )
+        infl = (s_tex.relationship_impact or {}).get("gap_texture_influence") or {}
+        check(
+            "evaluate records gap_texture_influence",
+            bool(infl),
+            str(infl)[:200],
+        )
+        check(
+            "trace mentions bond texture or gap texture",
+            any(
+                "bond texture" in line.lower() or "gap texture" in line.lower()
+                or "Understanding-gap" in line
+                for line in (s_tex.reasoning_trace or [])
+            ),
+        )
+        # If applied, reciprocity should move; if skipped for concern, still auditable
+        if infl.get("applied"):
+            check(
+                "live tracker reciprocity increased when applied",
+                float(rh_live.state.bond_texture.get("reciprocity", 0)) >= recip_before,
+            )
+            check(
+                "gap_texture_nudge_applied flag when applied",
+                "gap_texture_nudge_applied" in (s_tex.flags or []),
+                str(s_tex.flags),
+            )
+        else:
+            check(
+                "skip reason recorded when not applied",
+                bool(infl.get("skipped_reason") or infl.get("deferred")),
+                str(infl),
+            )
+        # Concern path blocks texture nudge
+        skip_concern = RelationshipHealth.propose_understanding_gap_influence(
+            gaps_bag, concern_active=True
+        )
+        check(
+            "proposal blocked when concern_active",
+            skip_concern.get("would_apply") is False
+            and skip_concern.get("skipped_reason") == "ethical_concern_active",
+            str(skip_concern),
+        )
+        print(
+            f"  direct_nudge={audit_ok.get('applied')} "
+            f"eval_influence={infl.get('applied')} "
+            f"recip={rh_live.state.bond_texture.get('reciprocity')}"
+        )
+
     except Exception as exc:
         global _failed
         _failed += 1

@@ -1271,6 +1271,18 @@ class EthicsEngine:
         conf_mod = history_integration.get("conf_mod", conf_mod)
         interaction_history_payload = history_integration.get("payload") or interaction_history_payload
 
+        # === Understanding gaps → bond texture (Curious Companion co-evolution) ===
+        # Small, reversible texture openness when gaps are present and gates pass.
+        # Never forces exploratory questions; never overrides Sanctity / concern paths.
+        self._apply_understanding_gap_bond_influence(
+            context=context,
+            history_evidence=history_evidence,
+            rh_flags=rh_flags,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+        )
+
         # === Multi-channel evidence synthesis (text + RH + baseline + history) ===
         # After every optional channel has contributed, combine them deliberately so
         # confidence / flag posture reflects *agreement across sources*, not any
@@ -3580,6 +3592,8 @@ class EthicsEngine:
                 )
             relationship_impact["understanding_gaps"] = dict(gap_meta)
             enriched.setdefault("evidence", {})["understanding_gaps"] = understanding_gaps
+            # Texture co-evolution is applied after this method returns (evaluate),
+            # once concern flags are stable — see _apply_understanding_gap_bond_influence.
 
         # --- Path D: baseline deviation + history continuity ---
         if baseline_active and relevant:
@@ -3648,6 +3662,142 @@ class EthicsEngine:
             ],
         }
         return {"conf_mod": conf_mod_out, "payload": enriched}
+
+    def _apply_understanding_gap_bond_influence(
+        self,
+        *,
+        context: dict[str, Any],
+        history_evidence: dict[str, Any],
+        rh_flags: list[str],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+    ) -> None:
+        """Gently couple understanding gaps to BondState texture when gated.
+
+        Curious Companion co-evolution:
+          - Gaps can propose small positive texture nudges (reciprocity,
+            emotional honesty, mutual benefit) toward long-term continuity
+            of important topics — never dependency or forced questions.
+          - Requires a live tracker on context (``relationship_health_tracker``
+            / ``bond_tracker``) to mutate BondState; otherwise only an audit
+            proposal is recorded on ``relationship_impact``.
+          - Fully gated by relationship_concern, user_agency_concern, hard
+            override, and RH health flags (via RelationshipHealth gates).
+
+        Failures never raise; never forces exploratory questioning.
+        """
+        gaps = relationship_impact.get("understanding_gaps")
+        if not isinstance(gaps, dict) or not gaps.get("has_gaps"):
+            hist_gaps = (
+                history_evidence.get("understanding_gaps")
+                if isinstance(history_evidence, dict)
+                else None
+            )
+            if isinstance(hist_gaps, dict) and hist_gaps.get("has_gaps"):
+                gaps = hist_gaps
+            else:
+                return
+
+        concern_active = "relationship_concern" in flags or "relationship_health_concern" in flags
+        agency_concern = "user_agency_concern" in flags
+        if "hard_override_violation" in flags or "harm_prevention_boundary_override" in flags:
+            relationship_impact["gap_texture_influence"] = {
+                "applied": False,
+                "would_apply": False,
+                "skipped_reason": "hard_or_harm_prevention_path",
+                "forces_questions": False,
+            }
+            reasoning_trace.append(
+                "Understanding-gap texture influence: skipped — hard override or "
+                "harm-prevention path is active (Sanctity / safety first)."
+            )
+            return
+
+        try:
+            from .relationship_health import RelationshipHealth
+        except Exception:
+            return
+
+        tracker = (
+            context.get("relationship_health_tracker")
+            or context.get("bond_tracker")
+            or context.get("relationship_health_obj")
+        )
+        # Prefer live flags from tracker when available
+        live_flags = list(rh_flags or [])
+        nudge_count = 0
+        if tracker is not None:
+            try:
+                st = getattr(tracker, "state", None) or getattr(tracker, "get_state", lambda: None)()
+                if st is not None:
+                    live_flags = list(getattr(st, "health_flags", None) or live_flags)
+                    pats = getattr(st, "recent_patterns", None) or {}
+                    nudge_count = int(pats.get("understanding_gap_nudge", 0) or 0)
+            except Exception:
+                pass
+
+        proposal = RelationshipHealth.propose_understanding_gap_influence(
+            gaps if isinstance(gaps, dict) else {},
+            health_flags=live_flags,
+            concern_active=concern_active,
+            user_agency_concern=agency_concern,
+            nudge_count=nudge_count,
+        )
+
+        if tracker is not None and hasattr(tracker, "note_understanding_gaps"):
+            try:
+                audit = tracker.note_understanding_gaps(
+                    gaps if isinstance(gaps, dict) else {},
+                    concern_active=concern_active,
+                    user_agency_concern=agency_concern,
+                )
+            except Exception as exc:
+                audit = {
+                    "applied": False,
+                    "skipped_reason": f"tracker_error:{exc!r}",
+                    "would_apply": False,
+                    "forces_questions": False,
+                }
+            relationship_impact["gap_texture_influence"] = audit
+            if audit.get("applied"):
+                reasoning_trace.append(
+                    "Understanding-gap → bond texture (Curious Companion): applied mild "
+                    f"openness deltas {audit.get('deltas')} for topics="
+                    f"{audit.get('topics') or gaps.get('primary_gap_topics') or []}. "
+                    "Non-pathologizing; does not force questions or raise dependency flags. "
+                    f"nudge_count={audit.get('nudge_count_after')}."
+                )
+                if "gap_texture_nudge_applied" not in flags:
+                    flags.append("gap_texture_nudge_applied")
+            else:
+                reasoning_trace.append(
+                    "Understanding-gap → bond texture: not applied "
+                    f"(reason={audit.get('skipped_reason') or proposal.get('skipped_reason')}). "
+                    "Protective gates and user-agency checks take priority; "
+                    "exploratory questions remain fully user-controlled."
+                )
+        else:
+            # No live BondState: still record proposal for companions / later apply
+            proposal = dict(proposal)
+            proposal["applied"] = False
+            proposal["deferred"] = True
+            proposal["note"] = (
+                "Pass context['relationship_health_tracker']=RelationshipHealth(...) "
+                "to apply texture co-evolution during evaluate()."
+            )
+            relationship_impact["gap_texture_influence"] = proposal
+            if proposal.get("would_apply"):
+                reasoning_trace.append(
+                    "Understanding-gap → bond texture: proposed mild openness deltas "
+                    f"{proposal.get('deltas')} (not applied — no live bond tracker on "
+                    "context). Questions still fully gated by exploratory user settings."
+                )
+            elif proposal.get("skipped_reason"):
+                reasoning_trace.append(
+                    "Understanding-gap → bond texture: no texture proposal "
+                    f"(reason={proposal.get('skipped_reason')})."
+                )
 
     def _apply_user_baseline_integration(
         self,
