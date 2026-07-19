@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 # Ensure project root is on the path when run as a script
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -163,6 +163,140 @@ def main() -> int:
         check(
             "log proposed_action preserved",
             "gentle check-in" in logs[0].proposed_action,
+        )
+
+        # 4b. Bond curious_companion + decision evidence_snapshot (unified v2)
+        section("4b. Curious companion bond + decision evidence_snapshot")
+        bond_cc = BondStateRecord(
+            user_id=user_id,
+            bond_texture=dict(bond.bond_texture),
+            health_flags=[],
+            interaction_count=1,
+            recent_patterns={
+                "understanding_gap_nudge": 1,
+                "open_topic:hobbies": 2,
+            },
+            summary="Open hobbies thread.",
+            curious_companion={
+                "open_topic_names": ["hobbies"],
+                "last_gap_score": 0.44,
+                "topic_continuity": {"active": True, "strength": 0.5},
+            },
+        )
+        store.save_bond_state(bond_cc)
+        re_cc = store.load_bond_state(user_id)
+        check(
+            "curious_companion round-trip",
+            re_cc.curious_companion.get("last_gap_score") == 0.44,
+            str(re_cc.curious_companion),
+        )
+        check(
+            "open_topic soft pattern round-trip",
+            re_cc.recent_patterns.get("open_topic:hobbies") == 2,
+            str(re_cc.recent_patterns),
+        )
+        merged = store.update_bond_curious_companion(
+            user_id, {"last_gap_kinds": ["repeated_thin_topic"]}
+        )
+        check(
+            "update_bond_curious_companion merges kinds",
+            "repeated_thin_topic" in (merged.curious_companion.get("last_gap_kinds") or []),
+        )
+        snap = DecisionLogRecord.compact_evidence_from_impact(
+            {
+                "understanding_gaps": {"has_gaps": True, "gap_score": 0.5},
+                "topic_continuity": {"active": True},
+                "scoped_user_id": user_id,
+            },
+            flags=["history_understanding_gap", "topic_continuity_open"],
+        )
+        log2 = DecisionLogRecord(
+            timestamp="2026-07-11T12:00:30+00:00",
+            ontology_version="0.2.0",
+            proposed_action="Continue gently on hobbies if natural.",
+            decision="APPROVE_WITH_CONDITIONS",
+            confidence=0.5,
+            flags=["topic_continuity_open"],
+            user_id=user_id,
+            evidence_snapshot=snap,
+        )
+        store.append_decision_log(log2)
+        logs2 = store.load_decision_logs(user_id)
+        last = logs2[-1]
+        check(
+            "decision log evidence_snapshot loaded",
+            isinstance(last.evidence_snapshot, dict)
+            and last.evidence_snapshot.get("understanding_gaps", {}).get("has_gaps"),
+            str(last.evidence_snapshot),
+        )
+        check(
+            "decision log ontology_version present",
+            last.ontology_version == "0.2.0",
+        )
+
+        # 4c. Careful Truth-Telling joint on bond_state
+        section("4c. Careful truth-telling joint on bond")
+        bond_ctt = BondStateRecord(
+            user_id=user_id,
+            bond_texture=dict(bond.bond_texture),
+            health_flags=[],
+            interaction_count=2,
+            recent_patterns={"careful_truth_telling_assessed": 1},
+            summary="CTT snapshot present.",
+            careful_truth_telling={
+                "joint_score": 0.5,
+                "joint_stance": "wait",
+                "readiness_level": "moderate",
+                "readiness_score": 0.5,
+                "confidence_level": "low",
+                "confidence_score": 0.3,
+                "reason": "Evidence thin.",
+                "gates": ["confidence_low"],
+                "forces_speech": True,  # must be forced False on save
+                "forces_question": True,
+            },
+        )
+        store.save_bond_state(bond_ctt)
+        re_ctt = store.load_bond_state(user_id)
+        check(
+            "careful_truth_telling round-trip stance",
+            re_ctt.careful_truth_telling.get("joint_stance") == "wait",
+            str(re_ctt.careful_truth_telling),
+        )
+        check(
+            "careful_truth_telling forces_speech always False on disk",
+            re_ctt.careful_truth_telling.get("forces_speech") is False
+            and re_ctt.careful_truth_telling.get("forces_question") is False,
+            str(re_ctt.careful_truth_telling),
+        )
+        updated_ctt = store.update_bond_careful_truth_telling(
+            user_id,
+            {
+                "joint_score": 0.75,
+                "joint_stance": "careful_observation_ok",
+                "readiness_level": "high",
+                "confidence_level": "moderate",
+                "reason": "Ready enough.",
+            },
+        )
+        check(
+            "update_bond_careful_truth_telling stance",
+            updated_ctt.careful_truth_telling.get("joint_stance")
+            == "careful_observation_ok",
+            str(updated_ctt.careful_truth_telling),
+        )
+        ctt_ev = DecisionLogRecord.compact_evidence_from_impact(
+            {
+                "careful_truth_telling": updated_ctt.careful_truth_telling,
+                "scoped_user_id": user_id,
+            },
+            flags=["truth_confidence_noted"],
+        )
+        check(
+            "evidence_snapshot can carry careful_truth_telling",
+            ctt_ev.get("careful_truth_telling", {}).get("joint_stance")
+            == "careful_observation_ok",
+            str(ctt_ev),
         )
 
         # 5. Privacy rule

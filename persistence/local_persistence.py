@@ -49,12 +49,22 @@ Privacy
 - Sexual activity content is not stored unless the user explicitly references
   it in direct conversation with the AI (see persistence/privacy.py).
 
-Layout
-------
-  users/<user_id>/baseline.json       — per-user communication baseline
-  users/<user_id>/bond_state.json     — relationship health / bond texture
-  users/<user_id>/settings.json       — user settings and controls
-  users/<user_id>/decision_logs.jsonl — ethical decision audit log (JSONL)
+Layout (all paths scoped to users/<user_id>/)
+--------------------------------------------
+  baseline.json          — PerUserBaseline (communication style)
+  bond_state.json        — RelationshipHealth living bond model
+                           (texture, health_flags, soft pattern counters,
+                            curious_companion, careful_truth_telling joint)
+  settings.json          — user controls (memory, exploratory prefs, …)
+  decision_logs.jsonl    — EthicsEngine audit lines + evidence_snapshot
+  interactions.jsonl     — InteractionMemoryStore episodic feed
+                           (owned by core.interaction_memory; same folder)
+
+Ownership
+---------
+  Bond / decisions / baseline / settings  → this package (stores above)
+  Episodes (summaries, topics)            → InteractionMemoryStore
+  They share user_id only; they do not write each other's files.
 
 Deletion
 --------
@@ -99,7 +109,7 @@ class LocalPersistence:
         return self.baselines.save(baseline)
 
     # ------------------------------------------------------------------
-    # Bond / relationship health
+    # Bond / relationship health (RelationshipHealth ownership)
     # ------------------------------------------------------------------
 
     def load_bond_state(self, user_id: str = "default") -> BondStateRecord:
@@ -113,8 +123,24 @@ class LocalPersistence:
         record = BondStateRecord.from_relationship_health_context(user_id, context)
         return self.save_bond_state(record)
 
+    def update_bond_curious_companion(
+        self, user_id: str, snapshot: dict[str, Any]
+    ) -> BondStateRecord:
+        """Merge gap/continuity snapshot into bond_state.json for this user.
+
+        Used so open topics / last gap evidence survive sessions without
+        coupling BondStateStore to InteractionMemoryStore.
+        """
+        return self.bonds.update_curious_companion(user_id, snapshot)
+
+    def update_bond_careful_truth_telling(
+        self, user_id: str, snapshot: dict[str, Any]
+    ) -> BondStateRecord:
+        """Persist compact joint readiness×confidence on bond_state.json."""
+        return self.bonds.update_careful_truth_telling(user_id, snapshot)
+
     # ------------------------------------------------------------------
-    # Decision logs
+    # Decision logs (EthicsEngine ownership)
     # ------------------------------------------------------------------
 
     def append_decision_log(
@@ -123,13 +149,23 @@ class LocalPersistence:
         *,
         user_id: str | None = None,
         max_entries: int | None = None,
+        evidence_snapshot: dict[str, Any] | None = None,
     ) -> Path:
-        """Append a DecisionLogRecord or EthicsEngine DecisionLog-like object."""
+        """Append a DecisionLogRecord or EthicsEngine DecisionLog-like object.
+
+        Optional ``evidence_snapshot`` attaches compact gap/continuity/flag
+        provenance for later retrospective correction (privacy-filtered on write).
+        """
         if not isinstance(record, DecisionLogRecord):
             uid = user_id or "default"
-            record = DecisionLogRecord.from_decision_log(record, user_id=uid)
-        elif user_id:
-            record.user_id = user_id
+            record = DecisionLogRecord.from_decision_log(
+                record, user_id=uid, evidence_snapshot=evidence_snapshot
+            )
+        else:
+            if user_id:
+                record.user_id = user_id
+            if evidence_snapshot and not record.evidence_snapshot:
+                record.evidence_snapshot = dict(evidence_snapshot)
 
         settings = self.load_settings(record.user_id)
         if not settings.retain_decision_logs or not settings.persistence_enabled:
@@ -138,6 +174,22 @@ class LocalPersistence:
 
         cap = max_entries if max_entries is not None else settings.max_decision_logs
         return self.decision_logs.append(record, max_entries=cap)
+
+    def append_decision_from_stance(
+        self,
+        log: Any,
+        stance: Any,
+        *,
+        user_id: str | None = None,
+        max_entries: int | None = None,
+    ) -> Path:
+        """Append a decision log with evidence_snapshot taken from EthicalStance."""
+        impact = getattr(stance, "relationship_impact", None) or {}
+        flags = list(getattr(stance, "flags", None) or getattr(log, "flags", None) or [])
+        snap = DecisionLogRecord.compact_evidence_from_impact(impact, flags=flags)
+        return self.append_decision_log(
+            log, user_id=user_id, max_entries=max_entries, evidence_snapshot=snap
+        )
 
     def append_decision_logs(
         self,

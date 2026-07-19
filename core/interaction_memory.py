@@ -21,6 +21,16 @@ EthicsEngine consumes this feed for (among other things):
   - **understanding gaps** (Curious Companion): repeated thin topics,
     limited context around user disclosures — analyzed in the engine, not here
 
+Ownership (persistence model)
+-----------------------------
+- **This store** owns episodic ``interactions.jsonl`` only (summaries, topics,
+  kind). It does **not** write bond texture or decision logs.
+- **BondStateStore** owns ``bond_state.json`` (RelationshipHealth living model,
+  including soft open-topic counters and curious_companion snapshots).
+- **DecisionLogStore** owns ``decision_logs.jsonl`` (audit + evidence_snapshot).
+All three share ``users/<user_id>/`` via LocalPersistence paths; they never
+cross-write each other's files.
+
 Persistence
 -----------
 Built on ``LocalPersistence`` / ``JsonFileBackend`` — files live under::

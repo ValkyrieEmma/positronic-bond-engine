@@ -16,6 +16,10 @@ Design principles
 
 This package is the foundation for per-user baseline memory and later long-term
 memory / OpenClaw integration without requiring a redesign of storage layout.
+
+Related but separate: ``core.interaction_memory.InteractionMemoryStore`` owns
+episodic ``interactions.jsonl`` under the same per-user directory. It uses
+LocalPersistence for paths/privacy but is not a second bond or decision store.
 """
 
 from .local_persistence import LocalPersistence
@@ -27,12 +31,15 @@ from .models import (
 )
 from .paths import default_data_root
 from .privacy import PrivacyFilter, PrivacyPolicy
+from .stores import BondStateStore, DecisionLogStore
 
 __all__ = [
     "LocalPersistence",
     "UserBaseline",
     "BondStateRecord",
+    "BondStateStore",
     "DecisionLogRecord",
+    "DecisionLogStore",
     "UserSettings",
     "PrivacyFilter",
     "PrivacyPolicy",

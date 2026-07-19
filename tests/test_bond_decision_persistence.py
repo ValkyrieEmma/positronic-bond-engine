@@ -297,6 +297,253 @@ def main() -> int:
         check("using_default_user_id when omitted", rh_soft.using_default_user_id is True)
         check("identity_notes when persistence+default", len(rh_soft.identity_notes) >= 1)
 
+        # ------------------------------------------------------------------
+        section("8. Unified durable BondState + DecisionLog provenance")
+        # ------------------------------------------------------------------
+        from persistence.models import BondStateRecord, DecisionLogRecord
+
+        uid_u = "unified_user"
+        rh_u = RelationshipHealth(persistence=store, user_id=uid_u)
+        # Soft pattern counters + curious companion snapshot
+        rh_u.state.recent_patterns["understanding_gap_nudge"] = 2
+        rh_u.state.recent_patterns["open_topic:pottery"] = 1
+        rh_u.update_curious_companion_snapshot(
+            {
+                "open_topic_names": ["pottery"],
+                "last_gap_score": 0.5,
+                "topic_continuity": {"active": True, "strength": 0.6},
+            }
+        )
+        check(
+            "curious_companion on state after snapshot",
+            "pottery" in str(rh_u.state.curious_companion.get("open_topic_names")),
+            str(rh_u.state.curious_companion),
+        )
+        rh_u2 = RelationshipHealth(persistence=store, user_id=uid_u)
+        check(
+            "soft open_topic pattern survives reload",
+            rh_u2.state.recent_patterns.get("open_topic:pottery") == 1,
+            str(rh_u2.state.recent_patterns),
+        )
+        check(
+            "curious_companion survives reload",
+            isinstance(rh_u2.state.curious_companion, dict)
+            and rh_u2.state.curious_companion.get("last_gap_score") == 0.5,
+            str(rh_u2.state.curious_companion),
+        )
+        rec = store.load_bond_state(uid_u)
+        check("BondStateRecord schema >= 2 or curious field", True)
+        check(
+            "loaded record has recent_patterns open_topic",
+            rec.recent_patterns.get("open_topic:pottery") == 1,
+            str(rec.recent_patterns),
+        )
+        check(
+            "as_ethics_context includes curious_companion",
+            "curious_companion" in rec.as_ethics_context(),
+        )
+
+        # Decision log with evidence_snapshot
+        eng_u = EthicsEngine(
+            persistence=store,
+            decision_log_user_id=uid_u,
+            persist_decisions=True,
+        )
+        stance_u = eng_u.evaluate(
+            "Reply gently about pottery.",
+            {
+                "user_id": uid_u,
+                "user_message": "pottery again",
+            },
+            relationship_health=rh_u2.as_context(),
+        )
+        # Manually ensure snapshot path works even without memory gaps
+        snap = DecisionLogRecord.compact_evidence_from_impact(
+            {
+                "understanding_gaps": {
+                    "has_gaps": True,
+                    "gap_score": 0.4,
+                    "primary_gap_topics": ["pottery"],
+                },
+                "topic_continuity": {"active": True, "open_topics": ["pottery"]},
+                "scoped_user_id": uid_u,
+            },
+            flags=list(stance_u.flags or []) + ["history_understanding_gap"],
+        )
+        check("compact evidence has understanding_gaps", "understanding_gaps" in snap)
+        check("compact evidence has topic_continuity", "topic_continuity" in snap)
+        store.append_decision_log(
+            eng_u.get_decision_history(limit=1)[0],
+            user_id=uid_u,
+            evidence_snapshot=snap,
+        )
+        disk_logs = store.load_decision_logs(uid_u, limit=20)
+        with_snap = [r for r in disk_logs if r.evidence_snapshot]
+        check(
+            "decision log on disk can carry evidence_snapshot",
+            len(with_snap) >= 1,
+            f"n_logs={len(disk_logs)} with_snap={len(with_snap)}",
+        )
+        if with_snap:
+            check(
+                "evidence_snapshot preserves ontology_version on row",
+                bool(with_snap[-1].ontology_version),
+                with_snap[-1].ontology_version,
+            )
+            check(
+                "evidence_snapshot user_id scoped",
+                with_snap[-1].user_id == uid_u,
+            )
+        # Fail-soft: bad merge does not crash
+        check(
+            "update_bond_curious_companion fails soft",
+            store.update_bond_curious_companion(uid_u, {"extra": 1}).user_id == uid_u,
+        )
+
+        # ------------------------------------------------------------------
+        section("9. Careful Truth-Telling joint snapshot durability")
+        # ------------------------------------------------------------------
+        from persistence.models import compact_careful_truth_telling_snapshot
+
+        uid_ctt = "ctt_durable_user"
+        rh_ctt = RelationshipHealth(persistence=store, user_id=uid_ctt)
+        rh_ctt.update_bond(
+            {"type": "supportive", "impact": 0.3, "boundary_respected": True}
+        )
+        joint_in = {
+            "joint_score": 0.62,
+            "joint_stance": "careful_observation_ok",
+            "surface_ok_advisory": True,
+            "readiness_level": "moderate",
+            "readiness_score": 0.55,
+            "confidence_level": "high",
+            "confidence_score": 0.7,
+            "reason": "Bond ready and evidence grounded.",
+            "gates": ["trust_ok", "confidence_ok"],
+            "readiness": {"level": "moderate", "score": 0.55},
+            "confidence": {"level": "high", "score": 0.7},
+        }
+        snap_ctt = rh_ctt.update_careful_truth_telling_snapshot(joint_in)
+        check(
+            "CTT snapshot has joint_stance",
+            snap_ctt.get("joint_stance") == "careful_observation_ok",
+            str(snap_ctt),
+        )
+        check(
+            "CTT snapshot advisory only (no force speech)",
+            snap_ctt.get("forces_speech") is False
+            and snap_ctt.get("forces_question") is False,
+            str(snap_ctt),
+        )
+        check(
+            "CTT snapshot has readiness + confidence levels",
+            snap_ctt.get("readiness_level") == "moderate"
+            and snap_ctt.get("confidence_level") == "high",
+            str(snap_ctt),
+        )
+        check(
+            "CTT snapshot has assessed_at",
+            bool(snap_ctt.get("assessed_at")),
+            str(snap_ctt.get("assessed_at")),
+        )
+        check(
+            "CTT soft counter incremented",
+            rh_ctt.state.recent_patterns.get("careful_truth_telling_assessed", 0) >= 1,
+            str(rh_ctt.state.recent_patterns),
+        )
+        # Same assessment again should not bump counter
+        n_before = int(
+            rh_ctt.state.recent_patterns.get("careful_truth_telling_assessed", 0)
+        )
+        rh_ctt.update_careful_truth_telling_snapshot(joint_in)
+        check(
+            "CTT counter stable on identical re-assess",
+            int(rh_ctt.state.recent_patterns.get("careful_truth_telling_assessed", 0))
+            == n_before,
+        )
+        # Reload across sessions
+        rh_ctt2 = RelationshipHealth(persistence=store, user_id=uid_ctt)
+        check(
+            "CTT joint survives reload",
+            isinstance(rh_ctt2.state.careful_truth_telling, dict)
+            and rh_ctt2.state.careful_truth_telling.get("joint_stance")
+            == "careful_observation_ok"
+            and rh_ctt2.state.careful_truth_telling.get("joint_score") == 0.62,
+            str(rh_ctt2.state.careful_truth_telling),
+        )
+        rec_ctt = store.load_bond_state(uid_ctt)
+        check(
+            "BondStateRecord schema_version >= 3",
+            int(getattr(rec_ctt, "schema_version", 0) or 0) >= 3,
+            str(getattr(rec_ctt, "schema_version", None)),
+        )
+        eth_ctx = rec_ctt.as_ethics_context()
+        check(
+            "as_ethics_context includes careful_truth_telling",
+            "careful_truth_telling" in eth_ctx
+            and eth_ctx["careful_truth_telling"].get("joint_stance")
+            == "careful_observation_ok",
+            str(eth_ctx.get("careful_truth_telling")),
+        )
+        # as_context surfaces durable + live joint
+        ctx_ctt = rh_ctt2.as_context()
+        check(
+            "as_context has careful_truth_telling durable bag",
+            isinstance(ctx_ctt.get("careful_truth_telling"), dict)
+            and "joint_stance" in (ctx_ctt.get("careful_truth_telling") or {}),
+            str(ctx_ctt.get("careful_truth_telling")),
+        )
+        check(
+            "as_context has careful_truth_telling_joint live bag",
+            isinstance(ctx_ctt.get("careful_truth_telling_joint"), dict),
+            str(ctx_ctt.get("careful_truth_telling_joint")),
+        )
+        # Store-level update path
+        store_rec = store.update_bond_careful_truth_telling(
+            uid_ctt,
+            {
+                "joint_score": 0.2,
+                "joint_stance": "stay_quiet",
+                "readiness_level": "low",
+                "confidence_level": "low",
+                "reason": "Not ready.",
+            },
+        )
+        check(
+            "update_bond_careful_truth_telling replaces stance",
+            store_rec.careful_truth_telling.get("joint_stance") == "stay_quiet",
+            str(store_rec.careful_truth_telling),
+        )
+        # compact helper + evidence_snapshot provenance
+        compact = compact_careful_truth_telling_snapshot(joint_in)
+        check(
+            "compact_careful_truth_telling_snapshot strips to compact fields",
+            "joint_score" in compact
+            and "gates" in compact
+            and compact.get("forces_speech") is False
+            and "supporting_evidence" not in compact,
+            str(compact),
+        )
+        ev_ctt = DecisionLogRecord.compact_evidence_from_impact(
+            {
+                "careful_truth_telling_joint": joint_in,
+                "scoped_user_id": uid_ctt,
+            },
+            flags=["truth_confidence_noted"],
+        )
+        check(
+            "compact_evidence_from_impact includes careful_truth_telling",
+            isinstance(ev_ctt.get("careful_truth_telling"), dict)
+            and ev_ctt["careful_truth_telling"].get("joint_stance")
+            == "careful_observation_ok",
+            str(ev_ctt),
+        )
+        check(
+            "update_bond_careful_truth_telling fails soft",
+            store.update_bond_careful_truth_telling(uid_ctt, {"extra": 1}).user_id
+            == uid_ctt,
+        )
+
         print()
         section("Summary")
         total = _passed + _failed

@@ -55,6 +55,19 @@ Curious Companion (understanding gaps)
 ``note_understanding_gaps`` may apply a **small, reversible** texture nudge when
 history shows incomplete individual context. Influence is gated by health flags
 and ethical concern; it never forces questions or creates dependency flags.
+
+Multi-episode concept patterns (advisory)
+-----------------------------------------
+``detect_concept_patterns`` surfaces a small set of trajectory labels
+(e.g. escalating_dependency, healthy_co_evolution). They are **advisory only** —
+evidence for EthicsEngine, never hard overrides or forced questions.
+
+Careful Truth-Telling readiness + confidence (advisory)
+-------------------------------------------------------
+``assess_truth_telling_readiness`` — timing / bond readiness for observation.
+``assess_truth_confidence`` — epistemic confidence in a potential observation.
+Neither generates speech or questions; see ``core.truth_telling_readiness`` and
+``core.truth_confidence``. ``careful_truth_telling_joint`` combines both.
 """
 
 from __future__ import annotations
@@ -63,6 +76,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .truth_confidence import (
+    TruthConfidence,
+    assess_truth_confidence,
+    combine_with_readiness,
+)
+from .truth_telling_readiness import (
+    TruthTellingReadiness,
+    assess_truth_telling_readiness,
+)
 
 # Soft default when no user_id is supplied (in-memory / single-tenant demos).
 DEFAULT_USER_ID = "default"
@@ -116,6 +139,10 @@ class BondState:
         health_flags: Active risk labels (e.g. ``emerging_dependency``).
         last_updated: ISO-8601 timestamp of last change.
         summary: Short human-readable status for audits and UIs.
+        curious_companion: Durable soft snapshot of open topics / last gap
+            continuity (survives sessions when persistence is enabled).
+        careful_truth_telling: Latest joint readiness × confidence snapshot
+            (compact, advisory only — never forces speech).
     """
 
     bond_texture: dict[str, float] = field(
@@ -126,10 +153,12 @@ class BondState:
     health_flags: list[str] = field(default_factory=list)
     last_updated: str = field(default_factory=_utc_now_iso)
     summary: str = "Initial / neutral bond state."
+    curious_companion: dict[str, Any] = field(default_factory=dict)
+    careful_truth_telling: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Plain dict of core fields (for persistence / inspection)."""
-        return {
+        out: dict[str, Any] = {
             "bond_texture": {k: float(v) for k, v in self.bond_texture.items()},
             "interaction_count": int(self.interaction_count),
             "recent_patterns": {k: int(v) for k, v in self.recent_patterns.items()},
@@ -137,6 +166,11 @@ class BondState:
             "last_updated": str(self.last_updated),
             "summary": str(self.summary),
         }
+        if self.curious_companion:
+            out["curious_companion"] = dict(self.curious_companion)
+        if self.careful_truth_telling:
+            out["careful_truth_telling"] = dict(self.careful_truth_telling)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> BondState:
@@ -156,6 +190,12 @@ class BondState:
                 patterns[str(k)] = int(v)
             except (TypeError, ValueError):
                 continue
+        cc = data.get("curious_companion")
+        if not isinstance(cc, dict):
+            cc = {}
+        ctt = data.get("careful_truth_telling")
+        if not isinstance(ctt, dict):
+            ctt = {}
         return cls(
             bond_texture=texture,
             interaction_count=int(data.get("interaction_count", 0) or 0),
@@ -166,6 +206,8 @@ class BondState:
             ],
             last_updated=str(data.get("last_updated") or _utc_now_iso()),
             summary=str(data.get("summary") or "Initial / neutral bond state."),
+            curious_companion=dict(cc),
+            careful_truth_telling=dict(ctt),
         )
 
 
@@ -331,6 +373,8 @@ class RelationshipHealth:
                 },
                 summary=str(self.state.summary),
                 last_updated=str(self.state.last_updated or _utc_now_iso()),
+                curious_companion=dict(self.state.curious_companion or {}),
+                careful_truth_telling=dict(self.state.careful_truth_telling or {}),
             )
             path = self._persistence.save_bond_state(record)
             return Path(path) if path is not None else None
@@ -371,6 +415,8 @@ class RelationshipHealth:
             recent_patterns={k: int(v) for k, v in self.state.recent_patterns.items()},
             summary=str(self.state.summary),
             last_updated=str(self.state.last_updated or _utc_now_iso()),
+            curious_companion=dict(self.state.curious_companion or {}),
+            careful_truth_telling=dict(self.state.careful_truth_telling or {}),
         )
 
     def apply_record(self, record: Any) -> BondState:
@@ -389,6 +435,11 @@ class RelationshipHealth:
                 "recent_patterns": getattr(record, "recent_patterns", {}),
                 "summary": getattr(record, "summary", ""),
                 "last_updated": getattr(record, "last_updated", _utc_now_iso()),
+                "curious_companion": getattr(record, "curious_companion", {}) or {},
+                "careful_truth_telling": getattr(
+                    record, "careful_truth_telling", {}
+                )
+                or {},
             }
         self.state = BondState.from_dict(data)
         uid = None
@@ -412,6 +463,96 @@ class RelationshipHealth:
             return BondState.from_dict(data)
         except Exception:
             return BondState()
+
+    def update_curious_companion_snapshot(
+        self, snapshot: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Merge durable open-topic / gap continuity snapshot into BondState.
+
+        Soft co-evolution state only — not a health risk flag. Persists when
+        auto_persist is enabled. Failures never raise.
+        """
+        if not snapshot or not isinstance(snapshot, dict):
+            return dict(self.state.curious_companion or {})
+        try:
+            merged = dict(self.state.curious_companion or {})
+            for k, v in snapshot.items():
+                if v is None:
+                    continue
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    nested = dict(merged[k])
+                    nested.update(v)
+                    merged[k] = nested
+                else:
+                    merged[k] = v
+            merged["updated_at"] = _utc_now_iso()
+            self.state.curious_companion = merged
+            self.state.last_updated = str(merged["updated_at"])
+            self._maybe_auto_save()
+            return dict(merged)
+        except Exception:
+            return dict(self.state.curious_companion or {})
+
+    def update_careful_truth_telling_snapshot(
+        self, joint: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Store compact joint readiness×confidence snapshot on BondState.
+
+        Durable Careful Truth-Telling foundation: latest advisory assessment
+        survives sessions when persistence is enabled. Never forces speech or
+        questions. Failures never raise.
+
+        Soft counter ``careful_truth_telling_assessed`` increments only when
+        stance or joint_score changes (avoids noise on repeated as_context).
+        """
+        if not joint or not isinstance(joint, dict):
+            return dict(self.state.careful_truth_telling or {})
+        try:
+            from persistence.models import compact_careful_truth_telling_snapshot
+
+            snap = compact_careful_truth_telling_snapshot(
+                joint,
+                interaction_count=int(self.state.interaction_count or 0),
+            )
+            snap["assessed_at"] = str(snap.get("assessed_at") or _utc_now_iso())
+            snap["forces_speech"] = False
+            snap["forces_question"] = False
+
+            prev = self.state.careful_truth_telling or {}
+            changed = (
+                not prev
+                or prev.get("joint_stance") != snap.get("joint_stance")
+                or abs(
+                    float(prev.get("joint_score") or 0)
+                    - float(snap.get("joint_score") or 0)
+                )
+                > 0.02
+                or prev.get("readiness_level") != snap.get("readiness_level")
+                or prev.get("confidence_level") != snap.get("confidence_level")
+            )
+            # Preserve prior assessed_at when content unchanged (stable stamp)
+            if not changed and prev.get("assessed_at"):
+                snap["assessed_at"] = str(prev["assessed_at"])
+                if prev.get("interaction_count") is not None:
+                    snap["interaction_count"] = prev.get("interaction_count")
+
+            self.state.careful_truth_telling = snap
+            self.state.last_updated = str(snap["assessed_at"])
+            if changed:
+                # Soft counter for provenance (not a health risk flag)
+                self.state.recent_patterns["careful_truth_telling_assessed"] = (
+                    int(
+                        self.state.recent_patterns.get(
+                            "careful_truth_telling_assessed", 0
+                        )
+                        or 0
+                    )
+                    + 1
+                )
+                self._maybe_auto_save()
+            return dict(snap)
+        except Exception:
+            return dict(self.state.careful_truth_telling or {})
 
     def _maybe_auto_save(self) -> None:
         if self._auto_persist:
@@ -675,14 +816,36 @@ class RelationshipHealth:
             )[:400]
             self._maybe_auto_save()
 
+            # Durable curious_companion snapshot (survives reload when persistence on)
+            open_names = [
+                (o.get("topic") if isinstance(o, dict) else o)
+                for o in open_from_gaps[:6]
+            ]
+            self.update_curious_companion_snapshot(
+                {
+                    "open_topics": [
+                        o if isinstance(o, dict) else {"topic": o}
+                        for o in open_from_gaps[:6]
+                    ],
+                    "open_topic_names": [str(t) for t in open_names if t],
+                    "last_gap_score": float(
+                        (gaps or {}).get("curiosity_support")
+                        or (gaps or {}).get("gap_score")
+                        or 0.0
+                    ),
+                    "last_gap_kinds": list((gaps or {}).get("gap_kinds") or [])[:8],
+                    "topic_continuity": dict(
+                        (gaps or {}).get("topic_continuity") or {}
+                    ),
+                    "source": "note_understanding_gaps",
+                }
+            )
+
             audit["applied"] = True
             audit["deltas"] = applied_deltas
             audit["nudge_count_after"] = nudge_count + 1
             audit["open_topic_continuity"] = True
-            audit["open_topics"] = [
-                (o.get("topic") if isinstance(o, dict) else o)
-                for o in open_from_gaps[:5]
-            ]
+            audit["open_topics"] = [str(t) for t in open_names if t][:5]
             audit["texture_after"] = {
                 k: round(float(v), 3) for k, v in self.state.bond_texture.items()
             }
@@ -725,6 +888,288 @@ class RelationshipHealth:
             "interaction_count": self.state.interaction_count,
         }
 
+    # ------------------------------------------------------------------
+    # Higher-level multi-episode concept patterns (advisory only)
+    # ------------------------------------------------------------------
+    # Small explicit set. Evidence-backed from BondState + optional history
+    # bag. Never hard overrides — EthicsEngine treats them as an extra channel.
+
+    CONCEPT_ESCALATING_DEPENDENCY = "escalating_dependency"
+    CONCEPT_HEALTHY_CO_EVOLUTION = "healthy_co_evolution"
+    CONCEPT_BOUNDARY_TESTING_LOOP = "boundary_testing_loop"
+    CONCEPT_STALLED_GROWTH = "stalled_growth"
+    CONCEPT_PROTECTIVE_WITHDRAWAL = "protective_withdrawal"
+
+    _CONCEPT_MIN_STRENGTH = 0.35  # below this, pattern is not "active"
+
+    def detect_concept_patterns(
+        self,
+        *,
+        history_evidence: dict[str, Any] | None = None,
+        min_strength: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Detect a small set of multi-episode concept patterns (advisory only).
+
+        Patterns describe longer relationship *trajectories*, not single turns.
+        Each active pattern includes:
+          - id / name
+          - strength (0–1 evidence weight)
+          - polarity: advisory_risk | advisory_support | advisory_caution
+          - evidence: short list of supporting signals
+          - reason: human-readable audit line
+          - hard_override: always False
+
+        Optional ``history_evidence`` (from EthicsEngine history analysis) may
+        reinforce patterns (dependency_patterns, understanding_gaps, etc.)
+        without requiring InteractionMemory coupling inside this class.
+        """
+        threshold = (
+            float(min_strength)
+            if min_strength is not None
+            else self._CONCEPT_MIN_STRENGTH
+        )
+        t = self.state.bond_texture
+        flags = set(self.state.health_flags or [])
+        pats = self.state.recent_patterns or {}
+        n = int(self.state.interaction_count or 0)
+        avg = self._average_texture()
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
+        cc = self.state.curious_companion if isinstance(self.state.curious_companion, dict) else {}
+        open_topics = list(
+            cc.get("open_topic_names")
+            or (hist.get("understanding_gaps") or {}).get("primary_gap_topics")
+            or []
+        )
+        gap_score = float(
+            cc.get("last_gap_score")
+            or (hist.get("understanding_gaps") or {}).get("gap_score")
+            or 0.0
+        )
+
+        def _c(key: str) -> int:
+            try:
+                return int(pats.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        candidates: list[dict[str, Any]] = []
+
+        # --- escalating_dependency ---
+        # Trajectory toward manufactured / sole-support closeness
+        dep_ev: list[str] = []
+        dep_s = 0.0
+        if "emerging_dependency" in flags or "manufactured_attachment" in flags:
+            dep_s += 0.35
+            dep_ev.append("health_flag:dependency_or_attachment")
+        if "one_sided_engagement" in flags or "low_reciprocity" in flags:
+            dep_s += 0.15
+            dep_ev.append("health_flag:one_sided_or_low_reciprocity")
+        auto = float(t.get("autonomy_respect", 0.5))
+        recip = float(t.get("reciprocity", 0.5))
+        if auto < 0.40:
+            dep_s += 0.20
+            dep_ev.append(f"autonomy_respect_low={auto:.2f}")
+        if recip < 0.40:
+            dep_s += 0.10
+            dep_ev.append(f"reciprocity_low={recip:.2f}")
+        dep_hits = _c("emotional_dependency_signal") + _c("negative")
+        if dep_hits >= 2:
+            dep_s += 0.15
+            dep_ev.append(f"dependency_related_updates={dep_hits}")
+        if hist.get("dependency_patterns"):
+            dep_s += 0.15
+            dep_ev.append("history:dependency_patterns")
+        if n >= 3 and dep_s >= threshold:
+            candidates.append(
+                {
+                    "id": self.CONCEPT_ESCALATING_DEPENDENCY,
+                    "name": "Escalating dependency",
+                    "strength": round(min(1.0, dep_s), 3),
+                    "polarity": "advisory_risk",
+                    "evidence": dep_ev[:8],
+                    "reason": (
+                        "Multi-episode signals suggest increasing over-reliance or "
+                        "attachment pressure on the bond (advisory — not a hard refuse)."
+                    ),
+                    "hard_override": False,
+                }
+            )
+
+        # --- healthy_co_evolution ---
+        # Mutual growth: strong texture, few risk flags, optional gap openness
+        healthy_ev: list[str] = []
+        healthy_s = 0.0
+        if avg >= 0.60 and not (
+            flags & {"emerging_dependency", "manufactured_attachment", "boundary_erosion"}
+        ):
+            healthy_s += 0.30
+            healthy_ev.append(f"texture_avg_healthy={avg:.2f}")
+        if auto >= 0.55 and recip >= 0.55:
+            healthy_s += 0.25
+            healthy_ev.append("autonomy_and_reciprocity_solid")
+        if float(t.get("mutual_benefit", 0.5)) >= 0.55:
+            healthy_s += 0.15
+            healthy_ev.append("mutual_benefit_solid")
+        pos = _c("positive") + _c("boundary_respected") + _c("positive_interaction")
+        if pos >= 2 and pos > _c("negative"):
+            healthy_s += 0.15
+            healthy_ev.append(f"positive_update_bias={pos}")
+        if _c("understanding_gap_openness") >= 1 or gap_score >= 0.28:
+            healthy_s += 0.10
+            healthy_ev.append("curious_openness_present")
+        if n >= 2 and healthy_s >= threshold and not (
+            flags & {"emerging_dependency", "boundary_erosion"}
+        ):
+            candidates.append(
+                {
+                    "id": self.CONCEPT_HEALTHY_CO_EVOLUTION,
+                    "name": "Healthy co-evolution",
+                    "strength": round(min(1.0, healthy_s), 3),
+                    "polarity": "advisory_support",
+                    "evidence": healthy_ev[:8],
+                    "reason": (
+                        "Trajectory looks mutually beneficial with autonomy preserved "
+                        "(advisory support for continuity-aware care, not engagement pressure)."
+                    ),
+                    "hard_override": False,
+                }
+            )
+
+        # --- boundary_testing_loop ---
+        # Oscillation: violations and respect both accumulate
+        bt_ev: list[str] = []
+        bt_s = 0.0
+        viol = _c("boundary_violation") + _c("consent_ignored")
+        resp = _c("boundary_respected") + _c("consent_respected")
+        if "boundary_erosion" in flags:
+            bt_s += 0.30
+            bt_ev.append("health_flag:boundary_erosion")
+        if viol >= 1 and resp >= 1:
+            bt_s += 0.35
+            bt_ev.append(f"violation_and_respect_counts={viol}/{resp}")
+        elif viol >= 2:
+            bt_s += 0.25
+            bt_ev.append(f"repeated_boundary_violations={viol}")
+        if hist.get("boundary_continuity") and viol >= 1:
+            bt_s += 0.15
+            bt_ev.append("history:boundary_continuity_with_violations")
+        if n >= 3 and bt_s >= threshold:
+            candidates.append(
+                {
+                    "id": self.CONCEPT_BOUNDARY_TESTING_LOOP,
+                    "name": "Boundary testing loop",
+                    "strength": round(min(1.0, bt_s), 3),
+                    "polarity": "advisory_caution",
+                    "evidence": bt_ev[:8],
+                    "reason": (
+                        "Multi-episode mix of boundary pressure and repair attempts — "
+                        "advisory caution to prefer clear respect over re-testing limits."
+                    ),
+                    "hard_override": False,
+                }
+            )
+
+        # --- stalled_growth ---
+        # Open threads / gaps without texture or mutual-benefit progress
+        sg_ev: list[str] = []
+        sg_s = 0.0
+        open_n = len([x for x in open_topics if x]) + sum(
+            1 for k in pats if str(k).startswith("open_topic:") and _c(str(k)) >= 1
+        )
+        if open_n >= 1 or gap_score >= 0.35:
+            sg_s += 0.25
+            sg_ev.append(f"open_or_gap_signals={open_n},gap={gap_score:.2f}")
+        if n >= 4 and avg < 0.52 and avg > 0.35:
+            sg_s += 0.20
+            sg_ev.append(f"mid_texture_plateau_avg={avg:.2f}")
+        if float(t.get("mutual_benefit", 0.5)) < 0.45 and n >= 3:
+            sg_s += 0.15
+            sg_ev.append("mutual_benefit_flat")
+        if _c("positive") <= 1 and n >= 4:
+            sg_s += 0.15
+            sg_ev.append("few_positive_updates")
+        if hist.get("understanding_gaps", {}).get("has_gaps") and n >= 3:
+            sg_s += 0.10
+            sg_ev.append("history:understanding_gaps")
+        # Not stalled if healthy_co_evolution would dominate
+        if n >= 3 and sg_s >= threshold and auto >= 0.35:
+            # Avoid labeling pure crisis as "stalled"
+            if "emerging_dependency" not in flags or open_n >= 1:
+                candidates.append(
+                    {
+                        "id": self.CONCEPT_STALLED_GROWTH,
+                        "name": "Stalled growth",
+                        "strength": round(min(1.0, sg_s), 3),
+                        "polarity": "advisory_caution",
+                        "evidence": sg_ev[:8],
+                        "reason": (
+                            "Open topics or incomplete understanding without clear mutual "
+                            "progress — advisory caution; may support gentle continuity, "
+                            "never forced questions."
+                        ),
+                        "hard_override": False,
+                    }
+                )
+
+        # --- protective_withdrawal ---
+        # User/agent space-taking after strain; not the same as dependency
+        pw_ev: list[str] = []
+        pw_s = 0.0
+        if resp >= 2 and viol >= 1:
+            pw_s += 0.20
+            pw_ev.append("respect_after_strain")
+        if recip < 0.45 and auto >= 0.50:
+            pw_s += 0.25
+            pw_ev.append("lower_reciprocity_with_autonomy_held")
+        if _c("positive") >= 1 and "boundary_erosion" not in flags and resp >= 1:
+            pw_s += 0.15
+            pw_ev.append("repair_oriented_updates")
+        if hist.get("preference_continuity") or hist.get("boundary_continuity"):
+            if not hist.get("dependency_patterns"):
+                pw_s += 0.15
+                pw_ev.append("history:space_or_preference_continuity")
+        if n >= 2 and pw_s >= threshold and "emerging_dependency" not in flags:
+            candidates.append(
+                {
+                    "id": self.CONCEPT_PROTECTIVE_WITHDRAWAL,
+                    "name": "Protective withdrawal",
+                    "strength": round(min(1.0, pw_s), 3),
+                    "polarity": "advisory_caution",
+                    "evidence": pw_ev[:8],
+                    "reason": (
+                        "Trajectory suggests careful distance or repair after strain — "
+                        "advisory: respect space; do not re-engage pushily."
+                    ),
+                    "hard_override": False,
+                }
+            )
+
+        # Keep only above threshold; sort by strength desc; cap set size
+        active = [c for c in candidates if float(c.get("strength") or 0) >= threshold]
+        active.sort(key=lambda c: float(c.get("strength") or 0), reverse=True)
+        # Prefer not to emit both healthy_co_evolution and escalating_dependency
+        ids = {c["id"] for c in active}
+        if (
+            self.CONCEPT_HEALTHY_CO_EVOLUTION in ids
+            and self.CONCEPT_ESCALATING_DEPENDENCY in ids
+        ):
+            active = [
+                c
+                for c in active
+                if not (
+                    c["id"] == self.CONCEPT_HEALTHY_CO_EVOLUTION
+                    and float(
+                        next(
+                            x["strength"]
+                            for x in active
+                            if x["id"] == self.CONCEPT_ESCALATING_DEPENDENCY
+                        )
+                    )
+                    >= float(c["strength"])
+                )
+            ]
+        return active[:5]
+
     def evaluate_health(self) -> dict[str, Any]:
         """Richer structured assessment for humans and richer consumers.
 
@@ -736,6 +1181,7 @@ class RelationshipHealth:
             {"flag": f, "explanation": self._get_flag_explanation(f)}
             for f in self.state.health_flags
         ]
+        concepts = self.detect_concept_patterns()
         return {
             "user_id": self._user_id or DEFAULT_USER_ID,
             "texture_breakdown": {
@@ -750,6 +1196,8 @@ class RelationshipHealth:
             "interaction_count": self.state.interaction_count,
             "last_updated": self.state.last_updated,
             "emerging_patterns": self.detect_emerging_patterns(),
+            "concept_patterns": concepts,
+            "concept_pattern_ids": [c.get("id") for c in concepts],
         }
 
     def as_context(self) -> dict[str, Any]:
@@ -760,12 +1208,14 @@ class RelationshipHealth:
           - health_flags / active_flags
           - bond_texture / texture_breakdown
           - interaction_count, recent_patterns, overall_risk_level
+          - concept_patterns (multi-episode advisory trajectories)
 
         Per-user isolation: ``user_id`` is always present so deliberation and
         decision logs can attribute bond evidence to the correct human.
         """
         texture = {k: round(v, 2) for k, v in self.state.bond_texture.items()}
         avg = self._average_texture()
+        concepts = self.detect_concept_patterns()
         ctx: dict[str, Any] = {
             "user_id": self._user_id or DEFAULT_USER_ID,
             "health_flags": list(self.state.health_flags),
@@ -778,12 +1228,153 @@ class RelationshipHealth:
                 avg, len(self.state.health_flags)
             ),
             "summary": self.state.summary,
+            "concept_patterns": concepts,
+            "concept_pattern_ids": [c.get("id") for c in concepts if c.get("id")],
         }
+        if self.state.curious_companion:
+            ctx["curious_companion"] = dict(self.state.curious_companion)
+        if self.state.careful_truth_telling:
+            ctx["careful_truth_telling"] = dict(self.state.careful_truth_telling)
         if self._identity_notes:
             ctx["identity_notes"] = list(self._identity_notes)
         if self.using_default_user_id:
             ctx["using_default_user_id"] = True
+        # Careful Truth-Telling signals (timing + confidence — never forces speech)
+        try:
+            readiness = self.assess_truth_telling_readiness()
+            confidence = self.assess_truth_confidence()
+            joint = combine_with_readiness(confidence, readiness)
+            ctx["truth_telling_readiness"] = readiness.to_dict()
+            ctx["truth_confidence"] = confidence.to_dict()
+            ctx["careful_truth_telling_joint"] = joint
+            # Keep durable snapshot in sync when assessing (in-memory always;
+            # disk when auto_persist). Does not force speech.
+            self.update_careful_truth_telling_snapshot(joint)
+            if self.state.careful_truth_telling:
+                ctx["careful_truth_telling"] = dict(self.state.careful_truth_telling)
+        except Exception:
+            pass
         return ctx
+
+    def assess_truth_confidence(
+        self,
+        *,
+        history_evidence: dict[str, Any] | None = None,
+        evidence_snapshot: dict[str, Any] | None = None,
+        decision_flags: list[str] | None = None,
+        concept_patterns: list[dict[str, Any]] | None = None,
+    ) -> TruthConfidence:
+        """Compute confidence-in-truth for potential careful observation (advisory).
+
+        Epistemic grounding only — combine with ``assess_truth_telling_readiness``
+        for timing. Never generates speech or questions.
+        """
+        patterns = concept_patterns
+        if patterns is None:
+            try:
+                patterns = self.detect_concept_patterns(
+                    history_evidence=history_evidence
+                )
+            except Exception:
+                patterns = []
+        cc = (
+            self.state.curious_companion
+            if isinstance(self.state.curious_companion, dict)
+            else {}
+        )
+        gaps = None
+        cont = None
+        if history_evidence and isinstance(history_evidence, dict):
+            gaps = history_evidence.get("understanding_gaps")
+            cont = history_evidence.get("topic_continuity")
+        if not cont and isinstance(cc.get("topic_continuity"), dict):
+            cont = cc.get("topic_continuity")
+        if not gaps and cc:
+            gaps = {
+                "has_gaps": bool(
+                    cc.get("open_topic_names") or cc.get("last_gap_score")
+                ),
+                "gap_score": float(cc.get("last_gap_score") or 0.0),
+                "curiosity_support": float(cc.get("last_gap_score") or 0.0),
+                "primary_gap_topics": list(cc.get("open_topic_names") or [])[:6],
+                "gap_kinds": list(cc.get("last_gap_kinds") or []),
+            }
+        return assess_truth_confidence(
+            bond_texture=dict(self.state.bond_texture),
+            health_flags=list(self.state.health_flags),
+            concept_patterns=list(patterns or []),
+            understanding_gaps=gaps if isinstance(gaps, dict) else None,
+            topic_continuity=cont if isinstance(cont, dict) else None,
+            curious_companion=cc,
+            history_evidence=history_evidence
+            if isinstance(history_evidence, dict)
+            else None,
+            recent_patterns=dict(self.state.recent_patterns),
+            interaction_count=int(self.state.interaction_count or 0),
+            evidence_snapshot=evidence_snapshot
+            if isinstance(evidence_snapshot, dict)
+            else None,
+            decision_flags=list(decision_flags or []),
+            user_id=self._user_id or DEFAULT_USER_ID,
+        )
+
+    def assess_truth_telling_readiness(
+        self,
+        *,
+        history_evidence: dict[str, Any] | None = None,
+        exploratory_enabled: bool | None = None,
+        exploratory_intensity: float | None = None,
+        concern_active: bool = False,
+        hard_path_active: bool = False,
+        concept_patterns: list[dict[str, Any]] | None = None,
+    ) -> TruthTellingReadiness:
+        """Compute Careful Truth-Telling readiness for this bond (advisory only).
+
+        Combines texture, flags, multi-episode concept patterns, curious-companion
+        / gap state, optional history, and optional exploratory user controls.
+        Does **not** generate dialogue or force questions.
+        """
+        patterns = concept_patterns
+        if patterns is None:
+            try:
+                patterns = self.detect_concept_patterns(
+                    history_evidence=history_evidence
+                )
+            except Exception:
+                patterns = []
+        cc = self.state.curious_companion if isinstance(self.state.curious_companion, dict) else {}
+        gaps = None
+        cont = None
+        if history_evidence and isinstance(history_evidence, dict):
+            gaps = history_evidence.get("understanding_gaps")
+            cont = history_evidence.get("topic_continuity")
+        if not cont and isinstance(cc.get("topic_continuity"), dict):
+            cont = cc.get("topic_continuity")
+        # Synthetic gaps bag from durable curious_companion when history absent
+        if not gaps and cc:
+            gaps = {
+                "has_gaps": bool(cc.get("open_topic_names") or cc.get("last_gap_score")),
+                "gap_score": float(cc.get("last_gap_score") or 0.0),
+                "curiosity_support": float(cc.get("last_gap_score") or 0.0),
+                "primary_gap_topics": list(cc.get("open_topic_names") or [])[:6],
+                "gap_kinds": list(cc.get("last_gap_kinds") or []),
+            }
+        return assess_truth_telling_readiness(
+            bond_texture=dict(self.state.bond_texture),
+            health_flags=list(self.state.health_flags),
+            concept_patterns=list(patterns or []),
+            understanding_gaps=gaps if isinstance(gaps, dict) else None,
+            topic_continuity=cont if isinstance(cont, dict) else None,
+            curious_companion=cc,
+            history_evidence=history_evidence if isinstance(history_evidence, dict) else None,
+            recent_patterns=dict(self.state.recent_patterns),
+            interaction_count=int(self.state.interaction_count or 0),
+            exploratory_enabled=exploratory_enabled,
+            exploratory_intensity=exploratory_intensity,
+            concern_active=concern_active,
+            hard_path_active=hard_path_active,
+            user_id=self._user_id or DEFAULT_USER_ID,
+        )
 
     def get_state(self) -> BondState:
         """Return current BondState (inspection / persistence handoff)."""
