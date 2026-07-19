@@ -8,9 +8,9 @@ version = "0.3.0"
 description = "Conscience-first ethical governance layer for AI companions and in-home robotics"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {text = "AGPL-3.0-only"}
 authors = [
-    {name = "Positronic Bond Engine Contributors"}
+    {name = "Emily Hagen / Positronic Bond Engine"}
 ]
 keywords = [
     "ethics",
@@ -25,7 +25,7 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

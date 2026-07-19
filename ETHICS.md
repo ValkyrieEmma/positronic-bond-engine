@@ -10,27 +10,15 @@ This document exists to clarify the creator’s expectations around licensing an
 
 ## Current Licensing
 
-The project is currently released under the MIT License. This permissive license allows broad use, modification, and commercialization. It is considered acceptable for the current early stage of development.
+The project is released under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See [LICENSE](LICENSE).
 
-## Intent Regarding Future Licensing
+Under AGPL-3.0, non-commercial use, personal use, research, and open-source collaboration remain free, subject to AGPL obligations (including source-sharing for network use of modified versions). **Commercial use, SaaS offerings, productization, monetized derivatives, or closed-source commercial distribution require a separate commercial license** from the copyright holder.
 
-The creator intends to revisit licensing and usage terms once the project reaches greater maturity. The goal is to ensure that if the work generates meaningful value — whether through direct adoption, derivatives, or commercial applications — the creator retains reasonable agency and the ability to benefit from that value.
+## Intent Regarding Licensing
 
-Any future licensing decisions will aim to balance openness with appropriate protection for the creator’s contributions and the project’s ethical direction. Changes will be made thoughtfully and with advance notice where practical.
+The creator’s goal is to keep the work available for conscientious study, research, and open contribution while protecting the ability to benefit from and sustain the long-term vision if the project generates commercial value. AGPL-3.0 provides strong copyleft protection for the commons; dual commercial licensing (when offered) is the intended path for closed or monetized products that cannot or will not operate under AGPL.
 
-## When Licensing Will Be Reconsidered
-
-Licensing and commercial terms will be reviewed when one or more of the following conditions are met:
-
-- The core deliberation engine, relationship modeling, and supporting systems have stabilized and demonstrate reliable capability.
-- The project receives meaningful external interest, adoption, or contribution.
-- There is clear potential for commercial use or derivative products.
-- The creator determines that the current permissive license no longer aligns with her long-term interests or values.
-
-At that stage, options under consideration may include (but are not limited to):
-- Retaining permissive terms for non-commercial and research use while introducing commercial licensing requirements.
-- Adopting a more protective open-source license with ethical use provisions.
-- Other structures that support the project’s ethical goals while providing reasonable protection for the creator.
+Licensing may still be refined as the project matures (for example, clearer commercial contact channels). Changes will be made thoughtfully and with advance notice where practical.
 
 ## Closing
 
