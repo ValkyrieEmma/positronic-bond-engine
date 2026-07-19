@@ -68,6 +68,9 @@ Careful Truth-Telling readiness + confidence (advisory)
 ``assess_truth_confidence`` — epistemic confidence in a potential observation.
 Neither generates speech or questions; see ``core.truth_telling_readiness`` and
 ``core.truth_confidence``. ``careful_truth_telling_joint`` combines both.
+``generate_observation_candidates`` — small gated set of possible observations
+(0–3), still non-speaking; see ``core.observation_candidates``.
+``update_observation_candidates_snapshot`` — durable compact seed bag on BondState.
 """
 
 from __future__ import annotations
@@ -77,6 +80,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .observation_candidates import (
+    ObservationCandidate,
+    generate_observation_candidates,
+)
 from .truth_confidence import (
     TruthConfidence,
     assess_truth_confidence,
@@ -143,6 +150,8 @@ class BondState:
             continuity (survives sessions when persistence is enabled).
         careful_truth_telling: Latest joint readiness × confidence snapshot
             (compact, advisory only — never forces speech).
+        observation_candidates_snapshot: Latest compact observation-candidate
+            seeds (0–3) considered for careful truth-telling (non-speaking).
     """
 
     bond_texture: dict[str, float] = field(
@@ -155,6 +164,7 @@ class BondState:
     summary: str = "Initial / neutral bond state."
     curious_companion: dict[str, Any] = field(default_factory=dict)
     careful_truth_telling: dict[str, Any] = field(default_factory=dict)
+    observation_candidates_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Plain dict of core fields (for persistence / inspection)."""
@@ -170,6 +180,10 @@ class BondState:
             out["curious_companion"] = dict(self.curious_companion)
         if self.careful_truth_telling:
             out["careful_truth_telling"] = dict(self.careful_truth_telling)
+        if self.observation_candidates_snapshot:
+            out["observation_candidates_snapshot"] = dict(
+                self.observation_candidates_snapshot
+            )
         return out
 
     @classmethod
@@ -196,6 +210,9 @@ class BondState:
         ctt = data.get("careful_truth_telling")
         if not isinstance(ctt, dict):
             ctt = {}
+        ocs = data.get("observation_candidates_snapshot")
+        if not isinstance(ocs, dict):
+            ocs = {}
         return cls(
             bond_texture=texture,
             interaction_count=int(data.get("interaction_count", 0) or 0),
@@ -208,6 +225,7 @@ class BondState:
             summary=str(data.get("summary") or "Initial / neutral bond state."),
             curious_companion=dict(cc),
             careful_truth_telling=dict(ctt),
+            observation_candidates_snapshot=dict(ocs),
         )
 
 
@@ -375,6 +393,9 @@ class RelationshipHealth:
                 last_updated=str(self.state.last_updated or _utc_now_iso()),
                 curious_companion=dict(self.state.curious_companion or {}),
                 careful_truth_telling=dict(self.state.careful_truth_telling or {}),
+                observation_candidates_snapshot=dict(
+                    self.state.observation_candidates_snapshot or {}
+                ),
             )
             path = self._persistence.save_bond_state(record)
             return Path(path) if path is not None else None
@@ -417,6 +438,9 @@ class RelationshipHealth:
             last_updated=str(self.state.last_updated or _utc_now_iso()),
             curious_companion=dict(self.state.curious_companion or {}),
             careful_truth_telling=dict(self.state.careful_truth_telling or {}),
+            observation_candidates_snapshot=dict(
+                self.state.observation_candidates_snapshot or {}
+            ),
         )
 
     def apply_record(self, record: Any) -> BondState:
@@ -438,6 +462,10 @@ class RelationshipHealth:
                 "curious_companion": getattr(record, "curious_companion", {}) or {},
                 "careful_truth_telling": getattr(
                     record, "careful_truth_telling", {}
+                )
+                or {},
+                "observation_candidates_snapshot": getattr(
+                    record, "observation_candidates_snapshot", {}
                 )
                 or {},
             }
@@ -553,6 +581,75 @@ class RelationshipHealth:
             return dict(snap)
         except Exception:
             return dict(self.state.careful_truth_telling or {})
+
+    def update_observation_candidates_snapshot(
+        self, cand_bag: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Store compact observation-candidate snapshot on BondState.
+
+        Durable Careful Truth-Telling seeds: latest 0–3 candidates the system
+        has considered observing. Survives sessions when persistence is enabled.
+        Never forces speech or questions. Failures never raise.
+
+        Soft counter ``observation_candidates_assessed`` increments only when
+        candidate ids or joint_stance change (avoids noise on repeated as_context).
+        """
+        if not cand_bag or not isinstance(cand_bag, dict):
+            return dict(self.state.observation_candidates_snapshot or {})
+        try:
+            from persistence.models import compact_observation_candidates_snapshot
+
+            # Allow passing either full generate_* bag or already-compact snapshot
+            snap = compact_observation_candidates_snapshot(
+                cand_bag,
+                interaction_count=int(self.state.interaction_count or 0),
+            )
+            snap["assessed_at"] = str(snap.get("assessed_at") or _utc_now_iso())
+            snap["forces_speech"] = False
+            snap["forces_question"] = False
+            for c in snap.get("candidates") or []:
+                if isinstance(c, dict):
+                    c["forces_speech"] = False
+                    c["forces_question"] = False
+
+            prev = self.state.observation_candidates_snapshot or {}
+            prev_ids = [
+                str(c.get("id"))
+                for c in (prev.get("candidates") or [])
+                if isinstance(c, dict)
+            ]
+            new_ids = [
+                str(c.get("id"))
+                for c in (snap.get("candidates") or [])
+                if isinstance(c, dict)
+            ]
+            changed = (
+                not prev
+                or prev_ids != new_ids
+                or prev.get("joint_stance") != snap.get("joint_stance")
+                or int(prev.get("count") or 0) != int(snap.get("count") or 0)
+            )
+            if not changed and prev.get("assessed_at"):
+                snap["assessed_at"] = str(prev["assessed_at"])
+                if prev.get("interaction_count") is not None:
+                    snap["interaction_count"] = prev.get("interaction_count")
+
+            self.state.observation_candidates_snapshot = snap
+            self.state.last_updated = str(snap["assessed_at"])
+            if changed:
+                self.state.recent_patterns["observation_candidates_assessed"] = (
+                    int(
+                        self.state.recent_patterns.get(
+                            "observation_candidates_assessed", 0
+                        )
+                        or 0
+                    )
+                    + 1
+                )
+                self._maybe_auto_save()
+            return dict(snap)
+        except Exception:
+            return dict(self.state.observation_candidates_snapshot or {})
 
     def _maybe_auto_save(self) -> None:
         if self._auto_persist:
@@ -1235,6 +1332,11 @@ class RelationshipHealth:
             ctx["curious_companion"] = dict(self.state.curious_companion)
         if self.state.careful_truth_telling:
             ctx["careful_truth_telling"] = dict(self.state.careful_truth_telling)
+        # Durable observation candidates (prior session seeds) — distinct from live
+        if self.state.observation_candidates_snapshot:
+            ctx["observation_candidates_durable"] = dict(
+                self.state.observation_candidates_snapshot
+            )
         if self._identity_notes:
             ctx["identity_notes"] = list(self._identity_notes)
         if self.using_default_user_id:
@@ -1252,9 +1354,102 @@ class RelationshipHealth:
             self.update_careful_truth_telling_snapshot(joint)
             if self.state.careful_truth_telling:
                 ctx["careful_truth_telling"] = dict(self.state.careful_truth_telling)
+            # Live observation candidates (0–3), gated by joint — never speech
+            cand_bag = self.generate_observation_candidates(
+                joint=joint,
+                concept_patterns=concepts,
+            )
+            live_list = list(cand_bag.get("candidates") or [])
+            ctx["observation_candidates"] = live_list
+            ctx["observation_candidates_live"] = live_list
+            ctx["observation_candidates_meta"] = {
+                "count": int(cand_bag.get("count") or 0),
+                "gate": dict(cand_bag.get("gate") or {}),
+                "source": "live",
+                "forces_speech": False,
+                "forces_question": False,
+            }
+            # Persist compact durable snapshot of what we just considered
+            durable = self.update_observation_candidates_snapshot(
+                {
+                    **cand_bag,
+                    "joint_stance": joint.get("joint_stance"),
+                    "joint_score": joint.get("joint_score"),
+                }
+            )
+            if durable:
+                ctx["observation_candidates_durable"] = dict(durable)
         except Exception:
             pass
         return ctx
+
+    def generate_observation_candidates(
+        self,
+        *,
+        joint: dict[str, Any] | None = None,
+        concept_patterns: list[dict[str, Any]] | None = None,
+        history_evidence: dict[str, Any] | None = None,
+        understanding_gaps: dict[str, Any] | None = None,
+        topic_continuity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build gated observation candidates (0–3) from living bond evidence.
+
+        Uses joint careful-truth-telling assessment when provided; otherwise
+        reassesses readiness × confidence. Never forces speech or questions.
+        """
+        try:
+            patterns = concept_patterns
+            if patterns is None:
+                patterns = self.detect_concept_patterns(
+                    history_evidence=history_evidence
+                )
+            j = joint
+            if not isinstance(j, dict) or not j:
+                readiness = self.assess_truth_telling_readiness(
+                    history_evidence=history_evidence,
+                    concept_patterns=patterns,
+                )
+                confidence = self.assess_truth_confidence(
+                    history_evidence=history_evidence,
+                    concept_patterns=patterns,
+                )
+                j = combine_with_readiness(confidence, readiness)
+            cc = (
+                self.state.curious_companion
+                if isinstance(self.state.curious_companion, dict)
+                else {}
+            )
+            gaps = understanding_gaps
+            if gaps is None and cc:
+                gaps = {
+                    "has_gaps": bool(
+                        cc.get("open_topic_names") or cc.get("last_gap_score")
+                    ),
+                    "gap_score": float(cc.get("last_gap_score") or 0.0),
+                    "primary_gap_topics": list(cc.get("open_topic_names") or [])[:6],
+                }
+            tc = topic_continuity
+            if tc is None and isinstance(cc.get("topic_continuity"), dict):
+                tc = dict(cc.get("topic_continuity") or {})
+            return generate_observation_candidates(
+                joint=j,
+                concept_patterns=list(patterns or []),
+                understanding_gaps=gaps,
+                topic_continuity=tc,
+                curious_companion=cc,
+                bond_texture=dict(self.state.bond_texture or {}),
+                health_flags=list(self.state.health_flags or []),
+                history_evidence=history_evidence,
+            )
+        except Exception:
+            return {
+                "candidates": [],
+                "count": 0,
+                "gate": {"allowed_max": 0, "reason": "generation failed soft"},
+                "forces_speech": False,
+                "forces_question": False,
+                "schema_version": 1,
+            }
 
     def assess_truth_confidence(
         self,

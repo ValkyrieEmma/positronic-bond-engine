@@ -63,9 +63,11 @@ class BondStateStore:
 
     Persists multi-dimensional texture, health flags, soft pattern counters
     (including understanding-gap / open-topic markers), optional
-    ``curious_companion`` snapshot, and optional ``careful_truth_telling``
-    joint readiness×confidence snapshot. Failures are raised to the backend
-    only; RelationshipHealth wraps I/O in fail-soft handlers.
+    ``curious_companion`` snapshot, optional ``careful_truth_telling``
+    joint readiness×confidence snapshot, and optional
+    ``observation_candidates_snapshot`` (latest careful observation seeds).
+    Failures are raised to the backend only; RelationshipHealth wraps I/O in
+    fail-soft handlers.
     """
 
     FILENAME = "bond_state.json"
@@ -82,7 +84,7 @@ class BondStateStore:
         return BondStateRecord.from_dict(raw, user_id=user_id)
 
     def save(self, record: BondStateRecord) -> Path:
-        """Write full BondStateRecord (texture + patterns + CC + CTT)."""
+        """Write full BondStateRecord (texture + patterns + CC + CTT + obs)."""
         data = record.to_dict()
         data["summary"] = self._privacy.filter_text(str(data.get("summary") or ""))
         # Soft free-text inside curious_companion (examples / topics are short labels)
@@ -97,6 +99,30 @@ class BondStateStore:
             # Invariants on disk
             data["careful_truth_telling"]["forces_speech"] = False
             data["careful_truth_telling"]["forces_question"] = False
+        if isinstance(data.get("observation_candidates_snapshot"), dict):
+            ocs = self._privacy.filter_mapping(
+                dict(data["observation_candidates_snapshot"])
+            )
+            # Re-compact force flags after privacy filter
+            ocs["forces_speech"] = False
+            ocs["forces_question"] = False
+            cands = ocs.get("candidates")
+            if isinstance(cands, list):
+                cleaned: list[dict] = []
+                for c in cands[:3]:
+                    if not isinstance(c, dict):
+                        continue
+                    item = dict(c)
+                    item["forces_speech"] = False
+                    item["forces_question"] = False
+                    if "description" in item:
+                        item["description"] = self._privacy.filter_text(
+                            str(item.get("description") or "")
+                        )[:200]
+                    cleaned.append(item)
+                ocs["candidates"] = cleaned
+                ocs["count"] = len(cleaned)
+            data["observation_candidates_snapshot"] = ocs
         # Ensure recent_patterns keys are strings (open_topic:*, gap_topic:*, etc.)
         pats = data.get("recent_patterns") or {}
         data["recent_patterns"] = {str(k): int(v) for k, v in pats.items()}
@@ -123,6 +149,21 @@ class BondStateStore:
         record.set_careful_truth_telling(
             compact_careful_truth_telling_snapshot(
                 snapshot, interaction_count=record.interaction_count
+            )
+        )
+        self.save(record)
+        return record
+
+    def update_observation_candidates(
+        self, user_id: str, cand_bag: dict[str, Any]
+    ) -> BondStateRecord:
+        """Load-set-save observation_candidates_snapshot for this user."""
+        from .models import compact_observation_candidates_snapshot
+
+        record = self.load(user_id)
+        record.set_observation_candidates_snapshot(
+            compact_observation_candidates_snapshot(
+                cand_bag, interaction_count=record.interaction_count
             )
         )
         self.save(record)

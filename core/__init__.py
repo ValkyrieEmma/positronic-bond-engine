@@ -26,14 +26,21 @@ from .interaction_memory import (  # noqa: F401
     InteractionRecord,
     MemoryStore,
 )
-from .ontology import (
+from .ontology import (  # noqa: F401
     EthicalOntology,
     EthicalPrinciple,
     get_default_ontology,
+    indicator_matches_text,
+    prefer_specific_indicator_matches,
 )
 from .per_user_baseline import DeviationReport, PerUserBaseline  # noqa: F401
 from .relationship_health import BondState, RelationshipHealth  # noqa: F401
 from .response_generator import GeneratedResponse, ResponseGenerator  # noqa: F401
+from .observation_candidates import (  # noqa: F401
+    ObservationCandidate,
+    generate_observation_candidates,
+    gate_allows_candidates,
+)
 from .truth_confidence import (  # noqa: F401
     TruthConfidence,
     assess_truth_confidence,
@@ -49,6 +56,9 @@ __all__ = [
     "assess_truth_telling_readiness",
     "BondState",
     "combine_with_readiness",
+    "gate_allows_candidates",
+    "generate_observation_candidates",
+    "ObservationCandidate",
     "DecisionLog",
     "DevelopmentPhaseContext",
     "DeviationReport",
@@ -60,10 +70,12 @@ __all__ = [
     "GeneratedResponse",
     "get_default_development_context",
     "get_default_ontology",
+    "indicator_matches_text",
     "InteractionMemoryStore",
     "InteractionRecord",
     "MemoryStore",
     "PerUserBaseline",
+    "prefer_specific_indicator_matches",
     "QuestionDecision",
     "RelationshipHealth",
     "resolve_development_context",

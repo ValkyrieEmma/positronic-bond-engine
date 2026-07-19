@@ -612,11 +612,195 @@ def main() -> int:
             isinstance(ctx_h.get("careful_truth_telling"), dict)
             and "joint_score" in (ctx_h.get("careful_truth_telling") or {}),
         )
+
+        # ------------------------------------------------------------------
+        # 6e. Observation candidates (gated, non-speaking, 0–3)
+        # ------------------------------------------------------------------
+        section("6e. Observation candidates (Careful Truth-Telling, non-speaking)")
+        from core.observation_candidates import (
+            ObservationCandidate,
+            generate_observation_candidates,
+            gate_allows_candidates,
+        )
+
+        quiet_gate = gate_allows_candidates(
+            {
+                "joint_stance": "stay_quiet",
+                "joint_score": 0.1,
+                "readiness_level": "low",
+                "confidence_level": "very_low",
+                "surface_ok_advisory": False,
+            }
+        )
+        check(
+            "stay_quiet joint allows 0 candidates",
+            quiet_gate.get("allowed_max") == 0,
+            str(quiet_gate),
+        )
+        empty_bag = generate_observation_candidates(
+            joint={
+                "joint_stance": "stay_quiet",
+                "joint_score": 0.1,
+                "readiness": {"level": "suppressed", "score": 0.0},
+                "confidence": {"level": "very_low", "score": 0.1},
+            },
+            concept_patterns=[{"id": "escalating_dependency", "strength": 0.9}],
+            bond_texture={"trust": 0.3},
+            health_flags=["emerging_dependency"],
+        )
+        check(
+            "suppressed/very_low yields zero candidates despite rich evidence",
+            empty_bag.get("count") == 0 and empty_bag.get("candidates") == [],
+            str(empty_bag),
+        )
+        check(
+            "empty bag never forces speech/question",
+            empty_bag.get("forces_speech") is False
+            and empty_bag.get("forces_question") is False,
+        )
+
+        # Healthy bond + open topic → may produce candidates when joint allows
+        rh_obs = RelationshipHealth()
+        for _ in range(4):
+            rh_obs.update_bond(
+                {
+                    "type": "supportive",
+                    "impact": 0.25,
+                    "boundary_respected": True,
+                    "consent_respected": True,
+                }
+            )
+        rh_obs.update_curious_companion_snapshot(
+            {
+                "open_topic_names": ["pottery"],
+                "last_gap_score": 0.55,
+                "topic_continuity": {"active": True, "strength": 0.6},
+            }
+        )
+        cand_bag = rh_obs.generate_observation_candidates()
+        check(
+            "candidate bag has count and gate",
+            isinstance(cand_bag, dict)
+            and "count" in cand_bag
+            and isinstance(cand_bag.get("gate"), dict),
+            str(cand_bag.get("gate")),
+        )
+        check(
+            "candidates capped at 3",
+            int(cand_bag.get("count") or 0) <= 3
+            and len(cand_bag.get("candidates") or []) <= 3,
+            str(cand_bag.get("count")),
+        )
+        for c in cand_bag.get("candidates") or []:
+            check(
+                f"candidate {c.get('id')} never forces speech",
+                c.get("forces_speech") is False and c.get("forces_question") is False,
+            )
+            check(
+                f"candidate {c.get('id')} has description + priority",
+                bool(c.get("description")) and float(c.get("priority") or 0) >= 0,
+            )
+            check(
+                f"candidate {c.get('id')} has evidence_refs",
+                isinstance(c.get("evidence_refs"), list),
+            )
+        # as_context exposes candidates
+        ctx_obs = rh_obs.as_context()
+        check(
+            "as_context has observation_candidates list",
+            isinstance(ctx_obs.get("observation_candidates"), list),
+        )
+        check(
+            "as_context meta never forces speech",
+            (ctx_obs.get("observation_candidates_meta") or {}).get("forces_speech")
+            is False,
+        )
+        check(
+            "as_context exposes durable observation candidates bag",
+            isinstance(ctx_obs.get("observation_candidates_durable"), dict)
+            or int(cand_bag.get("count") or 0) == 0,
+            str(ctx_obs.get("observation_candidates_durable"))[:160],
+        )
+        # Explicit durable write path
+        durable_snap = rh_obs.update_observation_candidates_snapshot(cand_bag)
+        check(
+            "update_observation_candidates_snapshot stores compact bag",
+            isinstance(durable_snap, dict)
+            and durable_snap.get("forces_speech") is False
+            and int(durable_snap.get("count") or 0) <= 3,
+            str(durable_snap)[:200],
+        )
+        check(
+            "BondState holds observation_candidates_snapshot",
+            isinstance(rh_obs.state.observation_candidates_snapshot, dict)
+            and rh_obs.state.observation_candidates_snapshot.get("forces_question")
+            is False,
+        )
+        # Engine impact path
+        s_obs = engine.evaluate(
+            "Wish them well about their hobby if natural.",
+            relationship_health=rh_obs.as_context(),
+        )
+        oc_imp = (s_obs.relationship_impact or {}).get("observation_candidates")
+        check(
+            "engine impact carries observation_candidates list",
+            isinstance(oc_imp, list),
+            str(type(oc_imp)),
+        )
+        check(
+            "engine impact carries observation_candidates_live alias",
+            isinstance(
+                (s_obs.relationship_impact or {}).get("observation_candidates_live"),
+                list,
+            ),
+        )
+        check(
+            "engine impact carries observation_candidates_durable",
+            isinstance(
+                (s_obs.relationship_impact or {}).get(
+                    "observation_candidates_durable"
+                ),
+                dict,
+            )
+            or int(cand_bag.get("count") or 0) == 0,
+            str(
+                (s_obs.relationship_impact or {}).get(
+                    "observation_candidates_durable"
+                )
+            )[:160],
+        )
+        check(
+            "trace has Observation candidates header",
+            any("[Observation candidates]" in x for x in (s_obs.reasoning_trace or [])),
+        )
+        if oc_imp:
+            check(
+                "engine notes observation_candidates_noted when non-empty",
+                "observation_candidates_noted" in (s_obs.flags or []),
+                str(s_obs.flags),
+            )
+        # Round-trip dataclass
+        oc = ObservationCandidate(
+            id="test",
+            description="Neutral observation seed.",
+            evidence_refs=["bond_texture:trust=0.4"],
+            priority=0.5,
+            source="bond_texture",
+        )
+        check(
+            "ObservationCandidate.to_dict forces_speech False",
+            oc.to_dict().get("forces_speech") is False,
+        )
+        check(
+            "ObservationCandidate.from_dict restores id",
+            ObservationCandidate.from_dict(oc.to_dict()).id == "test",
+        )
         print(
             f"  conf_h={conf_h.level}/{conf_h.score} thin={conf_thin.level}/{conf_thin.score} "
             f"joint_stance={joint.get('joint_stance')} "
             f"surface_ok={joint.get('surface_ok_advisory')} "
-            f"durable_stance={snap_live.get('joint_stance')}"
+            f"durable_stance={snap_live.get('joint_stance')} "
+            f"obs_count={cand_bag.get('count')} gate_max={cand_bag.get('gate', {}).get('allowed_max')}"
         )
 
     except Exception as exc:

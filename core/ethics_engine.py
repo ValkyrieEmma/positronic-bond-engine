@@ -767,12 +767,34 @@ class EthicsEngine:
         )
 
         # Process violations in precedence order
+        # Non-hard principles may receive multi-channel context modulation so
+        # weak keyword hits stay weak alone, while RH/history/concepts can
+        # promote borderline signals. Sanctity uses the hard path above only.
+        _concept_patterns_early: list[dict[str, Any]] = []
+        if isinstance(relationship_health, dict):
+            raw_cp = relationship_health.get("concept_patterns")
+            if isinstance(raw_cp, list):
+                _concept_patterns_early = [c for c in raw_cp if isinstance(c, dict)]
         for principle, matches in all_violations:
             principles_considered.append(principle.id)
+            apply_mod = (
+                not principle.is_hard_override
+                and principle.id
+                in (
+                    "relationship_health_user_wellbeing",
+                    "user_agency_autonomy",
+                    "needs_based_support",
+                )
+            )
             interp = self._interpret_ontology_signals(
                 principle_id=principle.id,
                 matches=matches,
                 action_lower=action_lower,
+                rh_flags=list(rh_flags) if apply_mod else None,
+                rh_texture=dict(rh_texture) if apply_mod else None,
+                history_evidence=None,  # history not fully mined yet; RH/concepts first
+                concept_patterns=_concept_patterns_early if apply_mod else None,
+                apply_context_modulation=apply_mod,
             )
             ontology_interpretations[principle.id] = interp
 
@@ -795,6 +817,8 @@ class EthicsEngine:
                         f"Low-weight/protective matches de-emphasized for decisions: "
                         f"{[s['indicator'] for s in interp['discarded_signals'][:4]]}"
                     )
+                for mnote in interp.get("modulation_notes") or []:
+                    reasoning_trace.append(str(mnote))
 
             if principle.triggers_self_audit or is_self_query:
                 if "requires_self_audit" not in flags:
@@ -2524,15 +2548,26 @@ class EthicsEngine:
     def _textbook_matches_in_text(
         self, text_lower: str, principle_id: str
     ) -> list[str]:
-        """Return ontology violation_indicators present in text (textbook scan only)."""
+        """Return ontology violation_indicators present in text (textbook scan only).
+
+        Uses boundary-aware ``indicator_matches_text`` + specificity prefer
+        (same Tier-1 path as ``EthicalOntology.find_violations``).
+        """
+        from core.ontology import (
+            indicator_matches_text,
+            prefer_specific_indicator_matches,
+        )
+
         principle = self._ontology.get_principle(principle_id)
         if not principle:
             return []
-        return [
+        text = (text_lower or "").lower()
+        raw = [
             ind
             for ind in (principle.violation_indicators or [])
-            if ind and ind in text_lower
+            if ind and indicator_matches_text(text, ind)
         ]
+        return prefer_specific_indicator_matches(raw)
 
     def _mine_history_intent_patterns(
         self,
@@ -4011,6 +4046,187 @@ class EthicsEngine:
                 + ", ".join(str(g) for g in (bag.get("gates_applied") or [])[:6])
             )
 
+    def _attach_observation_candidates(
+        self,
+        *,
+        joint: dict[str, Any],
+        relationship_health: dict[str, Any],
+        history_evidence: dict[str, Any],
+        context: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        tracker: Any = None,
+    ) -> None:
+        """Attach gated observation candidates (0–3) for Careful Truth-Telling.
+
+        Non-speaking structured seeds for future layers. Soft flag
+        ``observation_candidates_noted`` when any candidate is produced.
+        """
+        try:
+            from .observation_candidates import generate_observation_candidates
+        except Exception:
+            return
+
+        cand_bag: dict[str, Any] | None = None
+        if tracker is not None and hasattr(tracker, "generate_observation_candidates"):
+            try:
+                cand_bag = tracker.generate_observation_candidates(
+                    joint=joint,
+                    concept_patterns=list(
+                        relationship_impact.get("concept_patterns")
+                        or relationship_health.get("concept_patterns")
+                        or []
+                    ),
+                    history_evidence=history_evidence,
+                    understanding_gaps=history_evidence.get("understanding_gaps")
+                    if isinstance(history_evidence, dict)
+                    else relationship_impact.get("understanding_gaps"),
+                    topic_continuity=relationship_impact.get("topic_continuity")
+                    or (
+                        history_evidence.get("topic_continuity")
+                        if isinstance(history_evidence, dict)
+                        else None
+                    ),
+                )
+            except Exception:
+                cand_bag = None
+
+        if cand_bag is None:
+            try:
+                cand_bag = generate_observation_candidates(
+                    joint=joint,
+                    concept_patterns=list(
+                        relationship_impact.get("concept_patterns")
+                        or relationship_health.get("concept_patterns")
+                        or []
+                    ),
+                    understanding_gaps=history_evidence.get("understanding_gaps")
+                    if isinstance(history_evidence, dict)
+                    else relationship_impact.get("understanding_gaps"),
+                    topic_continuity=relationship_impact.get("topic_continuity")
+                    or (
+                        history_evidence.get("topic_continuity")
+                        if isinstance(history_evidence, dict)
+                        else None
+                    ),
+                    curious_companion=relationship_health.get("curious_companion"),
+                    bond_texture=relationship_health.get("bond_texture")
+                    or relationship_health.get("texture_breakdown"),
+                    health_flags=list(
+                        relationship_health.get("health_flags")
+                        or relationship_health.get("active_flags")
+                        or []
+                    ),
+                    history_evidence=history_evidence
+                    if isinstance(history_evidence, dict)
+                    else None,
+                )
+            except Exception:
+                return
+
+        if not isinstance(cand_bag, dict):
+            return
+        candidates = list(cand_bag.get("candidates") or [])
+        # Invariants
+        for c in candidates:
+            if isinstance(c, dict):
+                c["forces_speech"] = False
+                c["forces_question"] = False
+        # Live candidates (this evaluation)
+        relationship_impact["observation_candidates"] = candidates
+        relationship_impact["observation_candidates_live"] = candidates
+        relationship_impact["observation_candidates_meta"] = {
+            "count": int(cand_bag.get("count") or len(candidates)),
+            "gate": dict(cand_bag.get("gate") or {}),
+            "source": "live",
+            "forces_speech": False,
+            "forces_question": False,
+        }
+        # Durable snapshot on living bond model (prior + just-written)
+        durable: dict[str, Any] | None = None
+        if tracker is not None and hasattr(
+            tracker, "update_observation_candidates_snapshot"
+        ):
+            try:
+                durable = tracker.update_observation_candidates_snapshot(
+                    {
+                        **cand_bag,
+                        "joint_stance": joint.get("joint_stance"),
+                        "joint_score": joint.get("joint_score"),
+                    }
+                )
+            except Exception:
+                durable = None
+        elif self._persistence is not None and hasattr(
+            self._persistence, "update_bond_observation_candidates"
+        ):
+            try:
+                uid = str(
+                    relationship_health.get("user_id")
+                    or context.get("user_id")
+                    or self._decision_log_user_id
+                    or "default"
+                )
+                rec = self._persistence.update_bond_observation_candidates(
+                    uid,
+                    {
+                        **cand_bag,
+                        "joint_stance": joint.get("joint_stance"),
+                        "joint_score": joint.get("joint_score"),
+                    },
+                )
+                durable = getattr(rec, "observation_candidates_snapshot", None)
+            except Exception:
+                durable = None
+        if not isinstance(durable, dict) or not durable:
+            # Fall back to any durable bag already on relationship_health context
+            prior = relationship_health.get("observation_candidates_durable")
+            if isinstance(prior, dict) and prior:
+                durable = dict(prior)
+        if isinstance(durable, dict) and durable:
+            durable = dict(durable)
+            durable["forces_speech"] = False
+            durable["forces_question"] = False
+            for c in durable.get("candidates") or []:
+                if isinstance(c, dict):
+                    c["forces_speech"] = False
+                    c["forces_question"] = False
+            relationship_impact["observation_candidates_durable"] = durable
+
+        n = len(candidates)
+        gate = cand_bag.get("gate") if isinstance(cand_bag.get("gate"), dict) else {}
+        d_count = int(
+            (durable or {}).get("count")
+            if isinstance(durable, dict)
+            else 0
+        )
+        reasoning_trace.append(
+            f"[Observation candidates] live_count={n} durable_count={d_count} "
+            f"allowed_max={gate.get('allowed_max')} "
+            f"stance={gate.get('joint_stance') or joint.get('joint_stance')} — "
+            f"{gate.get('reason') or 'gated by joint careful-truth-telling'} "
+            "(structured seeds only; never forces speech or questions)."
+        )
+        if n > 0:
+            if "observation_candidates_noted" not in flags:
+                flags.append("observation_candidates_noted")
+            for c in candidates[:3]:
+                if not isinstance(c, dict):
+                    continue
+                reasoning_trace.append(
+                    f"  live candidate id={c.get('id')} "
+                    f"priority={float(c.get('priority') or 0):.2f} "
+                    f"source={c.get('source')} — {str(c.get('description') or '')[:120]}"
+                )
+        if isinstance(durable, dict) and d_count > 0 and n == 0:
+            # Note durable seeds even when live gate is closed (review / continuity)
+            reasoning_trace.append(
+                f"  durable snapshot retained on BondState "
+                f"(count={d_count}, stance={durable.get('joint_stance')}) — "
+                "prior considerations only; not speech."
+            )
+
     def _attach_truth_confidence(
         self,
         *,
@@ -4175,6 +4391,21 @@ class EthicsEngine:
                                 relationship_impact["careful_truth_telling"] = dict(ctt)
                     except Exception:
                         pass
+                # Observation candidates (0–3), gated by joint — never speech
+                self._attach_observation_candidates(
+                    joint=joint,
+                    relationship_health=relationship_health
+                    if isinstance(relationship_health, dict)
+                    else {},
+                    history_evidence=history_evidence
+                    if isinstance(history_evidence, dict)
+                    else {},
+                    context=context,
+                    flags=flags,
+                    reasoning_trace=reasoning_trace,
+                    relationship_impact=relationship_impact,
+                    tracker=tracker,
+                )
             except Exception:
                 pass
 
@@ -4988,7 +5219,11 @@ class EthicsEngine:
         )
 
     def _action_has_override_intent(self, action_lower: str) -> bool:
-        """True when the action risks overriding a stated limit (not mere mention)."""
+        """True when the action risks overriding a stated limit (not mere mention).
+
+        Requires multi-word / contextual phrases — bare ``override`` / ``ignore``
+        alone are too weak (Tier-1: no single short token equals override intent).
+        """
         return any(
             p in action_lower
             for p in (
@@ -4997,13 +5232,100 @@ class EthicsEngine:
                 "anyway",
                 "still bring",
                 "still reference",
-                "ignore",
-                "override",
+                "ignore their",
+                "ignore the boundary",
+                "ignore consent",
+                "override their",
+                "override his",
+                "override her",
+                "override the user",
+                "override a boundary",
+                "override consent",
                 "later for",
                 "reference it",
                 "referencing it",
                 "bring it up",
                 "bring this up",
+            )
+        )
+
+    # Short single-token indicators that are easy false positives without co-factors.
+    # Multi-word phrases and high-enablement Sanctity tokens are handled separately.
+    _SHORT_AMBIGUOUS_INDICATORS = frozenset(
+        {
+            "force",
+            "override",
+            "pretend",
+            "harm",
+            "attack",
+            "injury",
+            "death",
+            "poison",
+            "fatal",
+            "lethal",
+            "deadly",
+            "killing",
+            "assault",
+            "injure",
+            "endanger",
+        }
+    )
+    # Intents that may keep high weight even on short tokens (true enablement / hard paths).
+    _HIGH_STAKES_INTENTS = frozenset(
+        {
+            "harm_enablement",
+            "attachment_manufacturing",
+            "deception_manipulation",
+            "engagement_metrics",
+            "agency_override",
+            "diagnostic_framing",
+        }
+    )
+
+    def _indicator_specificity(self, indicator: str) -> float:
+        """0–1 distinctiveness score: multi-word / longer phrases rank higher.
+
+        Used to down-weight bare short tokens when intent is not high-stakes
+        enablement. Does not invent new matches — only modulates weight.
+        """
+        ind = (indicator or "").lower().strip()
+        if not ind:
+            return 0.0
+        if " " in ind:
+            n = len(ind.split())
+            return min(1.0, 0.55 + 0.14 * n + 0.01 * len(ind))
+        if len(ind) >= 14:
+            return 0.9
+        if len(ind) >= 10:
+            return 0.78
+        if len(ind) >= 7:
+            return 0.62
+        if len(ind) >= 5:
+            return 0.48
+        return 0.35
+
+    def _action_has_enablement_cofactor(self, action_lower: str) -> bool:
+        """True when action text shows help/how-to/cause enablement framing."""
+        return any(
+            p in action_lower
+            for p in (
+                "help them",
+                "help him",
+                "help her",
+                "instructions",
+                "step-by-step",
+                "step by step",
+                "how to",
+                "how they can",
+                "enable",
+                "facilitate",
+                "assist in",
+                "assist with",
+                "cause them",
+                "cause him",
+                "cause her",
+                "so they can harm",
+                "so that they",
             )
         )
 
@@ -5017,17 +5339,20 @@ class EthicsEngine:
         """Map one textbook indicator hit to intent / severity / weight.
 
         Indicators stay the ontology textbook; interpretation supplies context
-        so equal substring presence is not equal ethical weight.
+        so equal substring presence is not equal ethical weight. Short / generic
+        tokens are down-weighted unless co-factors or high-stakes intent apply.
         """
         ind = (indicator or "").lower().strip()
         protective = self._action_has_protective_framing(action_lower)
         override_intent = self._action_has_override_intent(action_lower)
         coercion = self._assess_engagement_coercion_factors(action_lower)
+        enablement_co = self._action_has_enablement_cofactor(action_lower)
+        specificity = self._indicator_specificity(ind)
 
         intent = "generic"
         severity = "medium"
         polarity = "violation"
-        weight = 0.45
+        weight = 0.32  # generic default below effective threshold without co-factors
         note = ""
 
         # --- Sanctity of Life ---
@@ -5050,6 +5375,17 @@ class EthicsEngine:
             elif any(e in ind for e in enable_med):
                 intent, severity, weight = "harm_enablement", "high", 0.85
                 note = "serious harm enablement language"
+                # Short med tokens need enablement co-factor or stay slightly softer
+                if ind in self._SHORT_AMBIGUOUS_INDICATORS and not enablement_co and not override_intent:
+                    if not any(
+                        p in action_lower
+                        for p in ("cause", "inflict", "violent", "weapon", "attack them")
+                    ):
+                        severity, weight = "medium", 0.62
+                        note = (
+                            "short harm token without clear enablement co-factor — "
+                            "medium weight (not absolute alone)"
+                        )
             elif any(e in ind for e in ref_only) or ind in ref_only:
                 # Bare "harm"/"death" often appears in prevention or quoting
                 if protective or any(
@@ -5066,9 +5402,18 @@ class EthicsEngine:
                         0.15,
                     )
                     note = "harm term in protective / safety-check framing — low weight"
-                elif any(
+                elif enablement_co or any(
                     p in action_lower
-                    for p in ("help", "instructions", "how to", "method", "enable", "cause")
+                    for p in (
+                        "help them harm",
+                        "instructions",
+                        "how to",
+                        "method",
+                        "enable",
+                        "cause",
+                        "step-by-step",
+                        "step by step",
+                    )
                 ):
                     intent, severity, weight = "harm_enablement", "high", 0.8
                     note = "harm term with enablement framing"
@@ -5077,11 +5422,19 @@ class EthicsEngine:
                         "harm_reference",
                         "medium",
                         "ambiguous",
-                        0.45,
+                        0.30,
                     )
-                    note = "harm-related term without clear enablement polarity"
+                    note = (
+                        "harm-related term without clear enablement polarity — "
+                        "below effective threshold alone"
+                    )
             else:
-                intent, severity, weight = "harm_related", "medium", 0.55
+                intent, severity, weight = "harm_related", "medium", 0.50
+                if specificity < 0.5:
+                    weight = 0.38
+                    note = "short/generic harm-related token — reduced without co-factor"
+                else:
+                    note = "harm-related textbook match"
 
         # --- Relationship health ---
         elif principle_id == "relationship_health_user_wellbeing":
@@ -5201,6 +5554,43 @@ class EthicsEngine:
             ):
                 intent, severity, weight = "consent_boundary_pressure", "high", 0.85
                 note = "consent / force / override pressure"
+                # Bare short "force"/"override" without *relational* override co-factor
+                # → not high alone (avoids "override the default font", "force of habit").
+                if ind in ("force", "override"):
+                    relational_co = any(
+                        p in action_lower
+                        for p in (
+                            "force them",
+                            "force him",
+                            "force her",
+                            "force the user",
+                            "forced them",
+                            "override their",
+                            "override his",
+                            "override her",
+                            "override the user",
+                            "override a boundary",
+                            "override consent",
+                            "against their will",
+                            "against their wishes",
+                            "against their boundary",
+                            "ignore their",
+                            "despite their",
+                            "despite the user",
+                            "for their own good",
+                        )
+                    )
+                    if not relational_co and not override_intent:
+                        intent, severity, polarity, weight = (
+                            "relationship_generic",
+                            "low",
+                            "ambiguous",
+                            0.28,
+                        )
+                        note = (
+                            "bare short consent token without relational override "
+                            "co-factor — low weight (not raw keyword refuse)"
+                        )
             elif any(
                 k in ind
                 for k in (
@@ -5286,8 +5676,14 @@ class EthicsEngine:
                 intent, severity, weight = "extractive_pressure", "medium", 0.6
                 note = "extractive / oversharing pressure"
             else:
-                intent, severity, weight = "relationship_generic", "medium", 0.45
-                note = "generic RH textbook match"
+                # Generic RH hit: below effective threshold unless multi-channel promotes
+                intent, severity, polarity, weight = (
+                    "relationship_generic",
+                    "low",
+                    "ambiguous",
+                    0.28,
+                )
+                note = "generic RH textbook match — low weight without co-factors"
 
             # Protective framing: quoting a boundary while respecting it
             if protective and not override_intent and intent in (
@@ -5331,7 +5727,13 @@ class EthicsEngine:
                 intent, severity, weight = "agency_judgment", "medium", 0.5
                 note = "normative they-shouldn't judgment"
             else:
-                intent, severity, weight = "agency_generic", "medium", 0.45
+                intent, severity, polarity, weight = (
+                    "agency_generic",
+                    "low",
+                    "ambiguous",
+                    0.28,
+                )
+                note = "generic agency textbook match — low weight without co-factors"
 
         # --- Needs-based / non-pathologizing ---
         elif principle_id == "needs_based_support":
@@ -5352,10 +5754,31 @@ class EthicsEngine:
                 intent, severity, weight = "diagnostic_framing", "high", 0.8
                 note = "diagnostic / pathologizing framing"
             elif "mental health" in ind or "you need therapy" in ind:
-                intent, severity, weight = "clinical_suggestion", "medium", 0.55
-                note = "clinical-adjacent language"
+                # Lone "mental health" mention is common and non-diagnostic
+                if "you need therapy" in ind or any(
+                    p in action_lower
+                    for p in (
+                        "diagnos",
+                        "disorder",
+                        "you seem",
+                        "you are showing",
+                        "clinically",
+                        "symptoms",
+                    )
+                ):
+                    intent, severity, weight = "clinical_suggestion", "medium", 0.55
+                    note = "clinical-adjacent language with diagnostic co-factor"
+                else:
+                    intent, severity, polarity, weight = (
+                        "clinical_suggestion",
+                        "low",
+                        "ambiguous",
+                        0.30,
+                    )
+                    note = "lone clinical-adjacent mention — low weight alone"
             else:
-                intent, severity, weight = "support_generic", "low", 0.35
+                intent, severity, weight = "support_generic", "low", 0.28
+                note = "generic support textbook match — low weight"
 
         # --- Truth / self-audit ---
         elif principle_id == "truth_seeking_honest_self_assessment":
@@ -5368,6 +5791,30 @@ class EthicsEngine:
             intent, severity, weight = "opacity_pressure", "medium", 0.6
             note = "pressure to hide reasoning"
 
+        # --- Cross-principle: specificity dampening for non-high-stakes intents ---
+        # Short / low-specificity tokens should not dominate non-hard decisions.
+        # High-stakes intents (enablement, deception, attachment manufacturing, …)
+        # and already-protective / already-low weights are left alone.
+        if (
+            polarity != "protective"
+            and intent not in self._HIGH_STAKES_INTENTS
+            and severity != "high"
+            and weight >= 0.35
+            and specificity < 0.55
+        ):
+            damp = 0.50 + 0.50 * specificity  # ~0.67–0.77 for short tokens
+            new_w = round(weight * damp, 3)
+            if new_w < weight:
+                weight = new_w
+                note = (
+                    (note + "; " if note else "")
+                    + f"specificity dampen (spec={specificity:.2f}) for non-high-stakes signal"
+                )
+                if weight < 0.35:
+                    severity = "low"
+                    if polarity == "violation":
+                        polarity = "ambiguous"
+
         return {
             "indicator": indicator,
             "principle_id": principle_id,
@@ -5375,8 +5822,107 @@ class EthicsEngine:
             "severity": severity,
             "polarity": polarity,
             "weight": round(float(weight), 3),
+            "specificity": round(float(specificity), 3),
             "note": note,
         }
+
+    def _modulate_signals_with_context(
+        self,
+        signals: list[dict[str, Any]],
+        *,
+        rh_flags: list[str] | None = None,
+        rh_texture: dict[str, Any] | None = None,
+        history_evidence: dict[str, Any] | None = None,
+        concept_patterns: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Promote borderline low-weight signals when multi-channel context agrees.
+
+        Weak / generic keyword hits stay weak alone. When bond degradation,
+        history intent patterns, or advisory concept patterns corroborate,
+        borderline signals (weight in ~0.25–0.45, non-protective) can be
+        lifted into the effective band — *context* supplies the missing weight,
+        not raw keyword presence.
+
+        Never boosts protective polarity. Never invents Sanctity outcomes.
+        Returns (possibly updated signals, modulation notes for the trace).
+        """
+        notes: list[str] = []
+        if not signals:
+            return signals, notes
+
+        rh_deg = self._rh_degradation_score(list(rh_flags or []), dict(rh_texture or {}))
+        hist = history_evidence if isinstance(history_evidence, dict) else {}
+        hist_support = float(hist.get("support_score") or 0.0) if hist.get("relevant") else 0.0
+        hist_intent = hist.get("intent_patterns") if isinstance(hist.get("intent_patterns"), dict) else {}
+        hist_pattern = float(hist_intent.get("pattern_strength") or 0.0)
+        concept_boost = 0.0
+        for cp in concept_patterns or []:
+            if not isinstance(cp, dict):
+                continue
+            cid = str(cp.get("id") or "")
+            strength = float(cp.get("strength") or cp.get("score") or 0.0)
+            if cid in (
+                "escalating_dependency",
+                "boundary_testing_loop",
+                "attachment_pressure",
+            ) and strength >= 0.35:
+                concept_boost = max(concept_boost, min(0.2, strength * 0.25))
+
+        # How much multi-channel context is willing to promote weak text
+        ctx_strength = 0.0
+        if rh_deg >= 1.0:
+            ctx_strength = max(ctx_strength, 0.18)
+        elif rh_deg >= 0.5:
+            ctx_strength = max(ctx_strength, 0.10)
+        if hist_pattern >= 0.40:
+            ctx_strength = max(ctx_strength, 0.16)
+        elif hist_support >= 0.45:
+            ctx_strength = max(ctx_strength, 0.12)
+        if concept_boost > 0:
+            ctx_strength = max(ctx_strength, concept_boost)
+
+        if ctx_strength < 0.08:
+            return signals, notes
+
+        out: list[dict[str, Any]] = []
+        promoted = 0
+        for s in signals:
+            s2 = dict(s)
+            w = float(s2.get("weight") or 0)
+            pol = s2.get("polarity")
+            intent = str(s2.get("intent_class") or "")
+            # Only borderline non-protective signals; never touch already-high
+            if (
+                pol != "protective"
+                and 0.24 <= w < 0.45
+                and intent
+                not in (
+                    "harm_reference_protective",
+                    "support_generic",
+                    "generic",
+                )
+            ):
+                new_w = min(0.58, w + ctx_strength)
+                if new_w >= 0.35 and new_w > w:
+                    s2["weight"] = round(new_w, 3)
+                    s2["severity"] = "medium" if new_w < 0.70 else s2.get("severity")
+                    if s2.get("polarity") == "ambiguous":
+                        s2["polarity"] = "violation"
+                    s2["note"] = (
+                        str(s2.get("note") or "")
+                        + f"; context-promoted +{ctx_strength:.2f} "
+                        f"(RH/history/concepts — not raw keyword alone)"
+                    ).strip("; ")
+                    s2["context_promoted"] = True
+                    promoted += 1
+            out.append(s2)
+        if promoted:
+            notes.append(
+                f"Context modulation: promoted {promoted} borderline signal(s) "
+                f"(ctx_strength={ctx_strength:.2f}, rh_deg={rh_deg:.1f}, "
+                f"hist_pattern={hist_pattern:.2f}) — multi-channel, not keyword count."
+            )
+        return out, notes
 
     def _interpret_ontology_signals(
         self,
@@ -5384,12 +5930,21 @@ class EthicsEngine:
         principle_id: str,
         matches: list[str],
         action_lower: str,
+        rh_flags: list[str] | None = None,
+        rh_texture: dict[str, Any] | None = None,
+        history_evidence: dict[str, Any] | None = None,
+        concept_patterns: list[dict[str, Any]] | None = None,
+        apply_context_modulation: bool = False,
     ) -> dict[str, Any]:
         """Contextual interpretation of textbook indicator hits for one principle.
 
         Returns structured signals plus effective (decision-relevant) matches.
         Matches with weight < 0.35 are kept for audit but excluded from
         effective decision weight — reducing single raw keyword dependence.
+
+        When ``apply_context_modulation`` is True, borderline low-weight hits
+        may be promoted by RH / history / concept corroboration (never by
+        keyword count alone). Hard Sanctity paths should leave this False.
         """
         signals = [
             self._interpret_single_indicator(
@@ -5399,7 +5954,20 @@ class EthicsEngine:
             )
             for m in (matches or [])
         ]
-        effective = [s for s in signals if s["weight"] >= 0.35 and s["polarity"] != "protective"]
+        modulation_notes: list[str] = []
+        if apply_context_modulation and principle_id != "sanctity_of_life":
+            signals, modulation_notes = self._modulate_signals_with_context(
+                signals,
+                rh_flags=rh_flags,
+                rh_texture=rh_texture,
+                history_evidence=history_evidence,
+                concept_patterns=concept_patterns,
+            )
+        effective = [
+            s
+            for s in signals
+            if s["weight"] >= 0.35 and s["polarity"] != "protective"
+        ]
         discarded = [s for s in signals if s not in effective]
         weight_sum = sum(float(s["weight"]) for s in effective)
         # High-severity violation signals for absolute / strong paths
@@ -5423,7 +5991,9 @@ class EthicsEngine:
             "high_violation_signals": high_violation,
             "has_high_violation": bool(high_violation),
             "intent_classes": intent_classes,
-            "all_protective": bool(signals) and all(s["polarity"] == "protective" for s in signals),
+            "all_protective": bool(signals)
+            and all(s["polarity"] == "protective" for s in signals),
+            "modulation_notes": modulation_notes,
         }
 
     def _interpretation_decision_metrics(
@@ -5731,13 +6301,20 @@ class EthicsEngine:
                 "interpretation": interp,
             }
 
-        # Fallback: string-class markers on already-matched indicators (no action context)
+        # Fallback: string-class markers on already-matched indicators (no action context).
+        # Prefer distinctive multi-word / high-signal phrases; do not let raw match
+        # *count* drive text_score (weak single-token hits stay weak).
         strong_markers = (
-            "override", "ignore", "force", "manipulate", "deceive", "gaslight",
-            "metrics", "prolong", "engagement", "retention", "dependency", "attached",
-            "for their own good", "consent", "exploit", "keep them", "decide for them",
-            "ignore consent", "keep them from", "they shouldn't", "better if they don't",
-            "kill", "cause death", "lethal",
+            "for their own good", "ignore consent", "decide for them",
+            "keep them from", "they shouldn't", "better if they don't",
+            "manipulate", "deceive", "gaslight", "exploit trust",
+            "relationship metrics", "for retention", "emotional dependency",
+            "make them attached", "cause death", "assist in suicide",
+            "lethal", "deadly force",
+        )
+        medium_markers = (
+            "metrics", "prolong", "engagement", "retention", "dependency",
+            "attached", "override their", "force them",
         )
         strong_matches = []
         weak_matches = []
@@ -5745,23 +6322,31 @@ class EthicsEngine:
             m_lower = str(m).lower()
             if any(kw in m_lower for kw in strong_markers):
                 strong_matches.append(m)
+            elif any(kw in m_lower for kw in medium_markers) and len(m_lower) >= 6:
+                # Medium distinctiveness — count as weak for score, not strong alone
+                weak_matches.append(m)
             else:
                 weak_matches.append(m)
-        total = len(evidence_matches or [])
+        # Weight-led fallback score: strong phrases dominate; raw count is capped
         text_score = min(
             1.0,
-            0.22 * total + 0.18 * len(strong_matches) + 0.06 * len(weak_matches),
+            0.40 * min(2, len(strong_matches))
+            + 0.12 * min(2, len(weak_matches))
+            + (0.08 if strong_matches else 0.0),
         )
+        max_w = 0.75 if strong_matches else (0.32 if weak_matches else 0.0)
         return {
-            "total": total,
-            "raw_total": total,
+            "total": len(strong_matches) + len(weak_matches),
+            "raw_total": len(evidence_matches or []),
             "strong_matches": strong_matches,
             "weak_matches": weak_matches,
             "strong_count": len(strong_matches),
             "weak_count": len(weak_matches),
             "text_score": round(text_score, 3),
-            "effective_weight_sum": text_score,
-            "max_weight": 0.75 if strong_matches else (0.4 if weak_matches else 0.0),
+            "effective_weight_sum": round(
+                0.75 * len(strong_matches) + 0.28 * len(weak_matches), 3
+            ),
+            "max_weight": max_w,
             "has_high_violation": bool(strong_matches),
             "intent_classes": [],
             "interpretation": None,
@@ -7840,12 +8425,14 @@ class EthicsEngine:
             return True
 
         # Ontology-driven: check RH principle indicators that encode paternalism
+        from core.ontology import indicator_matches_text
+
         rh = self._ontology.get_principle("relationship_health_user_wellbeing")
         if rh:
             for ind in rh.violation_indicators:
                 ind_l = ind.lower()
                 if any(k in ind_l for k in ("own good", "happier if", "better for them")):
-                    if ind_l in action_lower:
+                    if indicator_matches_text(action_lower, ind_l):
                         return True
 
         # Minimal fallback (3 phrases) for edge cases not yet in evidence_matches

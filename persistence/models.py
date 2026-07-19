@@ -20,6 +20,83 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def compact_observation_candidates_snapshot(
+    cand_bag: dict[str, Any] | None,
+    *,
+    interaction_count: int | None = None,
+    max_candidates: int = 3,
+) -> dict[str, Any]:
+    """Build a compact, privacy-safe durable observation-candidate snapshot.
+
+    Stores at most ``max_candidates`` short seeds (id, description, evidence_refs,
+    priority, source, linked levels). Always forces_speech/question False.
+    Never stores dialogue templates or forced questions.
+    """
+    bag = cand_bag if isinstance(cand_bag, dict) else {}
+    raw_list = bag.get("candidates")
+    if raw_list is None and isinstance(bag.get("observation_candidates"), list):
+        raw_list = bag.get("observation_candidates")
+    if not isinstance(raw_list, list):
+        raw_list = []
+    gate = bag.get("gate") if isinstance(bag.get("gate"), dict) else {}
+    compact_cands: list[dict[str, Any]] = []
+    for c in raw_list[: max(0, int(max_candidates))]:
+        if not isinstance(c, dict):
+            continue
+        compact_cands.append(
+            {
+                "id": str(c.get("id") or "unknown")[:64],
+                "description": str(c.get("description") or "")[:200],
+                "evidence_refs": [
+                    str(x)[:80] for x in (c.get("evidence_refs") or [])
+                ][:6],
+                "priority": max(0.0, min(1.0, float(c.get("priority") or 0.0))),
+                "source": str(c.get("source") or "unknown")[:48],
+                "readiness_level": str(c.get("readiness_level") or "low")[:32],
+                "confidence_level": str(c.get("confidence_level") or "low")[:32],
+                "joint_stance": str(c.get("joint_stance") or "")[:64],
+                "forces_speech": False,
+                "forces_question": False,
+            }
+        )
+    joint_stance = str(
+        bag.get("joint_stance")
+        or gate.get("joint_stance")
+        or (compact_cands[0].get("joint_stance") if compact_cands else "stay_quiet")
+        or "stay_quiet"
+    )[:64]
+    out: dict[str, Any] = {
+        "candidates": compact_cands,
+        "count": len(compact_cands),
+        "joint_stance": joint_stance,
+        "joint_score": float(
+            bag.get("joint_score")
+            if bag.get("joint_score") is not None
+            else gate.get("joint_score") or 0.0
+        ),
+        "gate_reason": str(gate.get("reason") or bag.get("gate_reason") or "")[:200],
+        "allowed_max": int(
+            gate.get("allowed_max")
+            if gate.get("allowed_max") is not None
+            else bag.get("allowed_max")
+            if bag.get("allowed_max") is not None
+            else len(compact_cands)
+        ),
+        "assessed_at": str(bag.get("assessed_at") or _utc_now_iso()),
+        "forces_speech": False,
+        "forces_question": False,
+        "schema_version": 1,
+    }
+    if interaction_count is not None:
+        out["interaction_count"] = int(interaction_count)
+    elif bag.get("interaction_count") is not None:
+        try:
+            out["interaction_count"] = int(bag.get("interaction_count"))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def compact_careful_truth_telling_snapshot(
     joint: dict[str, Any] | None,
     *,
@@ -147,6 +224,10 @@ class BondStateRecord:
 
     ``careful_truth_telling`` is the latest joint readiness × confidence
     snapshot (advisory only — never forces speech). Compact fields only.
+
+    ``observation_candidates_snapshot`` is the latest compact set of careful
+    observation seeds (0–3) the system has already considered — durable across
+    sessions, never forces speech/questions.
     """
 
     user_id: str
@@ -168,7 +249,9 @@ class BondStateRecord:
     curious_companion: dict[str, Any] = field(default_factory=dict)
     # Careful Truth-Telling joint snapshot (readiness × confidence)
     careful_truth_telling: dict[str, Any] = field(default_factory=dict)
-    schema_version: int = 3
+    # Latest observation-candidate seeds (compact, advisory, non-speaking)
+    observation_candidates_snapshot: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = 4
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -207,6 +290,14 @@ class BondStateRecord:
                         "score": self.careful_truth_telling.get("confidence_score"),
                     },
                 )
+        if self.observation_candidates_snapshot:
+            ctx["observation_candidates_durable"] = dict(
+                self.observation_candidates_snapshot
+            )
+            # Convenience: candidate list only (clearly durable, not live)
+            cands = self.observation_candidates_snapshot.get("candidates")
+            if isinstance(cands, list):
+                ctx["observation_candidates_durable_list"] = list(cands)
         return ctx
 
     @classmethod
@@ -226,6 +317,9 @@ class BondStateRecord:
         ctt = data.get("careful_truth_telling")
         if not isinstance(ctt, dict):
             ctt = {}
+        ocs = data.get("observation_candidates_snapshot")
+        if not isinstance(ocs, dict):
+            ocs = {}
         return cls(
             user_id=str(data.get("user_id") or user_id or "default"),
             bond_texture={k: float(v) for k, v in texture_raw.items()},
@@ -236,7 +330,8 @@ class BondStateRecord:
             last_updated=str(data.get("last_updated") or _utc_now_iso()),
             curious_companion=dict(cc),
             careful_truth_telling=dict(ctt),
-            schema_version=int(data.get("schema_version", 3)),
+            observation_candidates_snapshot=dict(ocs),
+            schema_version=int(data.get("schema_version", 4)),
         )
 
     def set_careful_truth_telling(
@@ -248,6 +343,20 @@ class BondStateRecord:
         self.careful_truth_telling = compact_careful_truth_telling_snapshot(snapshot)
         self.last_updated = str(
             self.careful_truth_telling.get("assessed_at") or _utc_now_iso()
+        )
+        return self
+
+    def set_observation_candidates_snapshot(
+        self, cand_bag: dict[str, Any] | None
+    ) -> "BondStateRecord":
+        """Replace durable observation-candidate snapshot (compact, non-speaking)."""
+        if not cand_bag or not isinstance(cand_bag, dict):
+            return self
+        self.observation_candidates_snapshot = compact_observation_candidates_snapshot(
+            cand_bag, interaction_count=self.interaction_count
+        )
+        self.last_updated = str(
+            self.observation_candidates_snapshot.get("assessed_at") or _utc_now_iso()
         )
         return self
 
@@ -426,6 +535,25 @@ class DecisionLogRecord:
                 ctt = compact_careful_truth_telling_snapshot(joint)
         if isinstance(ctt, dict) and ctt:
             snap["careful_truth_telling"] = compact_careful_truth_telling_snapshot(ctt)
+        # Observation candidates (prefer durable snapshot; else live list bag)
+        ocs = impact.get("observation_candidates_durable")
+        if not isinstance(ocs, dict) or not ocs:
+            live = impact.get("observation_candidates")
+            meta = impact.get("observation_candidates_meta")
+            if isinstance(live, list) and live:
+                ocs = compact_observation_candidates_snapshot(
+                    {
+                        "candidates": live,
+                        "gate": meta.get("gate")
+                        if isinstance(meta, dict)
+                        else {},
+                        "count": len(live),
+                    }
+                )
+        if isinstance(ocs, dict) and ocs:
+            snap["observation_candidates"] = compact_observation_candidates_snapshot(
+                ocs
+            )
         return {k: v for k, v in snap.items() if v is not None and v != {} and v != []}
 
 

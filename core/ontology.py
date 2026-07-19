@@ -25,9 +25,75 @@ Current version: 0.2 (initial ontology-driven release)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+
+def indicator_matches_text(text_lower: str, indicator: str) -> bool:
+    """True when a textbook indicator is present as a *meaningful* unit in text.
+
+    Tier-1 signal quality (v0.2+): multi-word phrases still use substring
+    presence (they are distinctive). Single-token indicators require a
+    token-start boundary so short strings do not fire inside unrelated words
+    (e.g. ``kill`` inside ``skill``, ``force`` inside ``reinforce``).
+
+    This is still a symbolic textbook scan — EthicsEngine must interpret
+    polarity / severity / weight. Hard Sanctity paths remain reliable because
+    real enablement phrases match at token boundaries.
+    """
+    text = (text_lower or "").lower()
+    ind = (indicator or "").lower().strip()
+    if not text or not ind:
+        return False
+    # Multi-word / spaced phrases: distinctive enough as substrings
+    if " " in ind or "-" in ind:
+        return ind in text
+    # Single token: must begin at a non-alnum boundary (allows stems like
+    # ``patholog`` → pathologizing, blocks ``kill`` ⊂ skill).
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(ind)}", text))
+
+
+def prefer_specific_indicator_matches(matches: list[str]) -> list[str]:
+    """Drop short indicators that are fully contained in a longer matched phrase.
+
+    Example: if both ``death`` and ``cause death`` matched, keep both for audit
+    only when the short form is *not* a pure substring of a longer match —
+    actually keep the longer and drop the short contained form so decision bags
+    are not double-counted from one phrase.
+    """
+    if not matches:
+        return []
+    # Stable unique, longest-first for containment checks
+    uniq: list[str] = []
+    for m in matches:
+        s = str(m).strip()
+        if s and s not in uniq:
+            uniq.append(s)
+    if len(uniq) <= 1:
+        return uniq
+    ordered = sorted(uniq, key=lambda x: (-len(x), x))
+    kept: list[str] = []
+    for m in ordered:
+        m_l = m.lower()
+        # Drop if a strictly longer kept match already contains this as a phrase unit
+        subsumed = False
+        for k in kept:
+            k_l = k.lower()
+            if m_l == k_l:
+                subsumed = True
+                break
+            if len(k_l) > len(m_l) and m_l in k_l:
+                # Require token-ish containment (not accidental letter overlap)
+                if re.search(rf"(?<![a-z0-9]){re.escape(m_l)}(?![a-z0-9])", k_l) or m_l in k_l:
+                    subsumed = True
+                    break
+        if not subsumed:
+            kept.append(m)
+    # Restore original order for trace stability
+    kept_set = set(kept)
+    return [m for m in uniq if m in kept_set]
 
 
 @dataclass(frozen=True)
@@ -119,10 +185,21 @@ class EthicalOntology:
         violation polarity — so a single raw substring does not equal REFUSE.
         Hard overrides still consult these indicators first, then may refine
         via harm-prevention / protective-context interpretation in the engine.
+
+        Match quality (Tier 1):
+          - Single-token indicators use token-start boundaries (not raw ``in``).
+          - Short matches fully contained in a longer matched phrase are dropped
+            so one phrase does not inflate the evidence bag.
         """
+        text = (text_lower or "").lower()
         violations: list[tuple[EthicalPrinciple, list[str]]] = []
         for principle in self.get_ordered_principles():
-            matches = [ind for ind in principle.violation_indicators if ind in text_lower]
+            raw = [
+                ind
+                for ind in principle.violation_indicators
+                if indicator_matches_text(text, ind)
+            ]
+            matches = prefer_specific_indicator_matches(raw)
             if matches:
                 violations.append((principle, matches))
         return violations
@@ -131,11 +208,17 @@ class EthicalOntology:
         """Return principles that would trigger honest self-audit for this text.
 
         Still indicator-based (textbook); the engine may combine with an explicit
-        ``is_self_query`` context flag for higher confidence.
+        ``is_self_query`` context flag for higher confidence. Uses the same
+        boundary-aware match as ``find_violations``.
         """
+        text = (text_lower or "").lower()
         return [
-            p for p in self.principles
-            if p.triggers_self_audit and any(ind in text_lower for ind in p.violation_indicators)
+            p
+            for p in self.principles
+            if p.triggers_self_audit
+            and any(
+                indicator_matches_text(text, ind) for ind in p.violation_indicators
+            )
         ]
 
 
