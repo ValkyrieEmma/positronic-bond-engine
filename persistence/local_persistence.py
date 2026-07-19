@@ -54,7 +54,8 @@ Layout (all paths scoped to users/<user_id>/)
   baseline.json          — PerUserBaseline (communication style)
   bond_state.json        — RelationshipHealth living bond model
                            (texture, health_flags, soft pattern counters,
-                            curious_companion, careful_truth_telling joint)
+                            curious_companion, careful_truth_telling joint,
+                            observation_candidates_snapshot)
   settings.json          — user controls (memory, exploratory prefs, …)
   decision_logs.jsonl    — EthicsEngine audit lines + evidence_snapshot
   interactions.jsonl     — InteractionMemoryStore episodic feed
@@ -138,6 +139,12 @@ class LocalPersistence:
     ) -> BondStateRecord:
         """Persist compact joint readiness×confidence on bond_state.json."""
         return self.bonds.update_careful_truth_telling(user_id, snapshot)
+
+    def update_bond_observation_candidates(
+        self, user_id: str, cand_bag: dict[str, Any]
+    ) -> BondStateRecord:
+        """Persist compact observation-candidate snapshot on bond_state.json."""
+        return self.bonds.update_observation_candidates(user_id, cand_bag)
 
     # ------------------------------------------------------------------
     # Decision logs (EthicsEngine ownership)

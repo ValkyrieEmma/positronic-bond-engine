@@ -544,6 +544,146 @@ def main() -> int:
             == uid_ctt,
         )
 
+        # ------------------------------------------------------------------
+        section("10. Observation candidates durable snapshot")
+        # ------------------------------------------------------------------
+        from persistence.models import compact_observation_candidates_snapshot
+
+        uid_obs = "obs_durable_user"
+        rh_obs = RelationshipHealth(persistence=store, user_id=uid_obs)
+        for _ in range(3):
+            rh_obs.update_bond(
+                {
+                    "type": "supportive",
+                    "impact": 0.25,
+                    "boundary_respected": True,
+                    "consent_respected": True,
+                }
+            )
+        rh_obs.update_curious_companion_snapshot(
+            {
+                "open_topic_names": ["gardening"],
+                "last_gap_score": 0.5,
+                "topic_continuity": {"active": True, "strength": 0.55},
+            }
+        )
+        live_bag = rh_obs.generate_observation_candidates()
+        durable = rh_obs.update_observation_candidates_snapshot(
+            {
+                **live_bag,
+                "joint_stance": (live_bag.get("gate") or {}).get("joint_stance")
+                or "wait",
+            }
+        )
+        check(
+            "durable obs snapshot has count + forces false",
+            isinstance(durable, dict)
+            and durable.get("forces_speech") is False
+            and durable.get("forces_question") is False
+            and int(durable.get("count") or 0) <= 3,
+            str(durable)[:200],
+        )
+        check(
+            "durable candidates list capped",
+            len(durable.get("candidates") or []) <= 3,
+        )
+        # Reload across sessions
+        rh_obs2 = RelationshipHealth(persistence=store, user_id=uid_obs)
+        check(
+            "observation_candidates_snapshot survives reload",
+            isinstance(rh_obs2.state.observation_candidates_snapshot, dict)
+            and rh_obs2.state.observation_candidates_snapshot.get("count")
+            == durable.get("count"),
+            str(rh_obs2.state.observation_candidates_snapshot)[:200],
+        )
+        ctx_obs = rh_obs2.as_context()
+        check(
+            "as_context has live observation_candidates",
+            isinstance(ctx_obs.get("observation_candidates"), list)
+            or isinstance(ctx_obs.get("observation_candidates_live"), list),
+        )
+        check(
+            "as_context has observation_candidates_durable",
+            isinstance(ctx_obs.get("observation_candidates_durable"), dict),
+            str(ctx_obs.get("observation_candidates_durable"))[:160],
+        )
+        check(
+            "live vs durable keys are distinct",
+            "observation_candidates" in ctx_obs
+            and "observation_candidates_durable" in ctx_obs,
+        )
+        rec_obs = store.load_bond_state(uid_obs)
+        check(
+            "BondStateRecord schema_version >= 4",
+            int(getattr(rec_obs, "schema_version", 0) or 0) >= 4,
+            str(getattr(rec_obs, "schema_version", None)),
+        )
+        eth = rec_obs.as_ethics_context()
+        check(
+            "as_ethics_context includes durable observation candidates",
+            "observation_candidates_durable" in eth,
+            str(list(eth.keys())),
+        )
+        # Store-level update path
+        store_rec = store.update_bond_observation_candidates(
+            uid_obs,
+            {
+                "candidates": [
+                    {
+                        "id": "gap_topic:gardening",
+                        "description": "Open topic gardening may still be unfinished.",
+                        "evidence_refs": ["open_topic:gardening"],
+                        "priority": 0.7,
+                        "source": "understanding_gap",
+                        "forces_speech": True,  # must be forced False on disk
+                        "forces_question": True,
+                    }
+                ],
+                "count": 1,
+                "joint_stance": "careful_observation_ok",
+                "joint_score": 0.6,
+            },
+        )
+        check(
+            "store path forces_speech False on disk",
+            store_rec.observation_candidates_snapshot.get("forces_speech") is False
+            and all(
+                c.get("forces_speech") is False
+                for c in (
+                    store_rec.observation_candidates_snapshot.get("candidates") or []
+                )
+                if isinstance(c, dict)
+            ),
+            str(store_rec.observation_candidates_snapshot)[:200],
+        )
+        compact = compact_observation_candidates_snapshot(
+            {
+                "candidates": [
+                    {
+                        "id": "x",
+                        "description": "A" * 500,
+                        "evidence_refs": ["e1", "e2"],
+                        "priority": 0.5,
+                        "source": "bond_texture",
+                    }
+                ]
+                * 5,
+                "gate": {"joint_stance": "wait", "allowed_max": 1, "reason": "test"},
+            }
+        )
+        check(
+            "compact caps candidates at 3 and trims description",
+            compact.get("count") == 3
+            and len(compact.get("candidates") or []) == 3
+            and len((compact["candidates"][0].get("description") or "")) <= 200,
+            str(compact.get("count")),
+        )
+        check(
+            "update_bond_observation_candidates fails soft",
+            store.update_bond_observation_candidates(uid_obs, {"extra": 1}).user_id
+            == uid_obs,
+        )
+
         print()
         section("Summary")
         total = _passed + _failed

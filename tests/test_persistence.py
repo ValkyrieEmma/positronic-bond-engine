@@ -299,6 +299,87 @@ def main() -> int:
             str(ctt_ev),
         )
 
+        # 4d. Observation candidates durable snapshot
+        section("4d. Observation candidates durable on bond")
+        bond_obs = BondStateRecord(
+            user_id=user_id,
+            bond_texture=dict(bond.bond_texture),
+            health_flags=[],
+            interaction_count=3,
+            recent_patterns={"observation_candidates_assessed": 1},
+            summary="Obs candidates present.",
+            observation_candidates_snapshot={
+                "candidates": [
+                    {
+                        "id": "gap_topic:hobbies",
+                        "description": "Open hobbies thread.",
+                        "evidence_refs": ["open_topic:hobbies"],
+                        "priority": 0.6,
+                        "source": "understanding_gap",
+                        "forces_speech": True,
+                        "forces_question": True,
+                    }
+                ],
+                "count": 1,
+                "joint_stance": "wait",
+                "joint_score": 0.4,
+                "forces_speech": True,
+                "forces_question": True,
+            },
+        )
+        store.save_bond_state(bond_obs)
+        re_obs = store.load_bond_state(user_id)
+        check(
+            "observation_candidates_snapshot round-trip count",
+            re_obs.observation_candidates_snapshot.get("count") == 1,
+            str(re_obs.observation_candidates_snapshot),
+        )
+        check(
+            "observation candidates forces_speech False on disk",
+            re_obs.observation_candidates_snapshot.get("forces_speech") is False
+            and all(
+                c.get("forces_speech") is False
+                for c in (
+                    re_obs.observation_candidates_snapshot.get("candidates") or []
+                )
+                if isinstance(c, dict)
+            ),
+            str(re_obs.observation_candidates_snapshot),
+        )
+        updated_obs = store.update_bond_observation_candidates(
+            user_id,
+            {
+                "candidates": [
+                    {
+                        "id": "concept:healthy_co_evolution",
+                        "description": "Healthy co-evolution pattern noted.",
+                        "priority": 0.7,
+                        "source": "concept_pattern",
+                        "evidence_refs": ["concept_pattern:healthy_co_evolution"],
+                    }
+                ],
+                "joint_stance": "careful_observation_ok",
+                "joint_score": 0.65,
+            },
+        )
+        check(
+            "update_bond_observation_candidates replaces id",
+            any(
+                c.get("id") == "concept:healthy_co_evolution"
+                for c in (
+                    updated_obs.observation_candidates_snapshot.get("candidates")
+                    or []
+                )
+                if isinstance(c, dict)
+            ),
+            str(updated_obs.observation_candidates_snapshot),
+        )
+        check(
+            "as_ethics_context has durable observation candidates",
+            "observation_candidates_durable"
+            in updated_obs.as_ethics_context(),
+        )
+
         # 5. Privacy rule
         section("5. Privacy rule (sexual content)")
         # 5a — sexual content WITHOUT explicit user reference → redacted
