@@ -34,9 +34,21 @@ from .ontology import (
 from .per_user_baseline import DeviationReport, PerUserBaseline  # noqa: F401
 from .relationship_health import BondState, RelationshipHealth  # noqa: F401
 from .response_generator import GeneratedResponse, ResponseGenerator  # noqa: F401
+from .truth_confidence import (  # noqa: F401
+    TruthConfidence,
+    assess_truth_confidence,
+    combine_with_readiness,
+)
+from .truth_telling_readiness import (  # noqa: F401
+    TruthTellingReadiness,
+    assess_truth_telling_readiness,
+)
 
 __all__ = [
+    "assess_truth_confidence",
+    "assess_truth_telling_readiness",
     "BondState",
+    "combine_with_readiness",
     "DecisionLog",
     "DevelopmentPhaseContext",
     "DeviationReport",
@@ -56,4 +68,6 @@ __all__ = [
     "RelationshipHealth",
     "resolve_development_context",
     "ResponseGenerator",
+    "TruthConfidence",
+    "TruthTellingReadiness",
 ]

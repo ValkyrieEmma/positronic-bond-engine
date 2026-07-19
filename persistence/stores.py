@@ -6,6 +6,17 @@ Domain-specific local stores (one concern each).
 
 Each store knows only its file names and model types. The ``LocalPersistence``
 facade composes them; they do not call each other.
+
+Ownership (per user_id under users/<id>/)
+-----------------------------------------
+- BaselineStore → baseline.json (PerUserBaseline communication style)
+- BondStateStore → bond_state.json (RelationshipHealth living bond model)
+- DecisionLogStore → decision_logs.jsonl (EthicsEngine audit / provenance)
+- SettingsStore → settings.json (user controls)
+
+Episodic interaction transcripts are **not** here — see
+``core.interaction_memory.InteractionMemoryStore`` (interactions.jsonl).
+Stores share a data root and user_id only; they do not own each other's files.
 """
 
 from __future__ import annotations
@@ -48,7 +59,14 @@ class BaselineStore:
 
 
 class BondStateStore:
-    """Relationship health / bond texture JSON."""
+    """Relationship health / bond texture JSON (living relationship model).
+
+    Persists multi-dimensional texture, health flags, soft pattern counters
+    (including understanding-gap / open-topic markers), optional
+    ``curious_companion`` snapshot, and optional ``careful_truth_telling``
+    joint readiness×confidence snapshot. Failures are raised to the backend
+    only; RelationshipHealth wraps I/O in fail-soft handlers.
+    """
 
     FILENAME = "bond_state.json"
 
@@ -64,18 +82,63 @@ class BondStateStore:
         return BondStateRecord.from_dict(raw, user_id=user_id)
 
     def save(self, record: BondStateRecord) -> Path:
+        """Write full BondStateRecord (texture + patterns + CC + CTT)."""
         data = record.to_dict()
         data["summary"] = self._privacy.filter_text(str(data.get("summary") or ""))
+        # Soft free-text inside curious_companion (examples / topics are short labels)
+        if isinstance(data.get("curious_companion"), dict):
+            data["curious_companion"] = self._privacy.filter_mapping(
+                dict(data["curious_companion"])
+            )
+        if isinstance(data.get("careful_truth_telling"), dict):
+            data["careful_truth_telling"] = self._privacy.filter_mapping(
+                dict(data["careful_truth_telling"])
+            )
+            # Invariants on disk
+            data["careful_truth_telling"]["forces_speech"] = False
+            data["careful_truth_telling"]["forces_question"] = False
+        # Ensure recent_patterns keys are strings (open_topic:*, gap_topic:*, etc.)
+        pats = data.get("recent_patterns") or {}
+        data["recent_patterns"] = {str(k): int(v) for k, v in pats.items()}
         path = self._path(record.user_id)
         self._backend.write_json(path, data)
         return path
+
+    def update_curious_companion(
+        self, user_id: str, snapshot: dict[str, Any]
+    ) -> BondStateRecord:
+        """Load-merge-save curious_companion bag (gap/continuity co-evolution)."""
+        record = self.load(user_id)
+        record.merge_curious_companion(snapshot)
+        self.save(record)
+        return record
+
+    def update_careful_truth_telling(
+        self, user_id: str, snapshot: dict[str, Any]
+    ) -> BondStateRecord:
+        """Load-set-save careful_truth_telling joint snapshot for this user."""
+        from .models import compact_careful_truth_telling_snapshot
+
+        record = self.load(user_id)
+        record.set_careful_truth_telling(
+            compact_careful_truth_telling_snapshot(
+                snapshot, interaction_count=record.interaction_count
+            )
+        )
+        self.save(record)
+        return record
 
     def delete(self, user_id: str) -> bool:
         return self._backend.delete_path(self._path(user_id))
 
 
 class DecisionLogStore:
-    """Append-only decision log (JSONL) for auditability."""
+    """Append-only decision log (JSONL) for auditability and provenance.
+
+    Each line is a DecisionLogRecord scoped to users/<user_id>/. Optional
+    evidence_snapshot holds compact gap/continuity/flag provenance for later
+    retrospective correction — not full episodic history.
+    """
 
     FILENAME = "decision_logs.jsonl"
 
@@ -93,6 +156,10 @@ class DecisionLogStore:
             str(data.get("proposed_action") or "")
         )
         data["context"] = self._privacy.filter_mapping(dict(data.get("context") or {}))
+        if isinstance(data.get("evidence_snapshot"), dict):
+            data["evidence_snapshot"] = self._privacy.filter_mapping(
+                dict(data["evidence_snapshot"])
+            )
         path = self._path(record.user_id)
         self._backend.append_jsonl(path, data)
         if max_entries is not None and max_entries > 0:
@@ -102,6 +169,16 @@ class DecisionLogStore:
     def load(self, user_id: str, *, limit: int | None = None) -> list[DecisionLogRecord]:
         rows = self._backend.read_jsonl(self._path(user_id), limit=limit)
         return [DecisionLogRecord.from_dict(r) for r in rows]
+
+    def load_with_flag(
+        self, user_id: str, flag: str, *, limit: int | None = 50
+    ) -> list[DecisionLogRecord]:
+        """Load recent logs that include a given flag (provenance helper)."""
+        rows = self.load(user_id, limit=None)
+        matched = [r for r in rows if flag in (r.flags or [])]
+        if limit is not None and limit > 0:
+            return matched[-limit:]
+        return matched
 
     def delete(self, user_id: str) -> bool:
         return self._backend.delete_path(self._path(user_id))

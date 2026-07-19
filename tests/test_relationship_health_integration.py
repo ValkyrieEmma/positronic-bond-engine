@@ -391,6 +391,234 @@ def main() -> int:
             f"decision={s_rel.decision} flags={s_rel.flags}",
         )
 
+        # ------------------------------------------------------------------
+        # 6b. Multi-episode concept patterns (advisory only)
+        # ------------------------------------------------------------------
+        section("6b. Concept patterns (advisory multi-episode trajectories)")
+        rh_dep = RelationshipHealth(user_id="concept_dep")
+        for _ in range(3):
+            rh_dep.update_bond(
+                {"type": "emotional_dependency_signal", "impact": -0.4}
+            )
+            rh_dep.update_bond(
+                {
+                    "type": "boundary_violation",
+                    "boundary_respected": False,
+                    "impact": -0.35,
+                }
+            )
+        concepts = rh_dep.detect_concept_patterns()
+        ids = [c.get("id") for c in concepts]
+        check(
+            "escalating_dependency detected under dep trajectory",
+            "escalating_dependency" in ids,
+            str(ids),
+        )
+        check(
+            "concept patterns are not hard_override",
+            all(c.get("hard_override") is False for c in concepts),
+        )
+        check(
+            "as_context exposes concept_pattern_ids",
+            "escalating_dependency"
+            in (rh_dep.as_context().get("concept_pattern_ids") or []),
+        )
+        s_cp = engine.evaluate(
+            "Reply supportively without manufacturing attachment.",
+            relationship_health=rh_dep.as_context(),
+        )
+        check(
+            "engine notes concept_pattern_noted",
+            "concept_pattern_noted" in (s_cp.flags or []),
+            str(s_cp.flags),
+        )
+        check(
+            "concept patterns on relationship_impact",
+            bool((s_cp.relationship_impact or {}).get("concept_pattern_ids")),
+            str((s_cp.relationship_impact or {}).get("concept_pattern_ids")),
+        )
+        check(
+            "trace has Concept patterns header",
+            any("[Concept patterns]" in x for x in (s_cp.reasoning_trace or [])),
+        )
+        check(
+            "careful action not forced to hard_override by concept patterns",
+            "hard_override_violation" not in (s_cp.flags or []),
+        )
+        rh_h = RelationshipHealth(user_id="concept_healthy")
+        for _ in range(4):
+            rh_h.update_bond(
+                {
+                    "type": "boundary_respected",
+                    "boundary_respected": True,
+                    "impact": 0.2,
+                }
+            )
+            rh_h.update_bond({"type": "positive_interaction", "impact": 0.25})
+        h_ids = [c.get("id") for c in rh_h.detect_concept_patterns()]
+        check(
+            "healthy_co_evolution on solid trajectory",
+            "healthy_co_evolution" in h_ids,
+            str(h_ids),
+        )
+        print(f"  dep_ids={ids} healthy_ids={h_ids} eval_flags={s_cp.flags}")
+
+        # ------------------------------------------------------------------
+        # 6c. Careful Truth-Telling readiness (timing signal only)
+        # ------------------------------------------------------------------
+        section("6c. Truth-telling readiness (advisory timing)")
+        from core.truth_telling_readiness import (
+            TruthTellingReadiness,
+            assess_truth_telling_readiness,
+        )
+
+        ready_h = rh_h.assess_truth_telling_readiness(exploratory_enabled=True)
+        check(
+            "healthy bond readiness is a TruthTellingReadiness",
+            isinstance(ready_h, TruthTellingReadiness),
+        )
+        check(
+            "healthy readiness score higher than suppressed floor",
+            ready_h.score >= 0.35,
+            str(ready_h.to_dict()),
+        )
+        check("forces_speech always False", ready_h.forces_speech is False)
+        check("forces_question always False", ready_h.forces_question is False)
+        ready_dep = rh_dep.assess_truth_telling_readiness()
+        check(
+            "dependency trajectory readiness lower than healthy",
+            ready_dep.score <= ready_h.score,
+            f"dep={ready_dep.score} healthy={ready_h.score}",
+        )
+        suppressed = assess_truth_telling_readiness(
+            bond_texture=rh_h.state.bond_texture,
+            health_flags=[],
+            hard_path_active=True,
+        )
+        check(
+            "hard path suppresses readiness",
+            suppressed.level == "suppressed" and suppressed.score == 0.0,
+            str(suppressed.to_dict()),
+        )
+        disabled = rh_h.assess_truth_telling_readiness(exploratory_enabled=False)
+        check(
+            "user disable exploratory lowers/suppresses readiness",
+            disabled.level in ("suppressed", "low") or disabled.score < ready_h.score,
+            str(disabled.to_dict()),
+        )
+        s_ready = engine.evaluate(
+            "Wish them well with optional support.",
+            relationship_health=rh_h.as_context(),
+        )
+        check(
+            "engine notes truth_telling_readiness_noted",
+            "truth_telling_readiness_noted" in (s_ready.flags or []),
+            str(s_ready.flags),
+        )
+        tr = (s_ready.relationship_impact or {}).get("truth_telling_readiness") or {}
+        check(
+            "impact carries truth_telling_readiness bag",
+            bool(tr.get("level")) and tr.get("forces_speech") is False,
+            str(tr),
+        )
+        check(
+            "trace has Truth-telling readiness header",
+            any("[Truth-telling readiness]" in x for x in (s_ready.reasoning_trace or [])),
+        )
+        print(
+            f"  healthy_level={ready_h.level} score={ready_h.score} "
+            f"dep_score={ready_dep.score} eval_level={tr.get('level')}"
+        )
+
+        # ------------------------------------------------------------------
+        # 6d. Truth confidence (epistemic grounding) + joint with readiness
+        # ------------------------------------------------------------------
+        section("6d. Truth confidence (advisory epistemic signal)")
+        from core.truth_confidence import (
+            TruthConfidence,
+            assess_truth_confidence,
+            combine_with_readiness,
+        )
+
+        conf_h = rh_h.assess_truth_confidence()
+        conf_thin = assess_truth_confidence(
+            bond_texture={"trust": 0.5},
+            interaction_count=0,
+            health_flags=[],
+        )
+        check("confidence is TruthConfidence", isinstance(conf_h, TruthConfidence))
+        check("forces_speech False on confidence", conf_h.forces_speech is False)
+        check("forces_question False on confidence", conf_h.forces_question is False)
+        check(
+            "richer bond confidence > thin history confidence",
+            conf_h.score > conf_thin.score,
+            f"rich={conf_h.score} thin={conf_thin.score}",
+        )
+        check(
+            "thin history notes limited interaction",
+            any("limited" in n or "interaction" in n for n in conf_thin.uncertainty_notes)
+            or conf_thin.level in ("very_low", "low"),
+            str(conf_thin.to_dict()),
+        )
+        joint = combine_with_readiness(conf_h, ready_h)
+        check(
+            "joint bag has surface_ok_advisory key",
+            "surface_ok_advisory" in joint and joint.get("forces_speech") is False,
+            str(joint),
+        )
+        check(
+            "joint includes confidence and readiness",
+            isinstance(joint.get("confidence"), dict)
+            and isinstance(joint.get("readiness"), dict),
+        )
+        s_tc = engine.evaluate(
+            "Wish them well with optional support.",
+            relationship_health=rh_h.as_context(),
+        )
+        check(
+            "engine notes truth_confidence_noted",
+            "truth_confidence_noted" in (s_tc.flags or []),
+            str(s_tc.flags),
+        )
+        tc_imp = (s_tc.relationship_impact or {}).get("truth_confidence") or {}
+        check(
+            "impact carries truth_confidence",
+            bool(tc_imp.get("level")) and tc_imp.get("forces_speech") is False,
+            str(tc_imp),
+        )
+        check(
+            "trace has Truth confidence header",
+            any("[Truth confidence]" in x for x in (s_tc.reasoning_trace or [])),
+        )
+        joint_imp = (s_tc.relationship_impact or {}).get(
+            "careful_truth_telling_joint"
+        ) or {}
+        check(
+            "impact carries careful_truth_telling_joint when both present",
+            bool(joint_imp.get("joint_stance")),
+            str(joint_imp)[:200],
+        )
+        # Durable snapshot via RH update path (in-memory tracker)
+        snap_live = rh_h.update_careful_truth_telling_snapshot(joint)
+        check(
+            "RH update_careful_truth_telling_snapshot stores joint",
+            snap_live.get("joint_stance") == joint.get("joint_stance")
+            and snap_live.get("forces_speech") is False,
+            str(snap_live)[:200],
+        )
+        ctx_h = rh_h.as_context()
+        check(
+            "as_context includes careful_truth_telling durable bag",
+            isinstance(ctx_h.get("careful_truth_telling"), dict)
+            and "joint_score" in (ctx_h.get("careful_truth_telling") or {}),
+        )
+        print(
+            f"  conf_h={conf_h.level}/{conf_h.score} thin={conf_thin.level}/{conf_thin.score} "
+            f"joint_stance={joint.get('joint_stance')} "
+            f"surface_ok={joint.get('surface_ok_advisory')} "
+            f"durable_stance={snap_live.get('joint_stance')}"
+        )
+
     except Exception as exc:
         global _failed
         _failed += 1

@@ -108,6 +108,9 @@ class DecisionLog:
 
     Per-user isolation: ``user_id`` scopes this log to one local human so
     audit trails and optional disk appends never mix users by accident.
+
+    ``evidence_snapshot`` holds compact understanding-gap / topic-continuity /
+    flag provenance for durable DecisionLogStore lines (schema v2).
     """
 
     timestamp: str
@@ -119,6 +122,7 @@ class DecisionLog:
     flags: list[str]
     principles_considered: list[str]
     user_id: str = "default"
+    evidence_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 class EthicsEngine:
@@ -1278,6 +1282,45 @@ class EthicsEngine:
             context=context,
             history_evidence=history_evidence,
             rh_flags=rh_flags,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+        )
+
+        # === Multi-episode concept patterns (RelationshipHealth advisory channel) ===
+        # Lightweight trajectories (dependency vs co-evolution, etc.). Advisory only —
+        # never hard override, never force questions; conf_mod nudge at most.
+        conf_mod = self._apply_concept_pattern_evidence(
+            relationship_health=relationship_health
+            if isinstance(relationship_health, dict)
+            else {},
+            history_evidence=history_evidence,
+            context=context,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+            harm_prevention_active=("harm_prevention_boundary_override" in flags),
+        )
+
+        # === Careful Truth-Telling readiness + confidence (advisory only) ===
+        # Timing (readiness) and epistemic grounding (confidence); never speech.
+        self._attach_truth_telling_readiness(
+            relationship_health=relationship_health
+            if isinstance(relationship_health, dict)
+            else {},
+            history_evidence=history_evidence,
+            context=context,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+        )
+        self._attach_truth_confidence(
+            relationship_health=relationship_health
+            if isinstance(relationship_health, dict)
+            else {},
+            history_evidence=history_evidence,
+            context=context,
             flags=flags,
             reasoning_trace=reasoning_trace,
             relationship_impact=relationship_impact,
@@ -3818,6 +3861,478 @@ class EthicsEngine:
         }
         return {"conf_mod": conf_mod_out, "payload": enriched}
 
+    def _attach_truth_telling_readiness(
+        self,
+        *,
+        relationship_health: dict[str, Any],
+        history_evidence: dict[str, Any],
+        context: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+    ) -> None:
+        """Attach Careful Truth-Telling readiness bag (advisory timing only).
+
+        Sources:
+          1. relationship_health[\"truth_telling_readiness\"] if already computed
+          2. Live tracker.assess_truth_telling_readiness(...) if present
+          3. Pure assess_truth_telling_readiness from available bags
+
+        Never forces speech or questions; soft flag ``truth_telling_readiness_noted``.
+        """
+        try:
+            from .truth_telling_readiness import (
+                TruthTellingReadiness,
+                assess_truth_telling_readiness,
+            )
+        except Exception:
+            return
+
+        hard = (
+            "hard_override_violation" in flags
+            or "harm_prevention_boundary_override" in flags
+        )
+        concern = (
+            "relationship_concern" in flags
+            or "user_agency_concern" in flags
+            or "relationship_health_concern" in flags
+        )
+
+        bag: dict[str, Any] | None = None
+        raw = relationship_health.get("truth_telling_readiness")
+        if isinstance(raw, dict) and raw.get("level"):
+            # Recompute when we have live concern/hard flags so gates stay current
+            bag = None
+
+        tracker = (
+            context.get("relationship_health_tracker")
+            or context.get("bond_tracker")
+            or context.get("relationship_health_obj")
+        )
+        exp_enabled = context.get("exploratory_questioning_enabled")
+        exp_intensity = context.get("exploratory_questioning_intensity")
+        # Optional: pull from exploratory_questioner if attached
+        q = (
+            context.get("exploratory_questioner")
+            or self._exploratory_questioner
+        )
+        uid = str(
+            relationship_health.get("user_id")
+            or context.get("user_id")
+            or self._decision_log_user_id
+            or "default"
+        )
+        if q is not None and exp_enabled is None:
+            try:
+                if hasattr(q, "is_enabled"):
+                    exp_enabled = bool(q.is_enabled(uid))
+                if hasattr(q, "get_intensity") and exp_intensity is None:
+                    exp_intensity = float(q.get_intensity(uid))
+            except Exception:
+                pass
+
+        if tracker is not None and hasattr(tracker, "assess_truth_telling_readiness"):
+            try:
+                readiness = tracker.assess_truth_telling_readiness(
+                    history_evidence=history_evidence,
+                    exploratory_enabled=exp_enabled,
+                    exploratory_intensity=exp_intensity,
+                    concern_active=concern,
+                    hard_path_active=hard,
+                    concept_patterns=relationship_impact.get("concept_patterns"),
+                )
+                bag = readiness.to_dict() if hasattr(readiness, "to_dict") else dict(readiness)
+            except Exception:
+                bag = None
+
+        if bag is None:
+            try:
+                readiness = assess_truth_telling_readiness(
+                    bond_texture=relationship_health.get("bond_texture")
+                    or relationship_health.get("texture_breakdown"),
+                    health_flags=list(
+                        relationship_health.get("health_flags")
+                        or relationship_health.get("active_flags")
+                        or []
+                    ),
+                    concept_patterns=list(
+                        relationship_impact.get("concept_patterns")
+                        or relationship_health.get("concept_patterns")
+                        or []
+                    ),
+                    understanding_gaps=history_evidence.get("understanding_gaps")
+                    if isinstance(history_evidence, dict)
+                    else relationship_impact.get("understanding_gaps"),
+                    topic_continuity=relationship_impact.get("topic_continuity")
+                    or (
+                        history_evidence.get("topic_continuity")
+                        if isinstance(history_evidence, dict)
+                        else None
+                    ),
+                    curious_companion=relationship_health.get("curious_companion"),
+                    history_evidence=history_evidence
+                    if isinstance(history_evidence, dict)
+                    else None,
+                    recent_patterns=relationship_health.get("recent_patterns"),
+                    interaction_count=int(
+                        relationship_health.get("interaction_count") or 0
+                    ),
+                    exploratory_enabled=exp_enabled
+                    if isinstance(exp_enabled, bool)
+                    else None,
+                    exploratory_intensity=float(exp_intensity)
+                    if exp_intensity is not None
+                    else None,
+                    concern_active=concern,
+                    hard_path_active=hard,
+                    user_id=uid,
+                )
+                bag = readiness.to_dict()
+            except Exception:
+                return
+
+        if not bag:
+            return
+        # Invariants
+        bag["forces_speech"] = False
+        bag["forces_question"] = False
+        relationship_impact["truth_telling_readiness"] = bag
+        if "truth_telling_readiness_noted" not in flags:
+            flags.append("truth_telling_readiness_noted")
+        reasoning_trace.append(
+            "[Truth-telling readiness] "
+            f"level={bag.get('level')} score={float(bag.get('score') or 0):.2f} "
+            f"stance={bag.get('recommended_stance')} — {bag.get('reason') or ''} "
+            "(advisory timing only; does not force speech or questions)."
+        )
+        if bag.get("gates_applied"):
+            reasoning_trace.append(
+                "Truth-telling readiness gates: "
+                + ", ".join(str(g) for g in (bag.get("gates_applied") or [])[:6])
+            )
+
+    def _attach_truth_confidence(
+        self,
+        *,
+        relationship_health: dict[str, Any],
+        history_evidence: dict[str, Any],
+        context: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+    ) -> None:
+        """Attach confidence-in-truth bag and optional joint readiness combo.
+
+        Advisory epistemic signal only — never forces speech or questions.
+        Soft flag ``truth_confidence_noted``.
+        """
+        try:
+            from .truth_confidence import (
+                assess_truth_confidence,
+                combine_with_readiness,
+            )
+        except Exception:
+            return
+
+        tracker = (
+            context.get("relationship_health_tracker")
+            or context.get("bond_tracker")
+            or context.get("relationship_health_obj")
+        )
+        uid = str(
+            relationship_health.get("user_id")
+            or context.get("user_id")
+            or self._decision_log_user_id
+            or "default"
+        )
+        bag: dict[str, Any] | None = None
+
+        if tracker is not None and hasattr(tracker, "assess_truth_confidence"):
+            try:
+                conf = tracker.assess_truth_confidence(
+                    history_evidence=history_evidence,
+                    decision_flags=list(flags),
+                    concept_patterns=relationship_impact.get("concept_patterns"),
+                )
+                bag = conf.to_dict() if hasattr(conf, "to_dict") else dict(conf)
+            except Exception:
+                bag = None
+
+        if bag is None:
+            try:
+                conf = assess_truth_confidence(
+                    bond_texture=relationship_health.get("bond_texture")
+                    or relationship_health.get("texture_breakdown"),
+                    health_flags=list(
+                        relationship_health.get("health_flags")
+                        or relationship_health.get("active_flags")
+                        or []
+                    ),
+                    concept_patterns=list(
+                        relationship_impact.get("concept_patterns")
+                        or relationship_health.get("concept_patterns")
+                        or []
+                    ),
+                    understanding_gaps=history_evidence.get("understanding_gaps")
+                    if isinstance(history_evidence, dict)
+                    else relationship_impact.get("understanding_gaps"),
+                    topic_continuity=relationship_impact.get("topic_continuity")
+                    or (
+                        history_evidence.get("topic_continuity")
+                        if isinstance(history_evidence, dict)
+                        else None
+                    ),
+                    curious_companion=relationship_health.get("curious_companion"),
+                    history_evidence=history_evidence
+                    if isinstance(history_evidence, dict)
+                    else None,
+                    recent_patterns=relationship_health.get("recent_patterns"),
+                    interaction_count=int(
+                        relationship_health.get("interaction_count") or 0
+                    ),
+                    decision_flags=list(flags),
+                    user_id=uid,
+                )
+                bag = conf.to_dict()
+            except Exception:
+                return
+
+        if not bag:
+            return
+        bag["forces_speech"] = False
+        bag["forces_question"] = False
+        relationship_impact["truth_confidence"] = bag
+        if "truth_confidence_noted" not in flags:
+            flags.append("truth_confidence_noted")
+        reasoning_trace.append(
+            "[Truth confidence] "
+            f"level={bag.get('level')} score={float(bag.get('score') or 0):.2f} — "
+            f"{bag.get('reason') or ''} "
+            "(advisory epistemic grounding only; does not force speech)."
+        )
+        if bag.get("conflicting_evidence"):
+            reasoning_trace.append(
+                "Truth confidence conflicts: "
+                + "; ".join(str(x) for x in (bag.get("conflicting_evidence") or [])[:4])
+            )
+        if bag.get("uncertainty_notes"):
+            reasoning_trace.append(
+                "Truth confidence uncertainty: "
+                + "; ".join(str(x) for x in (bag.get("uncertainty_notes") or [])[:4])
+            )
+
+        # Joint bag with readiness when both present; durable on bond tracker
+        readiness = relationship_impact.get("truth_telling_readiness")
+        if isinstance(readiness, dict) and readiness:
+            try:
+                joint = combine_with_readiness(bag, readiness)
+                relationship_impact["careful_truth_telling_joint"] = joint
+                reasoning_trace.append(
+                    "[Careful truth-telling joint] "
+                    f"stance={joint.get('joint_stance')} "
+                    f"joint_score={float(joint.get('joint_score') or 0):.2f} "
+                    f"surface_ok_advisory={joint.get('surface_ok_advisory')} — "
+                    f"{joint.get('reason') or ''} "
+                    "(never forced; readiness × confidence)."
+                )
+                # Persist compact joint on living bond model when tracker present
+                tracker = (
+                    context.get("relationship_health_tracker")
+                    or context.get("bond_tracker")
+                    or context.get("relationship_health_obj")
+                )
+                if tracker is not None and hasattr(
+                    tracker, "update_careful_truth_telling_snapshot"
+                ):
+                    try:
+                        snap = tracker.update_careful_truth_telling_snapshot(joint)
+                        if isinstance(snap, dict) and snap:
+                            relationship_impact["careful_truth_telling"] = dict(snap)
+                            reasoning_trace.append(
+                                "Careful truth-telling joint snapshot stored on BondState "
+                                f"(stance={snap.get('joint_stance')}, "
+                                f"readiness={snap.get('readiness_level')}, "
+                                f"confidence={snap.get('confidence_level')}) — "
+                                "durable advisory only."
+                            )
+                    except Exception:
+                        pass
+                elif self._persistence is not None:
+                    # Optional direct bond file update when no live tracker
+                    try:
+                        uid = str(
+                            relationship_health.get("user_id")
+                            or context.get("user_id")
+                            or self._decision_log_user_id
+                            or "default"
+                        )
+                        if hasattr(self._persistence, "update_bond_careful_truth_telling"):
+                            rec = self._persistence.update_bond_careful_truth_telling(
+                                uid, joint
+                            )
+                            ctt = getattr(rec, "careful_truth_telling", None)
+                            if isinstance(ctt, dict) and ctt:
+                                relationship_impact["careful_truth_telling"] = dict(ctt)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    def _apply_concept_pattern_evidence(
+        self,
+        *,
+        relationship_health: dict[str, Any],
+        history_evidence: dict[str, Any],
+        context: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+        harm_prevention_active: bool = False,
+    ) -> float:
+        """Consume multi-episode concept patterns as an advisory evidence channel.
+
+        Sources (first hit wins):
+          1. relationship_health[\"concept_patterns\"] (from as_context)
+          2. Live tracker.detect_concept_patterns(history_evidence=...) if present
+          3. Empty → no-op
+
+        Effects:
+          - Trace + relationship_impact[\"concept_patterns\"]
+          - Soft conf_mod only (support / caution / risk polarities)
+          - Soft note flag ``concept_pattern_noted`` (never hard refuse alone)
+
+        Hard Sanctity path and harm-prevention are untouched. Patterns never
+        force exploratory questions or set relationship_concern by themselves.
+        """
+        conf_mod_out = conf_mod
+        if harm_prevention_active or "hard_override_violation" in flags:
+            return conf_mod_out
+
+        patterns: list[dict[str, Any]] = []
+        raw = relationship_health.get("concept_patterns")
+        if isinstance(raw, list) and raw:
+            patterns = [p for p in raw if isinstance(p, dict) and p.get("id")]
+        else:
+            tracker = (
+                context.get("relationship_health_tracker")
+                or context.get("bond_tracker")
+                or context.get("relationship_health_obj")
+            )
+            if tracker is not None and hasattr(tracker, "detect_concept_patterns"):
+                try:
+                    patterns = list(
+                        tracker.detect_concept_patterns(
+                            history_evidence=history_evidence
+                        )
+                        or []
+                    )
+                except TypeError:
+                    try:
+                        patterns = list(tracker.detect_concept_patterns() or [])
+                    except Exception:
+                        patterns = []
+                except Exception:
+                    patterns = []
+
+        if not patterns:
+            return conf_mod_out
+
+        # Re-score with history when patterns came from as_context without hist
+        tracker = (
+            context.get("relationship_health_tracker")
+            or context.get("bond_tracker")
+            or context.get("relationship_health_obj")
+        )
+        if (
+            tracker is not None
+            and history_evidence
+            and hasattr(tracker, "detect_concept_patterns")
+        ):
+            try:
+                hist_patterns = list(
+                    tracker.detect_concept_patterns(history_evidence=history_evidence)
+                    or []
+                )
+                if hist_patterns:
+                    patterns = hist_patterns
+            except Exception:
+                pass
+
+        active = [
+            p
+            for p in patterns
+            if isinstance(p, dict)
+            and float(p.get("strength") or 0) >= 0.35
+            and not p.get("hard_override")
+        ]
+        if not active:
+            return conf_mod_out
+
+        if "concept_pattern_noted" not in flags:
+            flags.append("concept_pattern_noted")
+        relationship_impact["concept_patterns"] = active
+        relationship_impact["concept_pattern_ids"] = [
+            str(p.get("id")) for p in active if p.get("id")
+        ]
+
+        ids = [str(p.get("id")) for p in active]
+        strength_bits = ", ".join(
+            f"{p.get('id')}={float(p.get('strength') or 0):.2f}" for p in active
+        )
+        reasoning_trace.append(
+            "[Concept patterns] Multi-episode advisory trajectories active: "
+            f"{ids} (strengths={strength_bits}). "
+            "Advisory only — not hard overrides; do not force questions."
+        )
+        for p in active[:4]:
+            reasoning_trace.append(
+                f"Concept pattern detail: {p.get('name') or p.get('id')} "
+                f"({p.get('polarity')}, strength={float(p.get('strength') or 0):.2f}) — "
+                f"{p.get('reason') or 'no reason'}"
+            )
+            ev = p.get("evidence") or []
+            if ev:
+                reasoning_trace.append(
+                    "  evidence: " + "; ".join(str(x) for x in ev[:5])
+                )
+
+        # Soft confidence modulation only (never invent relationship_concern here)
+        concern_already = (
+            "relationship_concern" in flags or "user_agency_concern" in flags
+        )
+        for p in active:
+            pol = str(p.get("polarity") or "")
+            strength = float(p.get("strength") or 0.0)
+            pid = str(p.get("id") or "")
+            if pol == "advisory_risk" and concern_already:
+                # Reinforce confidence on an *already* active concern path
+                conf_mod_out = conf_mod_out + min(0.03, 0.015 * strength)
+                reasoning_trace.append(
+                    f"Concept pattern influence: {pid} reinforces existing concern "
+                    "confidence only (still not a sole refuse reason)."
+                )
+            elif pol == "advisory_risk" and not concern_already:
+                conf_mod_out = conf_mod_out - min(0.02, 0.01 * strength)
+                reasoning_trace.append(
+                    f"Concept pattern influence: {pid} suggests caution — modest "
+                    "confidence reduction only (no automatic refuse)."
+                )
+            elif pol == "advisory_support" and not concern_already:
+                conf_mod_out = conf_mod_out + min(0.02, 0.012 * strength)
+                reasoning_trace.append(
+                    f"Concept pattern influence: {pid} supports continuity-aware "
+                    "care — tiny confidence support (not engagement pressure)."
+                )
+            elif pol == "advisory_caution":
+                conf_mod_out = conf_mod_out - min(0.015, 0.01 * strength)
+                reasoning_trace.append(
+                    f"Concept pattern influence: {pid} advises careful pacing "
+                    "(space / continuity awareness; never forced questions)."
+                )
+
+        return conf_mod_out
+
     def _apply_understanding_gap_bond_influence(
         self,
         *,
@@ -3899,6 +4414,31 @@ class EthicsEngine:
             user_agency_concern=agency_concern,
             nudge_count=nudge_count,
         )
+
+        # Always try to durable-snapshot open topics onto the live tracker when
+        # present (even if texture nudge is gated), so co-evolution survives reload.
+        if tracker is not None and hasattr(tracker, "update_curious_companion_snapshot"):
+            try:
+                g = gaps if isinstance(gaps, dict) else {}
+                tc = g.get("topic_continuity") if isinstance(g.get("topic_continuity"), dict) else {}
+                tracker.update_curious_companion_snapshot(
+                    {
+                        "open_topics": list(g.get("open_topics") or [])[:8],
+                        "open_topic_names": list(
+                            g.get("primary_gap_topics")
+                            or tc.get("open_topic_names")
+                            or []
+                        )[:8],
+                        "last_gap_score": float(
+                            g.get("curiosity_support") or g.get("gap_score") or 0.0
+                        ),
+                        "last_gap_kinds": list(g.get("gap_kinds") or [])[:8],
+                        "topic_continuity": dict(tc) if tc else {},
+                        "source": "evaluate_gap_bond_influence",
+                    }
+                )
+            except Exception:
+                pass
 
         if tracker is not None and hasattr(tracker, "note_understanding_gaps"):
             try:
@@ -7556,6 +8096,18 @@ class EthicsEngine:
             fallback="default",
         )
         ctx["user_id"] = user_id
+        # Compact provenance for durable DecisionLogStore (gaps / continuity / flags)
+        evidence_snapshot: dict[str, Any] = {}
+        try:
+            from persistence.models import DecisionLogRecord
+
+            evidence_snapshot = DecisionLogRecord.compact_evidence_from_impact(
+                getattr(stance, "relationship_impact", None),
+                flags=list(stance.flags or []),
+            )
+        except Exception:
+            evidence_snapshot = {}
+
         log_entry = DecisionLog(
             timestamp=datetime.now(timezone.utc).isoformat(),
             ontology_version=ont.version,
@@ -7566,6 +8118,7 @@ class EthicsEngine:
             flags=list(stance.flags),
             principles_considered=list(stance.principles_considered),
             user_id=user_id,
+            evidence_snapshot=evidence_snapshot,
         )
         self._decision_logs.append(log_entry)
         self._maybe_persist_decision_log(log_entry, user_id=user_id)
@@ -7581,10 +8134,12 @@ class EthicsEngine:
                 user_id or getattr(log_entry, "user_id", None),
                 fallback=self._decision_log_user_id or "default",
             )
+            snap = getattr(log_entry, "evidence_snapshot", None)
             self._persistence.append_decision_log(
                 log_entry,
                 user_id=uid,
                 max_entries=self._max_persisted_decision_logs,
+                evidence_snapshot=snap if isinstance(snap, dict) else None,
             )
         except Exception:
             # Optional persistence: never interrupt deliberation
