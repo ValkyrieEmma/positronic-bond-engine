@@ -33,32 +33,38 @@ Core commitments (full details and special rules in [docs/principles.md](docs/pr
 
 ## What's New in v0.3
 
-Key progress since the early modular skeleton:
+Key progress since the early modular skeleton (including foundation work through commits `e3d409f` / `8bad208`, July 2026):
 
-- **Signal interpretation** — Ontology matches are interpreted as intent / severity / weight / polarity, so a single raw keyword hit no longer drives decisions alone.
-- **Multi-source weighing** — Relationship health, user agency, history, and baseline channels combine with auditable `decision_basis` and confidence modulation.
-- **Proactive history intent patterns** — Multi-episode interaction history can elevate concern on moderate current signals when repeated problematic intent families appear (paternalistic override, attachment manufacturing, engagement coercion), with explicit trace lines.
-- **Optional local persistence** — Privacy-first `BondState` and `DecisionLog` save/load via the existing `persistence/` layer (in-memory remains the default).
+- **Licensing** — Project is under **AGPL-3.0**; free for non-commercial / research use that complies with AGPL. **Commercial use requires a separate license** (see [License](#license) and [LICENSE](LICENSE)).
+- **Durable living relationship model** — Per-user `BondState` / `BondStateRecord` can persist bond texture, health flags, soft pattern counters, understanding-gap / topic-continuity signals (`curious_companion`), multi-episode **concept patterns** (advisory trajectories only), and related co-evolution state via optional local JSON under `users/<user_id>/`. In-memory remains the default when persistence is not configured.
+- **Careful Truth-Telling pipeline (non-speaking)** — Advisory-only stack: **TruthTellingReadiness** (timing), **TruthConfidence** (epistemic grounding), a **joint** readiness × confidence assessment (durable on bond state), and a **gated observation-candidate** layer (0–3 internal seeds, live + durable snapshot). Nothing here generates user-facing speech or forced questions; force flags stay false.
+- **Signal-quality improvements (Tier 1)** — Ontology textbook scan uses token-boundary matching and specificity hygiene; weak / short indicators are down-weighted unless context co-factors or multi-channel evidence support them. High-severity intents and **Sanctity of Life** hard overrides remain strong and absolute.
+- **Signal interpretation & multi-source weighing** — Matches still pass through intent / severity / weight / polarity; RH, agency, history, baseline, and concept-pattern channels combine with auditable `decision_basis` and confidence modulation.
+- **Proactive history intent patterns** — Multi-episode history can elevate concern on moderate current signals when repeated problematic intent families appear, with explicit trace lines.
+- **Decision-log provenance** — Optional local JSONL decision logs can carry compact `evidence_snapshot` bags (gaps, continuity, concept ids, careful-truth-telling / observation-candidate summaries) for later audit — not full episodic transcripts.
 - **DevelopmentPhaseContext** — Lightweight maturity awareness for self-nature, continuity, and limitation reasoning without forced disclaimers on every reply.
-- **Evaluation harness** — Focused runs for multi-channel weighing and multi-episode proactive history (`--weighing`, `--history-proactive`).
+- **Evaluation harness** — Full scenario suite remains **39/39**; focused runs for multi-channel weighing and multi-episode proactive history (`--weighing`, `--history-proactive`).
 
-Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.3.0**.
+Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.3.0**. Response generation stays intentionally paused.
 
 ## Current Status
 
 | Area | State |
 |------|--------|
-| **EthicsEngine** | Ontology-driven deliberation with multi-source evidence combination, limited-data safeguards, hard Sanctity of Life override |
-| **Signal interpretation** | Intent / severity / weight / polarity layer; influences RH, agency, limited_data, and baseline paths |
-| **Interaction history** | Local episodic store + structured analysis; proactive intent-pattern mining (optional) |
-| **Relationship health** | Multi-dimensional bond texture + health flags; optional per-user `bond_state.json` persistence |
-| **Decision logs** | In-memory always; optional append to local JSONL for audit |
+| **EthicsEngine** | Ontology-driven deliberation with multi-source evidence combination, limited-data safeguards, hard Sanctity of Life override; attaches advisory truth-telling / observation-candidate signals when present |
+| **Signal interpretation** | Intent / severity / weight / polarity; token-boundary textbook scan + specificity / weak-indicator hygiene; influences RH, agency, limited_data, and baseline paths |
+| **Interaction history** | Local episodic store + structured analysis; proactive intent-pattern mining; understanding-gap / topic-continuity signals (optional) |
+| **Relationship health** | Multi-dimensional bond texture + health flags; soft patterns; **concept patterns** (advisory); curious-companion gap/topic continuity; durable **careful_truth_telling** joint + **observation_candidates_snapshot**; optional per-user `bond_state.json` |
+| **Careful Truth-Telling** | Readiness + confidence + joint assessment + gated observation candidates (0–3); live and durable; **fully advisory — no speech, no forced questions** |
+| **Decision logs** | In-memory always; optional local JSONL append with compact **evidence_snapshot** provenance |
 | **Per-user baseline** | Communication-style baseline + deviation (non-pathologizing); local persistence |
 | **Development phase** | `DevelopmentPhaseContext` defaulting to active development / testing (`0.3-dev`) |
 | **Self-audit** | Scaffold with development-phase honesty notes; not a complete self-model |
+| **Response generation** | **Intentionally paused** — deliberative signals and candidates are inspectable only; no user-facing speech layer is open |
 | **Companions / deployment** | Minimal demos and stubs; not a full companion product |
+| **License** | AGPL-3.0; commercial use requires a separate license |
 
-Still experimental: no claim of production readiness, continuous personal identity, or finished relationship co-evolution.
+Still experimental: no claim of production readiness, continuous personal identity, finished relationship co-evolution, or that observation candidates will ever auto-surface as speech.
 
 ## Repository Layout
 
