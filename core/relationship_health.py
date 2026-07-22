@@ -71,6 +71,13 @@ Neither generates speech or questions; see ``core.truth_telling_readiness`` and
 ``generate_observation_candidates`` — small gated set of possible observations
 (0–3), still non-speaking; see ``core.observation_candidates``.
 ``update_observation_candidates_snapshot`` — durable compact seed bag on BondState.
+
+Enjoyment-driven co-evolution (advisory)
+----------------------------------------
+``update_enjoyment_score`` / ``enjoyment_score`` on BondState track what this
+human appears to enjoy (multi-signal, time-decayed, provenance-backed).
+Influence is gated by protective health flags — never engagement optimization
+or forced speech. See ``core.enjoyment_score``.
 """
 
 from __future__ import annotations
@@ -80,6 +87,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .enjoyment_score import (
+    EnjoymentScore,
+    soft_texture_nudge_from_enjoyment,
+    update_enjoyment_score as blend_enjoyment_score,
+)
 from .observation_candidates import (
     ObservationCandidate,
     generate_observation_candidates,
@@ -152,6 +164,8 @@ class BondState:
             (compact, advisory only — never forces speech).
         observation_candidates_snapshot: Latest compact observation-candidate
             seeds (0–3) considered for careful truth-telling (non-speaking).
+        enjoyment_score: Time-decayed multi-signal enjoyment estimate
+            (advisory co-evolution; never forces speech).
     """
 
     bond_texture: dict[str, float] = field(
@@ -165,6 +179,7 @@ class BondState:
     curious_companion: dict[str, Any] = field(default_factory=dict)
     careful_truth_telling: dict[str, Any] = field(default_factory=dict)
     observation_candidates_snapshot: dict[str, Any] = field(default_factory=dict)
+    enjoyment_score: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Plain dict of core fields (for persistence / inspection)."""
@@ -184,6 +199,8 @@ class BondState:
             out["observation_candidates_snapshot"] = dict(
                 self.observation_candidates_snapshot
             )
+        if self.enjoyment_score:
+            out["enjoyment_score"] = dict(self.enjoyment_score)
         return out
 
     @classmethod
@@ -213,6 +230,9 @@ class BondState:
         ocs = data.get("observation_candidates_snapshot")
         if not isinstance(ocs, dict):
             ocs = {}
+        enj = data.get("enjoyment_score")
+        if not isinstance(enj, dict):
+            enj = {}
         return cls(
             bond_texture=texture,
             interaction_count=int(data.get("interaction_count", 0) or 0),
@@ -226,6 +246,7 @@ class BondState:
             curious_companion=dict(cc),
             careful_truth_telling=dict(ctt),
             observation_candidates_snapshot=dict(ocs),
+            enjoyment_score=dict(enj),
         )
 
 
@@ -396,6 +417,7 @@ class RelationshipHealth:
                 observation_candidates_snapshot=dict(
                     self.state.observation_candidates_snapshot or {}
                 ),
+                enjoyment_score=dict(self.state.enjoyment_score or {}),
             )
             path = self._persistence.save_bond_state(record)
             return Path(path) if path is not None else None
@@ -441,6 +463,7 @@ class RelationshipHealth:
             observation_candidates_snapshot=dict(
                 self.state.observation_candidates_snapshot or {}
             ),
+            enjoyment_score=dict(self.state.enjoyment_score or {}),
         )
 
     def apply_record(self, record: Any) -> BondState:
@@ -468,6 +491,7 @@ class RelationshipHealth:
                     record, "observation_candidates_snapshot", {}
                 )
                 or {},
+                "enjoyment_score": getattr(record, "enjoyment_score", {}) or {},
             }
         self.state = BondState.from_dict(data)
         uid = None
@@ -734,10 +758,90 @@ class RelationshipHealth:
         # 5. Emerging patterns → health flags
         self._update_health_flags(itype, interaction)
 
+        # 6. Enjoyment score (advisory co-evolution; RH-gated)
+        #    Updates always for audit; soft texture nudge only when influence allowed.
+        try:
+            self.update_enjoyment_score(
+                interaction=interaction,
+                apply_texture_nudge=True,
+                auto_save=False,  # single save at end of update_bond
+            )
+        except Exception:
+            pass
+
         self.state.last_updated = _utc_now_iso()
         self.state.summary = self._generate_summary()
         self._maybe_auto_save()
         return self.state
+
+    def update_enjoyment_score(
+        self,
+        *,
+        interaction: dict[str, Any] | None = None,
+        signals: dict[str, Any] | None = None,
+        ethical_concern_active: bool = False,
+        apply_texture_nudge: bool = False,
+        auto_save: bool = True,
+    ) -> dict[str, Any]:
+        """Update time-decayed enjoyment score from interaction / signal bag.
+
+        Stores compact snapshot on BondState (and disk when auto_persist).
+        Soft mutual_benefit/reciprocity nudge only when ``influence_allowed``
+        and ``apply_texture_nudge``. Never forces speech/questions. Failures soft.
+        """
+        try:
+            prev = self.state.enjoyment_score if isinstance(
+                self.state.enjoyment_score, dict
+            ) else {}
+            updated = blend_enjoyment_score(
+                prev,
+                interaction=interaction,
+                signals=signals,
+                health_flags=list(self.state.health_flags or []),
+                ethical_concern_active=bool(ethical_concern_active),
+                interaction_count=int(self.state.interaction_count or 0),
+                user_id=self._user_id or DEFAULT_USER_ID,
+            )
+            bag = updated.to_dict()
+            bag["forces_speech"] = False
+            bag["forces_question"] = False
+
+            # Compact for durable storage
+            try:
+                from persistence.models import compact_enjoyment_score_snapshot
+
+                bag = compact_enjoyment_score_snapshot(
+                    bag, interaction_count=int(self.state.interaction_count or 0)
+                )
+            except Exception:
+                pass
+
+            self.state.enjoyment_score = bag
+            self.state.last_updated = str(bag.get("last_updated") or _utc_now_iso())
+
+            # Soft counter for provenance (not a health risk flag)
+            if bag.get("sample_count") and int(bag.get("sample_count") or 0) > int(
+                prev.get("sample_count") or 0
+            ):
+                self.state.recent_patterns["enjoyment_score_updated"] = (
+                    int(
+                        self.state.recent_patterns.get("enjoyment_score_updated", 0)
+                        or 0
+                    )
+                    + 1
+                )
+
+            if apply_texture_nudge:
+                nudges = soft_texture_nudge_from_enjoyment(updated)
+                for dim, delta in nudges.items():
+                    if dim in self.state.bond_texture and abs(float(delta)) > 0:
+                        self._adjust_texture(dim, float(delta))
+
+            if auto_save:
+                self._maybe_auto_save()
+            return dict(self.state.enjoyment_score or {})
+        except Exception:
+            return dict(self.state.enjoyment_score or {})
 
 
     def update_from_interaction(self, interaction: dict[str, Any]) -> BondState:
@@ -1337,6 +1441,12 @@ class RelationshipHealth:
             ctx["observation_candidates_durable"] = dict(
                 self.state.observation_candidates_snapshot
             )
+        # Enjoyment co-evolution score (advisory; RH-gated influence)
+        if self.state.enjoyment_score:
+            enj = dict(self.state.enjoyment_score)
+            enj["forces_speech"] = False
+            enj["forces_question"] = False
+            ctx["enjoyment_score"] = enj
         if self._identity_notes:
             ctx["identity_notes"] = list(self._identity_notes)
         if self.using_default_user_id:
@@ -1381,6 +1491,22 @@ class RelationshipHealth:
                 ctx["observation_candidates_durable"] = dict(durable)
         except Exception:
             pass
+        # Re-apply RH guardrails on enjoyment when context is built (flags may have changed)
+        if self.state.enjoyment_score:
+            try:
+                from .enjoyment_score import EnjoymentScore, apply_rh_guardrails
+
+                gated = apply_rh_guardrails(
+                    EnjoymentScore.from_dict(self.state.enjoyment_score),
+                    health_flags=list(self.state.health_flags or []),
+                )
+                bag = gated.to_dict()
+                bag["forces_speech"] = False
+                bag["forces_question"] = False
+                self.state.enjoyment_score = bag
+                ctx["enjoyment_score"] = dict(bag)
+            except Exception:
+                pass
         return ctx
 
     def generate_observation_candidates(

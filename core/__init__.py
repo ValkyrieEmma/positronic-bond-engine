@@ -36,6 +36,11 @@ from .ontology import (  # noqa: F401
 from .per_user_baseline import DeviationReport, PerUserBaseline  # noqa: F401
 from .relationship_health import BondState, RelationshipHealth  # noqa: F401
 from .response_generator import GeneratedResponse, ResponseGenerator  # noqa: F401
+from .enjoyment_score import (  # noqa: F401
+    EnjoymentScore,
+    soft_texture_nudge_from_enjoyment,
+    update_enjoyment_score,
+)
 from .observation_candidates import (  # noqa: F401
     ObservationCandidate,
     generate_observation_candidates,
@@ -62,6 +67,7 @@ __all__ = [
     "DecisionLog",
     "DevelopmentPhaseContext",
     "DeviationReport",
+    "EnjoymentScore",
     "EthicalStance",
     "EthicsEngine",
     "EthicalOntology",
@@ -80,6 +86,8 @@ __all__ = [
     "RelationshipHealth",
     "resolve_development_context",
     "ResponseGenerator",
+    "soft_texture_nudge_from_enjoyment",
     "TruthConfidence",
     "TruthTellingReadiness",
+    "update_enjoyment_score",
 ]

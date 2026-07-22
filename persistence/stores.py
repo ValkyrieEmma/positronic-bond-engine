@@ -12,6 +12,7 @@ Ownership (per user_id under users/<id>/)
 - BaselineStore → baseline.json (PerUserBaseline communication style)
 - BondStateStore → bond_state.json (RelationshipHealth living bond model)
 - DecisionLogStore → decision_logs.jsonl (EthicsEngine audit / provenance)
+- QueuedAuditStore → audits_queue.json (deferred provenance audits)
 - SettingsStore → settings.json (user controls)
 
 Episodic interaction transcripts are **not** here — see
@@ -65,7 +66,8 @@ class BondStateStore:
     (including understanding-gap / open-topic markers), optional
     ``curious_companion`` snapshot, optional ``careful_truth_telling``
     joint readiness×confidence snapshot, and optional
-    ``observation_candidates_snapshot`` (latest careful observation seeds).
+    ``observation_candidates_snapshot`` (latest careful observation seeds),
+    and optional ``enjoyment_score`` (time-decayed enjoyment co-evolution).
     Failures are raised to the backend only; RelationshipHealth wraps I/O in
     fail-soft handlers.
     """
@@ -123,6 +125,27 @@ class BondStateStore:
                 ocs["candidates"] = cleaned
                 ocs["count"] = len(cleaned)
             data["observation_candidates_snapshot"] = ocs
+        if isinstance(data.get("enjoyment_score"), dict):
+            enj = self._privacy.filter_mapping(dict(data["enjoyment_score"]))
+            enj["forces_speech"] = False
+            enj["forces_question"] = False
+            # Trim free-text topic labels
+            topics = enj.get("preferred_topics")
+            if isinstance(topics, list):
+                enj["preferred_topics"] = [
+                    self._privacy.filter_text(str(t))[:48] for t in topics[:8]
+                ]
+            evidence = enj.get("evidence")
+            if isinstance(evidence, list):
+                enj["evidence"] = [
+                    self._privacy.filter_text(str(x))[:96] for x in evidence[:12]
+                ]
+            data["enjoyment_score"] = enj
+        if isinstance(data.get("provenance_markers"), dict):
+            pm = self._privacy.filter_mapping(dict(data["provenance_markers"]))
+            pm["forces_speech"] = False
+            pm["forces_question"] = False
+            data["provenance_markers"] = pm
         # Ensure recent_patterns keys are strings (open_topic:*, gap_topic:*, etc.)
         pats = data.get("recent_patterns") or {}
         data["recent_patterns"] = {str(k): int(v) for k, v in pats.items()}
@@ -168,6 +191,121 @@ class BondStateStore:
         )
         self.save(record)
         return record
+
+    def update_enjoyment_score(
+        self, user_id: str, enjoyment: dict[str, Any]
+    ) -> BondStateRecord:
+        """Load-set-save enjoyment_score snapshot for this user."""
+        from .models import compact_enjoyment_score_snapshot
+
+        record = self.load(user_id)
+        record.set_enjoyment_score(
+            compact_enjoyment_score_snapshot(
+                enjoyment, interaction_count=record.interaction_count
+            )
+        )
+        self.save(record)
+        return record
+
+    def delete(self, user_id: str) -> bool:
+        return self._backend.delete_path(self._path(user_id))
+
+    def merge_provenance_markers(
+        self, user_id: str, markers: dict[str, Any]
+    ) -> BondStateRecord:
+        """Merge provenance_markers (e.g. potentially_stale) into bond_state."""
+        record = self.load(user_id)
+        existing = (
+            dict(record.provenance_markers)
+            if isinstance(getattr(record, "provenance_markers", None), dict)
+            else {}
+        )
+        # Merge potentially_stale lists (newest first, de-dupe by target+audit_id)
+        new_stale = list(markers.get("potentially_stale") or [])
+        old_stale = list(existing.get("potentially_stale") or [])
+        merged_stale: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for m in list(new_stale) + list(old_stale):
+            if not isinstance(m, dict):
+                continue
+            key = f"{m.get('target')}|{m.get('audit_id')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_stale.append(
+                {
+                    "target": str(m.get("target") or "")[:64],
+                    "reason": str(m.get("reason") or "")[:160],
+                    "audit_id": str(m.get("audit_id") or "")[:48],
+                    "marked_at": str(m.get("marked_at") or "")[:64],
+                }
+            )
+        existing["potentially_stale"] = merged_stale[:32]
+        if markers.get("last_audit_id"):
+            existing["last_audit_id"] = str(markers.get("last_audit_id"))[:48]
+        if markers.get("last_audit_at"):
+            existing["last_audit_at"] = str(markers.get("last_audit_at"))[:64]
+        existing["forces_speech"] = False
+        existing["forces_question"] = False
+        record.provenance_markers = existing
+        record.last_updated = record.last_updated  # keep; save will write
+        self.save(record)
+        return record
+
+
+class QueuedAuditStore:
+    """JSON file of deferred audit queue items per user (scaffolding).
+
+    File: ``audits_queue.json`` under users/<user_id>/. Does not run audits —
+    only stores inspectable queue state for later workers.
+    """
+
+    FILENAME = "audits_queue.json"
+
+    def __init__(self, backend: JsonFileBackend, privacy: PrivacyFilter) -> None:
+        self._backend = backend
+        self._privacy = privacy
+
+    def _path(self, user_id: str) -> Path:
+        return ensure_user_dir(self._backend.data_root, user_id) / self.FILENAME
+
+    def load(self, user_id: str) -> list[dict[str, Any]]:
+        raw = self._backend.read_json(self._path(user_id))
+        if isinstance(raw, dict) and isinstance(raw.get("audits"), list):
+            return [r for r in raw["audits"] if isinstance(r, dict)]
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+        return []
+
+    def save(self, user_id: str, audits: list[dict[str, Any]]) -> Path:
+        cleaned: list[dict[str, Any]] = []
+        for a in audits or []:
+            if not isinstance(a, dict):
+                continue
+            item = self._privacy.filter_mapping(dict(a))
+            item["forces_speech"] = False
+            item["forces_question"] = False
+            if "reason" in item:
+                item["reason"] = self._privacy.filter_text(str(item.get("reason") or ""))[
+                    :280
+                ]
+            if "topic" in item:
+                item["topic"] = self._privacy.filter_text(str(item.get("topic") or ""))[
+                    :96
+                ]
+            cleaned.append(item)
+        path = self._path(user_id)
+        self._backend.write_json(
+            path,
+            {
+                "user_id": user_id,
+                "audits": cleaned,
+                "schema_version": 1,
+                "forces_speech": False,
+                "forces_question": False,
+            },
+        )
+        return path
 
     def delete(self, user_id: str) -> bool:
         return self._backend.delete_path(self._path(user_id))

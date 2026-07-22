@@ -684,6 +684,106 @@ def main() -> int:
             == uid_obs,
         )
 
+        # ------------------------------------------------------------------
+        section("11. Enjoyment score durable snapshot")
+        # ------------------------------------------------------------------
+        from persistence.models import compact_enjoyment_score_snapshot
+
+        uid_enj = "enjoyment_durable_user"
+        rh_enj = RelationshipHealth(persistence=store, user_id=uid_enj)
+        bag_enj = rh_enj.update_enjoyment_score(
+            signals={
+                "continuation": 0.85,
+                "positive_language": 0.7,
+                "special_interest": "pottery",
+                "stimming_trigger": "wheel_rhythm",
+            },
+            apply_texture_nudge=True,
+        )
+        check(
+            "enjoyment bag on state",
+            isinstance(rh_enj.state.enjoyment_score, dict)
+            and rh_enj.state.enjoyment_score.get("forces_speech") is False,
+            str(rh_enj.state.enjoyment_score)[:160],
+        )
+        check(
+            "enjoyment preferred_topics durable-ready",
+            "pottery" in (bag_enj.get("preferred_topics") or [])
+            or "wheel_rhythm" in (bag_enj.get("preferred_topics") or []),
+            str(bag_enj.get("preferred_topics")),
+        )
+        rh_enj2 = RelationshipHealth(persistence=store, user_id=uid_enj)
+        check(
+            "enjoyment_score survives reload",
+            isinstance(rh_enj2.state.enjoyment_score, dict)
+            and float(rh_enj2.state.enjoyment_score.get("score") or 0) > 0.45,
+            str(rh_enj2.state.enjoyment_score)[:160],
+        )
+        rec_enj = store.load_bond_state(uid_enj)
+        check(
+            "BondStateRecord schema_version >= 5",
+            int(getattr(rec_enj, "schema_version", 0) or 0) >= 5,
+            str(getattr(rec_enj, "schema_version", None)),
+        )
+        check(
+            "as_ethics_context includes enjoyment_score",
+            "enjoyment_score" in rec_enj.as_ethics_context(),
+        )
+        # Force flags must be false even if caller tries True
+        store_rec = store.update_bond_enjoyment_score(
+            uid_enj,
+            {
+                "score": 0.8,
+                "signals": {"continuation": 0.9},
+                "evidence": ["continuation=0.90"],
+                "preferred_topics": ["pottery"],
+                "forces_speech": True,
+                "forces_question": True,
+                "influence_allowed": True,
+                "sample_count": 3,
+            },
+        )
+        check(
+            "store path forces_speech False on enjoyment disk",
+            store_rec.enjoyment_score.get("forces_speech") is False
+            and store_rec.enjoyment_score.get("forces_question") is False,
+            str(store_rec.enjoyment_score)[:160],
+        )
+        compact_e = compact_enjoyment_score_snapshot(
+            {
+                "score": 0.9,
+                "signals": {"a": 0.5},
+                "evidence": ["x"] * 20,
+                "preferred_topics": ["t"] * 12,
+                "forces_speech": True,
+            }
+        )
+        check(
+            "compact enjoyment trims evidence and force flags",
+            len(compact_e.get("evidence") or []) <= 12
+            and compact_e.get("forces_speech") is False
+            and len(compact_e.get("preferred_topics") or []) <= 8,
+        )
+        # Protective flag: influence blocked after reload of flags
+        rh_enj2.state.health_flags.append("boundary_erosion")
+        blocked = rh_enj2.update_enjoyment_score(
+            signals={"continuation": 0.9},
+            apply_texture_nudge=True,
+        )
+        check(
+            "boundary_erosion blocks enjoyment influence",
+            blocked.get("influence_allowed") is False,
+            str(blocked.get("gates_applied")),
+        )
+        check(
+            "as_context still exposes score when influence blocked",
+            isinstance(rh_enj2.as_context().get("enjoyment_score"), dict),
+        )
+        check(
+            "update_bond_enjoyment_score fails soft",
+            store.update_bond_enjoyment_score(uid_enj, {"extra": 1}).user_id == uid_enj,
+        )
+
         print()
         section("Summary")
         total = _passed + _failed

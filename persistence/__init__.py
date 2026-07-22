@@ -31,7 +31,7 @@ from .models import (
 )
 from .paths import default_data_root
 from .privacy import PrivacyFilter, PrivacyPolicy
-from .stores import BondStateStore, DecisionLogStore
+from .stores import BondStateStore, DecisionLogStore, QueuedAuditStore
 
 __all__ = [
     "LocalPersistence",
@@ -40,6 +40,7 @@ __all__ = [
     "BondStateStore",
     "DecisionLogRecord",
     "DecisionLogStore",
+    "QueuedAuditStore",
     "UserSettings",
     "PrivacyFilter",
     "PrivacyPolicy",

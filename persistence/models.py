@@ -20,6 +20,47 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def compact_enjoyment_score_snapshot(
+    enjoyment: dict[str, Any] | None,
+    *,
+    interaction_count: int | None = None,
+) -> dict[str, Any]:
+    """Build a compact, privacy-safe durable enjoyment score bag.
+
+    Stores score, signal breakdown, short evidence/provenance, preferred topic
+    labels, influence gate — not dialogue. Always forces_speech/question False.
+    """
+    e = enjoyment if isinstance(enjoyment, dict) else {}
+    signals_raw = e.get("signals") if isinstance(e.get("signals"), dict) else {}
+    signals: dict[str, float] = {}
+    for k, v in list(signals_raw.items())[:12]:
+        try:
+            signals[str(k)[:48]] = max(0.0, min(1.0, float(v)))
+        except (TypeError, ValueError):
+            continue
+    out: dict[str, Any] = {
+        "score": max(0.0, min(1.0, float(e.get("score") if e.get("score") is not None else 0.5))),
+        "signals": signals,
+        "evidence": [str(x)[:96] for x in (e.get("evidence") or [])][:12],
+        "preferred_topics": [str(t)[:48] for t in (e.get("preferred_topics") or [])][:8],
+        "gates_applied": [str(g)[:80] for g in (e.get("gates_applied") or [])][:8],
+        "influence_allowed": bool(e.get("influence_allowed", True)),
+        "sample_count": int(e.get("sample_count") or 0),
+        "last_updated": str(e.get("last_updated") or _utc_now_iso()),
+        "forces_speech": False,
+        "forces_question": False,
+        "schema_version": 1,
+    }
+    if interaction_count is not None:
+        out["interaction_count"] = int(interaction_count)
+    elif e.get("interaction_count") is not None:
+        try:
+            out["interaction_count"] = int(e.get("interaction_count"))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 def compact_observation_candidates_snapshot(
     cand_bag: dict[str, Any] | None,
     *,
@@ -228,6 +269,12 @@ class BondStateRecord:
     ``observation_candidates_snapshot`` is the latest compact set of careful
     observation seeds (0–3) the system has already considered — durable across
     sessions, never forces speech/questions.
+
+    ``enjoyment_score`` is a time-decayed multi-signal enjoyment estimate for
+    co-evolution (advisory only — never engagement optimization or speech).
+
+    ``provenance_markers`` holds compact deferred-audit marks such as
+    ``potentially_stale`` targets after a completed QueuedAudit correction.
     """
 
     user_id: str
@@ -251,7 +298,11 @@ class BondStateRecord:
     careful_truth_telling: dict[str, Any] = field(default_factory=dict)
     # Latest observation-candidate seeds (compact, advisory, non-speaking)
     observation_candidates_snapshot: dict[str, Any] = field(default_factory=dict)
-    schema_version: int = 4
+    # Enjoyment-driven co-evolution score (advisory, time-decayed)
+    enjoyment_score: dict[str, Any] = field(default_factory=dict)
+    # Deferred-audit provenance markers (potentially_stale, last_audit_id, …)
+    provenance_markers: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = 6
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -298,6 +349,10 @@ class BondStateRecord:
             cands = self.observation_candidates_snapshot.get("candidates")
             if isinstance(cands, list):
                 ctx["observation_candidates_durable_list"] = list(cands)
+        if self.enjoyment_score:
+            ctx["enjoyment_score"] = dict(self.enjoyment_score)
+        if self.provenance_markers:
+            ctx["provenance_markers"] = dict(self.provenance_markers)
         return ctx
 
     @classmethod
@@ -320,6 +375,12 @@ class BondStateRecord:
         ocs = data.get("observation_candidates_snapshot")
         if not isinstance(ocs, dict):
             ocs = {}
+        enj = data.get("enjoyment_score")
+        if not isinstance(enj, dict):
+            enj = {}
+        prov = data.get("provenance_markers")
+        if not isinstance(prov, dict):
+            prov = {}
         return cls(
             user_id=str(data.get("user_id") or user_id or "default"),
             bond_texture={k: float(v) for k, v in texture_raw.items()},
@@ -331,7 +392,9 @@ class BondStateRecord:
             curious_companion=dict(cc),
             careful_truth_telling=dict(ctt),
             observation_candidates_snapshot=dict(ocs),
-            schema_version=int(data.get("schema_version", 4)),
+            enjoyment_score=dict(enj),
+            provenance_markers=dict(prov),
+            schema_version=int(data.get("schema_version", 6)),
         )
 
     def set_careful_truth_telling(
@@ -357,6 +420,20 @@ class BondStateRecord:
         )
         self.last_updated = str(
             self.observation_candidates_snapshot.get("assessed_at") or _utc_now_iso()
+        )
+        return self
+
+    def set_enjoyment_score(
+        self, enjoyment: dict[str, Any] | None
+    ) -> "BondStateRecord":
+        """Replace durable enjoyment score snapshot (compact, advisory)."""
+        if not enjoyment or not isinstance(enjoyment, dict):
+            return self
+        self.enjoyment_score = compact_enjoyment_score_snapshot(
+            enjoyment, interaction_count=self.interaction_count
+        )
+        self.last_updated = str(
+            self.enjoyment_score.get("last_updated") or _utc_now_iso()
         )
         return self
 
@@ -554,6 +631,34 @@ class DecisionLogRecord:
             snap["observation_candidates"] = compact_observation_candidates_snapshot(
                 ocs
             )
+        # Deferred audit / potentially_stale marks (compact)
+        prov = impact.get("provenance_markers")
+        if isinstance(prov, dict) and prov:
+            stale = prov.get("potentially_stale")
+            snap["provenance_markers"] = {
+                "potentially_stale": [
+                    {
+                        "target": str(m.get("target") or "")[:64],
+                        "audit_id": str(m.get("audit_id") or "")[:48],
+                    }
+                    for m in (stale or [])
+                    if isinstance(m, dict)
+                ][:8],
+                "last_audit_id": str(prov.get("last_audit_id") or "")[:48],
+            }
+            snap["provenance_markers"] = {
+                k: v
+                for k, v in snap["provenance_markers"].items()
+                if v not in ("", [], None)
+            }
+        audit_ref = impact.get("queued_audit_ref")
+        if isinstance(audit_ref, dict) and audit_ref:
+            snap["queued_audit_ref"] = {
+                "audit_id": str(audit_ref.get("audit_id") or "")[:48],
+                "priority_label": str(audit_ref.get("priority_label") or "")[:32],
+                "topic": str(audit_ref.get("topic") or "")[:96],
+                "status": str(audit_ref.get("status") or "")[:32],
+            }
         return {k: v for k, v in snap.items() if v is not None and v != {} and v != []}
 
 

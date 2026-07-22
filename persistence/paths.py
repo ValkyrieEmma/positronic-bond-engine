@@ -13,6 +13,7 @@ Default layout (under the data root)::
           bond_state.json
           settings.json
           decision_logs.jsonl
+          audits_queue.json
       README.txt   # human-readable note about privacy and deletion
 
 Everything remains on the local filesystem. Users can delete any path

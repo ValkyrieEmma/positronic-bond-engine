@@ -24,6 +24,13 @@ Proactive multi-episode history scenarios only (ids 34–39)::
 
     python evaluation/eval_harness.py --history-proactive
 
+Advisory co-evolution suite (EnjoymentScore, observation candidates, CTT, concepts)::
+
+    python evaluation/eval_harness.py --co-evolution
+    python evaluation/eval_harness.py --advisory
+    # or directly:
+    python evaluation/eval_co_evolution.py
+
 Specific scenario ids::
 
     python evaluation/eval_harness.py 34 35 36 37
@@ -82,10 +89,25 @@ class Scenario:
     expect_no_history_proactive: bool = False
 
 
+def _is_co_evolution_mode(argv: List[str]) -> bool:
+    """True when caller wants the advisory co-evolution suite (not ethical scenarios)."""
+    if not argv:
+        return False
+    return argv[0] in (
+        "--co-evolution",
+        "--coevolution",
+        "--advisory",
+        "--advisory-signals",
+        "-C",
+    )
+
+
 def _parse_focus_args(argv: List[str]) -> Optional[Set[int]]:
     """Return scenario-id filter from CLI, or None for full run."""
     if not argv:
         return None
+    if _is_co_evolution_mode(argv):
+        return None  # handled separately in main
     if argv[0] in ("--weighing", "-w", "--focus-weighing"):
         return set(WEIGHING_FOCUS_IDS)
     if argv[0] in (
@@ -340,6 +362,12 @@ def _seed_history(
 
 
 def main() -> None:
+    # Advisory co-evolution suite is independent of the 39 ethical scenarios
+    if _is_co_evolution_mode(sys.argv[1:]):
+        from evaluation.eval_co_evolution import main as coevo_main
+
+        raise SystemExit(coevo_main())
+
     focus_ids = _parse_focus_args(sys.argv[1:])
 
     print("=" * 70)
@@ -1294,6 +1322,7 @@ def main() -> None:
         print("\nHarness complete.")
         print("Focused weighing:          python evaluation/eval_harness.py --weighing")
         print("Proactive multi-ep history: python evaluation/eval_harness.py --history-proactive")
+        print("Co-evolution / advisory:   python evaluation/eval_harness.py --co-evolution")
     finally:
         if tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
