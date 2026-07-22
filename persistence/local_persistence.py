@@ -36,7 +36,13 @@ from .json_backend import JsonFileBackend
 from .models import BondStateRecord, DecisionLogRecord, UserBaseline, UserSettings
 from .paths import default_data_root, sanitize_user_id, user_dir
 from .privacy import PrivacyFilter, PrivacyPolicy
-from .stores import BaselineStore, BondStateStore, DecisionLogStore, SettingsStore
+from .stores import (
+    BaselineStore,
+    BondStateStore,
+    DecisionLogStore,
+    QueuedAuditStore,
+    SettingsStore,
+)
 
 _README_TEXT = """Positronic Bond Engine — local data directory
 ================================================
@@ -55,9 +61,11 @@ Layout (all paths scoped to users/<user_id>/)
   bond_state.json        — RelationshipHealth living bond model
                            (texture, health_flags, soft pattern counters,
                             curious_companion, careful_truth_telling joint,
-                            observation_candidates_snapshot)
+                            observation_candidates_snapshot, enjoyment_score,
+                            provenance_markers)
   settings.json          — user controls (memory, exploratory prefs, …)
   decision_logs.jsonl    — EthicsEngine audit lines + evidence_snapshot
+  audits_queue.json      — deferred QueuedAudit scaffolding (non-blocking)
   interactions.jsonl     — InteractionMemoryStore episodic feed
                            (owned by core.interaction_memory; same folder)
 
@@ -95,6 +103,7 @@ class LocalPersistence:
         self.baselines = BaselineStore(self.backend, self.privacy)
         self.bonds = BondStateStore(self.backend, self.privacy)
         self.decision_logs = DecisionLogStore(self.backend, self.privacy)
+        self.audits = QueuedAuditStore(self.backend, self.privacy)
         self.settings = SettingsStore(self.backend, self.privacy)
 
         self._ensure_readme()
@@ -145,6 +154,81 @@ class LocalPersistence:
     ) -> BondStateRecord:
         """Persist compact observation-candidate snapshot on bond_state.json."""
         return self.bonds.update_observation_candidates(user_id, cand_bag)
+
+    def update_bond_enjoyment_score(
+        self, user_id: str, enjoyment: dict[str, Any]
+    ) -> BondStateRecord:
+        """Persist compact enjoyment score on bond_state.json."""
+        return self.bonds.update_enjoyment_score(user_id, enjoyment)
+
+    def merge_bond_provenance_markers(
+        self, user_id: str, markers: dict[str, Any]
+    ) -> BondStateRecord:
+        """Merge potentially_stale / last_audit markers into bond_state.json."""
+        return self.bonds.merge_provenance_markers(user_id, markers)
+
+    # ------------------------------------------------------------------
+    # Queued audits (deferred provenance; never blocks evaluate)
+    # ------------------------------------------------------------------
+
+    def load_audit_queue(self, user_id: str = "default") -> list[dict[str, Any]]:
+        return self.audits.load(user_id)
+
+    def save_audit_queue(
+        self, user_id: str, audits: list[dict[str, Any]]
+    ) -> Path:
+        return self.audits.save(user_id, audits)
+
+    def get_audit_queue(
+        self, user_id: str = "default", *, max_entries: int = 200
+    ) -> Any:
+        """Return an ``AuditQueue`` bound to this user's durable queue file.
+
+        Enqueue / complete are local and fail-soft; they never block evaluate().
+        """
+        from auditing.queued_audit import AuditQueue
+
+        return AuditQueue(
+            user_id=user_id,
+            persist_load=lambda uid: self.load_audit_queue(uid),
+            persist_save=lambda uid, rows: self.save_audit_queue(uid, rows),
+            fail_soft=True,
+            max_entries=max_entries,
+        )
+
+    def apply_audit_stale_marks_to_bond(
+        self,
+        user_id: str,
+        *,
+        audit_id: str,
+        potentially_stale: list[str] | None = None,
+        summary: str = "",
+    ) -> BondStateRecord:
+        """Write potentially_stale markers from a completed audit onto BondState.
+
+        Scaffolding only — does not rewrite enjoyment/CTT values.
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        marks = [
+            {
+                "target": str(t)[:64],
+                "reason": str(summary or "")[:160],
+                "audit_id": str(audit_id)[:48],
+                "marked_at": now,
+            }
+            for t in (potentially_stale or [])
+            if t
+        ]
+        return self.merge_bond_provenance_markers(
+            user_id,
+            {
+                "potentially_stale": marks,
+                "last_audit_id": audit_id,
+                "last_audit_at": now,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Decision logs (EthicsEngine ownership)

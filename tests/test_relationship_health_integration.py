@@ -803,6 +803,137 @@ def main() -> int:
             f"obs_count={cand_bag.get('count')} gate_max={cand_bag.get('gate', {}).get('allowed_max')}"
         )
 
+        # ------------------------------------------------------------------
+        # 6f. Enjoyment score (advisory co-evolution, RH-gated)
+        # ------------------------------------------------------------------
+        section("6f. Enjoyment-driven personality scoring (advisory)")
+        from core.enjoyment_score import (
+            EnjoymentScore,
+            soft_texture_nudge_from_enjoyment,
+            update_enjoyment_score,
+        )
+
+        rh_enj = RelationshipHealth()
+        bag1 = rh_enj.update_enjoyment_score(
+            signals={
+                "continuation": 0.8,
+                "positive_language": 0.7,
+                "special_interest": "trains",
+                "stimming_trigger": "train_sounds",
+            },
+            apply_texture_nudge=True,
+        )
+        check(
+            "enjoyment score is a bag with score",
+            isinstance(bag1, dict) and "score" in bag1,
+            str(bag1)[:160],
+        )
+        check(
+            "enjoyment score forces_speech False",
+            bag1.get("forces_speech") is False
+            and bag1.get("forces_question") is False,
+        )
+        check(
+            "enjoyment has signal breakdown",
+            isinstance(bag1.get("signals"), dict) and len(bag1.get("signals") or {}) >= 1,
+            str(bag1.get("signals")),
+        )
+        check(
+            "enjoyment has provenance evidence",
+            isinstance(bag1.get("evidence"), list) and len(bag1.get("evidence") or []) >= 1,
+        )
+        check(
+            "preferred topics capture special interest",
+            "trains" in (bag1.get("preferred_topics") or [])
+            or "train_sounds" in (bag1.get("preferred_topics") or []),
+            str(bag1.get("preferred_topics")),
+        )
+        check(
+            "influence_allowed True without protective flags",
+            bag1.get("influence_allowed") is True,
+            str(bag1.get("gates_applied")),
+        )
+        score_mid = float(bag1.get("score") or 0)
+        # Second positive update should not decrease when signals strong
+        bag2 = rh_enj.update_enjoyment_score(
+            interaction={
+                "type": "positive_interaction",
+                "impact": 0.3,
+                "enjoyment_signals": {
+                    "continuation": 0.9,
+                    "special_interest": "trains",
+                },
+            },
+            apply_texture_nudge=True,
+        )
+        check(
+            "second enjoyment update raises or holds score",
+            float(bag2.get("score") or 0) >= score_mid - 0.05,
+            f"mid={score_mid} later={bag2.get('score')}",
+        )
+        # Protective flag blocks influence
+        rh_enj.state.health_flags.append("emerging_dependency")
+        bag_blocked = rh_enj.update_enjoyment_score(
+            signals={"continuation": 0.9, "positive_language": 0.9},
+            apply_texture_nudge=True,
+        )
+        check(
+            "emerging_dependency blocks influence_allowed",
+            bag_blocked.get("influence_allowed") is False,
+            str(bag_blocked.get("gates_applied")),
+        )
+        check(
+            "blocked influence yields no texture nudge",
+            soft_texture_nudge_from_enjoyment(bag_blocked) == {},
+            str(soft_texture_nudge_from_enjoyment(bag_blocked)),
+        )
+        # Score still present for audit when blocked
+        check(
+            "score retained under RH gate for audit",
+            float(bag_blocked.get("score") or 0) > 0,
+        )
+        ctx_enj = rh_enj.as_context()
+        check(
+            "as_context exposes enjoyment_score",
+            isinstance(ctx_enj.get("enjoyment_score"), dict)
+            and ctx_enj["enjoyment_score"].get("forces_speech") is False,
+            str(ctx_enj.get("enjoyment_score"))[:160],
+        )
+        # Pure module round-trip
+        es = EnjoymentScore(score=0.7, evidence=["test"], sample_count=2)
+        check(
+            "EnjoymentScore.to_dict forces false",
+            es.to_dict().get("forces_speech") is False,
+        )
+        check(
+            "EnjoymentScore.from_dict restores score",
+            abs(EnjoymentScore.from_dict(es.to_dict()).score - 0.7) < 1e-6,
+        )
+        # update_bond path picks up enjoyment_signals
+        rh_ub = RelationshipHealth()
+        rh_ub.update_bond(
+            {
+                "type": "positive_interaction",
+                "impact": 0.2,
+                "boundary_respected": True,
+                "enjoyment_signals": {
+                    "continuation": 0.75,
+                    "positive_language": 0.6,
+                    "special_interest": "birds",
+                },
+            }
+        )
+        check(
+            "update_bond writes enjoyment_score",
+            isinstance(rh_ub.state.enjoyment_score, dict)
+            and float(rh_ub.state.enjoyment_score.get("score") or 0) > 0.45,
+            str(rh_ub.state.enjoyment_score)[:160],
+        )
+        print(
+            f"  enjoyment score={bag2.get('score')} blocked={bag_blocked.get('influence_allowed')} "
+            f"topics={bag2.get('preferred_topics')}"
+        )
+
     except Exception as exc:
         global _failed
         _failed += 1

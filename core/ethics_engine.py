@@ -229,6 +229,7 @@ class EthicsEngine:
         persist_decisions: bool = True,
         max_persisted_decision_logs: int | None = None,
         development_context: Any | None = None,
+        queue_audits: bool = True,
     ) -> None:
         """Initialize the EthicsEngine.
 
@@ -262,6 +263,9 @@ class EthicsEngine:
             development_context: Optional ``DevelopmentPhaseContext``, dict, or
                 phase string (``development`` / ``testing`` / ``stable``). None
                 uses the project default (active development / testing).
+            queue_audits: When True and persistence supports audit queues,
+                suggest/enqueue deferred provenance audits after logging
+                (fail-soft; never blocks evaluate).
 
         The engine stores a reference to the ontology and consults it
         symbolically during every evaluate() call.
@@ -288,6 +292,8 @@ class EthicsEngine:
         self._development_context: DevelopmentPhaseContext = resolve_development_context(
             development_context
         )
+        # Deferred audit scaffolding (optional; never blocks evaluate)
+        self._queue_audits = bool(queue_audits) and persistence is not None
 
     @property
     def ontology(self) -> EthicalOntology:
@@ -8709,6 +8715,7 @@ class EthicsEngine:
         )
         self._decision_logs.append(log_entry)
         self._maybe_persist_decision_log(log_entry, user_id=user_id)
+        self._maybe_enqueue_deferred_audit(log_entry, stance=stance, user_id=user_id)
 
     def _maybe_persist_decision_log(
         self, log_entry: DecisionLog, *, user_id: str
@@ -8730,6 +8737,52 @@ class EthicsEngine:
             )
         except Exception:
             # Optional persistence: never interrupt deliberation
+            return
+
+    def _maybe_enqueue_deferred_audit(
+        self,
+        log_entry: DecisionLog,
+        *,
+        stance: EthicalStance,
+        user_id: str,
+    ) -> None:
+        """Fail-soft enqueue of a deferred provenance audit (scaffolding).
+
+        Never blocks evaluate(). Only runs when persistence exposes an audit
+        queue and ``queue_audits`` is enabled. Does not force speech/questions.
+        """
+        if not self._queue_audits or self._persistence is None:
+            return
+        if not hasattr(self._persistence, "get_audit_queue"):
+            return
+        try:
+            from auditing.queued_audit import suggest_audit_from_decision
+
+            suggestion = suggest_audit_from_decision(
+                decision=str(getattr(stance, "decision", "") or ""),
+                flags=list(getattr(stance, "flags", None) or []),
+                user_id=user_id,
+                decision_log_ref=str(getattr(log_entry, "timestamp", "") or ""),
+                evidence_snapshot=getattr(log_entry, "evidence_snapshot", None)
+                if isinstance(getattr(log_entry, "evidence_snapshot", None), dict)
+                else None,
+            )
+            if not suggestion:
+                return
+            queue = self._persistence.get_audit_queue(user_id)
+            item = queue.enqueue(**suggestion)
+            # Attach inspectable ref on stance impact (non-speaking)
+            impact = getattr(stance, "relationship_impact", None)
+            if isinstance(impact, dict) and item is not None:
+                impact["queued_audit_ref"] = {
+                    "audit_id": getattr(item, "audit_id", ""),
+                    "priority_label": getattr(item, "priority_label", ""),
+                    "topic": getattr(item, "topic", ""),
+                    "status": getattr(item, "status", "pending"),
+                    "forces_speech": False,
+                    "forces_question": False,
+                }
+        except Exception:
             return
 
     def get_decision_history(self, limit: int | None = None) -> list[DecisionLog]:
