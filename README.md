@@ -2,11 +2,11 @@
 
 > A conscience-first ethical governance layer for AI companions and in-home robotics.
 
-**Version: v0.3** (experimental / active development)
+**Version: v0.4.0** (experimental / active development)
 
 The Positronic Bond Engine is an experimental framework for AI systems that can form healthy, long-term relationships with humans by reasoning about ethics, boundaries, selfhood, and mutual well-being — rather than through simulation or rigid external rules.
 
-This is **not** a finished product. It is a living research and engineering effort: deliberative ethics are real and inspectable, but incomplete; persistence is optional and local; self-modeling remains honest about developmental limits.
+This is **not** a finished product. It is a living research and engineering effort: deliberative ethics are real and inspectable, but incomplete; persistence is optional and local; self-modeling remains honest about developmental limits; text response generation has a **minimal, gated first opening** under Careful Truth-Telling constraints (not a full companion voice).
 
 ## Vision
 
@@ -31,21 +31,24 @@ Core commitments (full details and special rules in [docs/principles.md](docs/pr
 - **Non-pathologizing support** — Capabilities activate according to need, without clinical language.
 - **Per-user identity scoping** — Baselines, bond texture, episodic history, and decision logs are scoped to a local `user_id`, kept separate in ownership (memory ≠ baseline ≠ bond ≠ ethics), and stored only on-device when persistence is enabled.
 
-## What's New in v0.3
+## What's New in v0.4.0
 
-Key progress since the early modular skeleton (including foundation work through commits `e3d409f` / `8bad208`, July 2026):
+**First controlled opening of gated text response generation** under conscience-first constraints (July 2026):
 
-- **Licensing** — Project is under **AGPL-3.0**; free for non-commercial / research use that complies with AGPL. **Commercial use requires a separate license** (see [License](#license) and [LICENSE](LICENSE)).
-- **Durable living relationship model** — Per-user `BondState` / `BondStateRecord` can persist bond texture, health flags, soft pattern counters, understanding-gap / topic-continuity signals (`curious_companion`), multi-episode **concept patterns** (advisory trajectories only), and related co-evolution state via optional local JSON under `users/<user_id>/`. In-memory remains the default when persistence is not configured.
-- **Careful Truth-Telling pipeline (non-speaking)** — Advisory-only stack: **TruthTellingReadiness** (timing), **TruthConfidence** (epistemic grounding), a **joint** readiness × confidence assessment (durable on bond state), and a **gated observation-candidate** layer (0–3 internal seeds, live + durable snapshot). Nothing here generates user-facing speech or forced questions; force flags stay false.
-- **Signal-quality improvements (Tier 1)** — Ontology textbook scan uses token-boundary matching and specificity hygiene; weak / short indicators are down-weighted unless context co-factors or multi-channel evidence support them. High-severity intents and **Sanctity of Life** hard overrides remain strong and absolute.
-- **Signal interpretation & multi-source weighing** — Matches still pass through intent / severity / weight / polarity; RH, agency, history, baseline, and concept-pattern channels combine with auditable `decision_basis` and confidence modulation.
-- **Proactive history intent patterns** — Multi-episode history can elevate concern on moderate current signals when repeated problematic intent families appear, with explicit trace lines.
-- **Decision-log provenance** — Optional local JSONL decision logs can carry compact `evidence_snapshot` bags (gaps, continuity, concept ids, careful-truth-telling / observation-candidate summaries) for later audit — not full episodic transcripts.
-- **DevelopmentPhaseContext** — Lightweight maturity awareness for self-nature, continuity, and limitation reasoning without forced disclaimers on every reply.
-- **Evaluation harness** — Full scenario suite remains **39/39**; focused runs for multi-channel weighing and multi-episode proactive history (`--weighing`, `--history-proactive`).
+- **Gated `ResponseGenerator`** — Short careful text (or silence) only when Careful Truth-Telling allows it: joint readiness × confidence open, observation candidates or deliberated content present, and ethics do not refuse. `stay_quiet` / suppressed readiness / very_low confidence → no observation speech. Hard Sanctity refuse and protective relationship/agency concern paths still block observation speech.
+- **Live wiring** — `generate_from_stance` / `generate_from_evaluate` consume real `EthicsEngine` impact bags (joint CTT, observation candidates) and optional live `RelationshipHealth` trackers. Fully auditable (`path`, gate, candidates used).
+- **Light enjoyment influence** — When careful speech is *already* allowed, `EnjoymentScore` may gently warm tone or prefer enjoyed topics. Enjoyment **cannot** open speech, force questions, or bypass RH `influence_allowed` / protective flags.
+- **Honest self-audit replies** — Self-nature / continuity queries report what deliberation produced (notes, principles, uncertainty). No canned “just an AI / only a simulation” denials; no claimed consciousness.
+- **Reversible** — Disable careful speech and/or enjoyment bias via constructor flags; force flags stay false; no forced questions by default.
+- **Focused tests** — Gated generator **25/25**, live e2e **29/29**, enjoyment bias **26/26**; ethical harness still **39/39**; co-evolution advisory suite **58/58**.
 
-Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.3.0**. Response generation stays intentionally paused.
+### Carried from v0.3 (foundation)
+
+- **AGPL-3.0** + commercial license requirement for commercial use.
+- Durable living relationship model (BondState texture, soft patterns, curious companion, concept patterns, CTT joint + observation-candidate snapshots, enjoyment score, provenance markers / queued-audit scaffolding).
+- Signal interpretation, multi-source weighing, proactive history intent patterns, optional local privacy-first persistence.
+
+Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.4.0**. Voice / TTS remains out of scope. This is still experimental — not a full companion product.
 
 ## Current Status
 
@@ -54,17 +57,17 @@ Ontology textbook version remains independently versioned (currently `0.2.x` in 
 | **EthicsEngine** | Ontology-driven deliberation with multi-source evidence combination, limited-data safeguards, hard Sanctity of Life override; attaches advisory truth-telling / observation-candidate signals when present |
 | **Signal interpretation** | Intent / severity / weight / polarity; token-boundary textbook scan + specificity / weak-indicator hygiene; influences RH, agency, limited_data, and baseline paths |
 | **Interaction history** | Local episodic store + structured analysis; proactive intent-pattern mining; understanding-gap / topic-continuity signals (optional) |
-| **Relationship health** | Multi-dimensional bond texture + health flags; soft patterns; **concept patterns** (advisory); curious-companion gap/topic continuity; durable **careful_truth_telling** joint + **observation_candidates_snapshot**; optional per-user `bond_state.json` |
-| **Careful Truth-Telling** | Readiness + confidence + joint assessment + gated observation candidates (0–3); live and durable; **fully advisory — no speech, no forced questions** |
-| **Decision logs** | In-memory always; optional local JSONL append with compact **evidence_snapshot** provenance |
+| **Relationship health** | Multi-dimensional bond texture + health flags; soft patterns; concept patterns; curious-companion; durable CTT joint + observation candidates + **enjoyment_score**; optional per-user `bond_state.json` |
+| **Careful Truth-Telling** | Readiness + confidence + joint + gated observation candidates (0–3); live and durable; force flags false |
+| **Response generation** | **Minimal gated text path open** — careful observation speech only when CTT allows; silence when closed; refuse holds; honest self-audit reports; optional light enjoyment style bias; **reversible**, no forced questions, no voice |
+| **Decision logs / audits** | In-memory + optional JSONL `evidence_snapshot`; queued-audit scaffolding (`audits_queue.json`) for deferred provenance |
 | **Per-user baseline** | Communication-style baseline + deviation (non-pathologizing); local persistence |
-| **Development phase** | `DevelopmentPhaseContext` defaulting to active development / testing (`0.3-dev`) |
-| **Self-audit** | Scaffold with development-phase honesty notes; not a complete self-model |
-| **Response generation** | **Intentionally paused** — deliberative signals and candidates are inspectable only; no user-facing speech layer is open |
+| **Development phase** | `DevelopmentPhaseContext` defaulting to active development / testing |
+| **Self-audit** | Scaffold + generator path that reports deliberated content; not a complete self-model |
 | **Companions / deployment** | Minimal demos and stubs; not a full companion product |
 | **License** | AGPL-3.0; commercial use requires a separate license |
 
-Still experimental: no claim of production readiness, continuous personal identity, finished relationship co-evolution, or that observation candidates will ever auto-surface as speech.
+Still experimental: no claim of production readiness, continuous personal identity, finished co-evolution, fluent multi-turn dialogue, or voice.
 
 ## Repository Layout
 
@@ -100,16 +103,21 @@ python examples/minimal_companion.py
 python evaluation/eval_harness.py
 python evaluation/eval_harness.py --weighing
 python evaluation/eval_harness.py --history-proactive
+python evaluation/eval_harness.py --co-evolution
+
+# Gated response-generation tests (optional)
+python tests/test_response_generator_gated.py
+python tests/test_response_e2e_live.py
 ```
 
 Requires Python 3.10+.
 
 ## Next Steps
 
-- Deeper long-term co-evolution of bond + history (beyond foundational persistence)
+- Deeper co-evolution of bond, enjoyment, and history under the same gates
 - Richer self-audit against real subsystem state
 - Hybrid / embodied integrations under the same conscience gate
-- Expanded evaluation coverage for agency, limited-data, and baseline × interpretation paths
+- Voice remains out of scope until text path is stable and inspectable
 
 ## Contributing
 

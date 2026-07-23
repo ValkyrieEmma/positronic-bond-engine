@@ -281,6 +281,8 @@ def process_user_message(
         "user_message": user_text,
         "user_interaction": {"text": user_text},
         "interaction_history_limit": 5,
+        # Live tracker so engine can attach CTT candidates onto impact
+        "relationship_health_tracker": rh,
         **memory.as_ethics_context(USER_ID, limit=5),
     }
     rh_ctx = rh.as_context()
@@ -291,12 +293,13 @@ def process_user_message(
     )
     _print_stance(stance)
 
-    # 5) Map stance → short reply or honest hold (never softens REFUSE)
+    # 5) Map live stance → gated reply (CTT joint + candidates from impact)
+    #    generate_from_stance consumes engine-attached bags; never softens REFUSE.
     deviation = baseliner.detect_deviation(USER_ID, {"text": user_text})
-    reply = responder.generate(
+    reply = responder.generate_from_stance(
         stance,
-        context,
-        relationship_health=rh_ctx,
+        relationship_health=rh,
+        context=context,
         baseline_snapshot={
             "playfulness_level": bl.playfulness_level,
             "communication_patterns": bl.communication_patterns,

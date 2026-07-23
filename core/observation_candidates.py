@@ -16,7 +16,8 @@ This module is **advisory and non-speaking**. It does **not**:
 - raise hard ethical refusals
 - decide that anything must be said
 
-Future response layers may consult these candidates; nothing here opens speech.
+``ResponseGenerator`` may consult these candidates for a **gated** careful
+text path; this module itself still never opens speech.
 """
 
 from __future__ import annotations
