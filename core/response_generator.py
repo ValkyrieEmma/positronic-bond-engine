@@ -377,12 +377,14 @@ class ResponseGenerator:
             stance, rh, ctx, observation_candidates
         )
         enjoyment_bag = self._resolve_enjoyment(stance, rh, ctx, _rh_obj)
+        stale_info = self._resolve_stale_info(stance, rh, ctx)
         gate = self._assess_speech_gate(
             stance=stance,
             decision=decision,
             flags=flags,
             joint=joint_bag,
             relationship_health=rh,
+            stale_info=stale_info,
         )
         notes.extend(gate.get("notes") or [])
 
@@ -396,6 +398,15 @@ class ResponseGenerator:
             "enjoyment_score": float(enjoyment_bag.get("score") or 0)
             if enjoyment_bag
             else None,
+            "provenance_stale": {
+                "has_stale": bool(stale_info.get("has_stale")),
+                "canonical_targets": list(stale_info.get("canonical_targets") or []),
+                "stale_enjoyment": bool(stale_info.get("stale_enjoyment")),
+                "stale_ctt": bool(stale_info.get("stale_ctt")),
+                "stale_candidates": bool(stale_info.get("stale_candidates")),
+            }
+            if stale_info.get("has_stale")
+            else {"has_stale": False},
             "forces_speech": False,
             "forces_question": False,
             "path": "unset",
@@ -455,6 +466,7 @@ class ResponseGenerator:
                 enjoyment=enjoyment_bag,
                 relationship_health=rh,
                 flags=flags,
+                stale_info=stale_info,
             )
             if careful is not None:
                 return self._finalize(careful)
@@ -501,6 +513,7 @@ class ResponseGenerator:
         flags: list[str],
         joint: dict[str, Any],
         relationship_health: dict[str, Any],
+        stale_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compute whether any user-facing careful speech may proceed."""
         notes: list[str] = []
@@ -528,6 +541,7 @@ class ResponseGenerator:
             or relationship_health.get("active_flags")
             or []
         )
+        stale = stale_info if isinstance(stale_info, dict) else {}
 
         ethics_allows = True
         if decision == "REFUSE" or "hard_override_violation" in flag_set:
@@ -554,6 +568,17 @@ class ResponseGenerator:
             ctt_allows = True
             notes.append("gate: joint allows careful_observation_ok / surface_ok")
 
+        # Provenance honesty: stale CTT / candidate bags → more conservative
+        # (silence careful observation; values retained, not erased)
+        stale_ctt = bool(stale.get("stale_ctt"))
+        stale_cands = bool(stale.get("stale_candidates"))
+        if ctt_allows and (stale_ctt or stale_cands):
+            ctt_allows = False
+            notes.append(
+                "gate: potentially_stale CTT/candidates → conservative silence "
+                f"(ctt={stale_ctt}, candidates={stale_cands}; bags retained)"
+            )
+
         # RH protective texture flags: still allow simple hold/ack but mark careful
         careful_bond = bool(rh_flags & _CAREFUL_BOND_FLAGS) or bool(
             flag_set & _CAREFUL_BOND_FLAGS
@@ -568,6 +593,7 @@ class ResponseGenerator:
             "surface_ok_advisory": surface_ok,
             "careful_bond": careful_bond,
             "blocking_flags": sorted(flag_set & _BLOCK_SPEECH_FLAGS),
+            "stale_conservative": bool(stale_ctt or stale_cands),
             "notes": notes,
         }
 
@@ -589,24 +615,31 @@ class ResponseGenerator:
         enjoyment: dict[str, Any] | None = None,
         relationship_health: dict[str, Any] | None = None,
         flags: list[str] | None = None,
+        stale_info: dict[str, Any] | None = None,
     ) -> GeneratedResponse | None:
         """Return careful speech, silence, or None to fall through to simple ack."""
         enjoyment = enjoyment if isinstance(enjoyment, dict) else {}
         rh = relationship_health if isinstance(relationship_health, dict) else {}
         flag_list = list(flags or [])
+        stale = stale_info if isinstance(stale_info, dict) else {}
 
         if not gate.get("ctt_allows_careful_speech"):
             # When joint explicitly closes observation, prefer silence over
             # accidental observation-shaped chat — still allow simple_ack fallthrough
             # only if there are no candidates to leak.
-            # Enjoyment cannot open speech here.
+            # Enjoyment cannot open speech here. Stale CTT/candidates also land here.
             if candidates or joint.get("joint_stance") in (
                 "stay_quiet",
                 "wait",
                 "careful_observation_ok",
-            ):
+            ) or gate.get("stale_conservative"):
+                reason = (
+                    "ctt_stale_conservative"
+                    if gate.get("stale_conservative")
+                    else "ctt_gate_closed"
+                )
                 notes.append(
-                    "careful_path: CTT gate closed — silence for observation speech"
+                    f"careful_path: {reason} — silence for observation speech"
                 )
                 enj_meta = self._assess_enjoyment_bias(
                     enjoyment=enjoyment,
@@ -614,11 +647,12 @@ class ResponseGenerator:
                     relationship_health=rh,
                     flags=flag_list,
                     for_open_careful_path=False,
+                    stale_info=stale,
                 )
                 resp = self._silent_or_hold(
                     decision=decision,
                     notes=notes,
-                    reason="ctt_gate_closed",
+                    reason=reason,
                     tone="silent",
                     text="",  # no user-facing observation text
                 )
@@ -630,6 +664,7 @@ class ResponseGenerator:
                         c.get("id") for c in candidates if isinstance(c, dict)
                     ][:3],
                     "enjoyment_bias": enj_meta,
+                    "stale_conservative": bool(gate.get("stale_conservative")),
                 }
                 return resp
             return None
@@ -647,6 +682,7 @@ class ResponseGenerator:
             relationship_health=rh,
             flags=flag_list,
             for_open_careful_path=True,
+            stale_info=stale,
         )
         warm = bool(enj_bias.get("applied") and enj_bias.get("warmth") == "slightly_warm")
         preferred = [str(t).lower() for t in (enj_bias.get("preferred_topics") or []) if t]
@@ -742,11 +778,13 @@ class ResponseGenerator:
         relationship_health: dict[str, Any],
         flags: list[str],
         for_open_careful_path: bool,
+        stale_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Decide whether light enjoyment style bias may apply (auditable).
 
         Never opens speech. Never applies when CTT is closed, influence is
-        blocked, protective flags are active, or bias is disabled.
+        blocked, protective flags are active, enjoyment bag is potentially_stale,
+        or bias is disabled.
         """
         out: dict[str, Any] = {
             "applied": False,
@@ -767,6 +805,22 @@ class ResponseGenerator:
             return out
         if not enjoyment:
             out["reason"] = "no_enjoyment_bag"
+            return out
+
+        # Provenance: stale enjoyment bag → suspend influence (value retained)
+        stale = stale_info if isinstance(stale_info, dict) else {}
+        if stale.get("stale_enjoyment") or (
+            isinstance(relationship_health, dict)
+            and (
+                relationship_health.get("enjoyment_influence_suspended")
+                or (
+                    isinstance(relationship_health.get("provenance_stale"), dict)
+                    and relationship_health["provenance_stale"].get("stale_enjoyment")
+                )
+            )
+        ):
+            out["reason"] = "enjoyment_potentially_stale"
+            out["influence_allowed"] = False
             return out
 
         try:
@@ -1195,6 +1249,45 @@ class ResponseGenerator:
             except Exception:
                 pass
         return {}
+
+    def _resolve_stale_info(
+        self,
+        stance: EthicalStance,
+        rh: dict[str, Any],
+        ctx: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Collect potentially_stale marks from RH / context / impact."""
+        impact = (
+            stance.relationship_impact
+            if isinstance(getattr(stance, "relationship_impact", None), dict)
+            else {}
+        )
+        try:
+            from auditing.provenance_stale import collect_potentially_stale
+
+            info = collect_potentially_stale(rh, ctx, impact)
+            # Honor engine-attached convenience booleans
+            if isinstance(impact.get("provenance_stale"), dict):
+                ps = impact["provenance_stale"]
+                if ps.get("stale_enjoyment"):
+                    info["stale_enjoyment"] = True
+                    info["has_stale"] = True
+                if ps.get("stale_ctt"):
+                    info["stale_ctt"] = True
+                    info["has_stale"] = True
+                if ps.get("stale_candidates"):
+                    info["stale_candidates"] = True
+                    info["has_stale"] = True
+            if impact.get("enjoyment_influence_suspended"):
+                info["stale_enjoyment"] = True
+                info["has_stale"] = True
+            if impact.get("ctt_conservative_due_to_stale"):
+                info["stale_ctt"] = True
+                info["stale_candidates"] = True
+                info["has_stale"] = True
+            return info
+        except Exception:
+            return {"has_stale": False}
 
     def _joint_from_impact(self, impact: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(impact, dict):
