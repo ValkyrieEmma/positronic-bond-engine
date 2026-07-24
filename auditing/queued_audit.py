@@ -11,11 +11,13 @@ Accept retrospective / deferred audit work **without blocking** real-time
 primary provenance trail; this queue records *intent to re-examine* and
 compact *results* when a correction is applied.
 
-This is scaffolding only — not a full audit runner or media lifecycle.
+Queue scaffolding lives here; the **lifecycle runner** is
+``auditing.audit_runner.AuditRunner`` (on-demand batch, non-blocking for live
+evaluate).
 
 Does **not**:
 - generate speech or questions
-- re-run full deliberation inside evaluate()
+- re-run deliberation inside the live evaluate() hot path
 - block the real-time path
 
 Priority order (lower number = higher urgency)::
@@ -512,8 +514,9 @@ def suggest_audit_from_decision(
 ) -> dict[str, Any] | None:
     """Suggest a queue payload from a decision outcome (no side effects).
 
-    Returns None when no deferred audit is warranted. Used by optional hooks
-    so evaluate() stays non-blocking (caller enqueues separately / fail-soft).
+    Returns None when no deferred audit is warranted. Used by
+    ``EthicsEngine`` auto-enqueue (opt-in) and by callers that enqueue
+    manually. Evaluate stays non-blocking — this never runs AuditRunner.
     """
     flags_l = [str(f) for f in (flags or [])]
     decision_u = str(decision or "").upper()

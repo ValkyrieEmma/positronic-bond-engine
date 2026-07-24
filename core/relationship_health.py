@@ -166,6 +166,8 @@ class BondState:
             seeds (0–3) considered for careful truth-telling (non-speaking).
         enjoyment_score: Time-decayed multi-signal enjoyment estimate
             (advisory co-evolution; never forces speech).
+        provenance_markers: Audit-written potentially_stale marks (retained
+            near-miss; not auto-erased).
     """
 
     bond_texture: dict[str, float] = field(
@@ -180,6 +182,7 @@ class BondState:
     careful_truth_telling: dict[str, Any] = field(default_factory=dict)
     observation_candidates_snapshot: dict[str, Any] = field(default_factory=dict)
     enjoyment_score: dict[str, Any] = field(default_factory=dict)
+    provenance_markers: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Plain dict of core fields (for persistence / inspection)."""
@@ -201,6 +204,8 @@ class BondState:
             )
         if self.enjoyment_score:
             out["enjoyment_score"] = dict(self.enjoyment_score)
+        if self.provenance_markers:
+            out["provenance_markers"] = dict(self.provenance_markers)
         return out
 
     @classmethod
@@ -233,6 +238,9 @@ class BondState:
         enj = data.get("enjoyment_score")
         if not isinstance(enj, dict):
             enj = {}
+        prov = data.get("provenance_markers")
+        if not isinstance(prov, dict):
+            prov = {}
         return cls(
             bond_texture=texture,
             interaction_count=int(data.get("interaction_count", 0) or 0),
@@ -247,6 +255,7 @@ class BondState:
             careful_truth_telling=dict(ctt),
             observation_candidates_snapshot=dict(ocs),
             enjoyment_score=dict(enj),
+            provenance_markers=dict(prov),
         )
 
 
@@ -418,6 +427,7 @@ class RelationshipHealth:
                     self.state.observation_candidates_snapshot or {}
                 ),
                 enjoyment_score=dict(self.state.enjoyment_score or {}),
+                provenance_markers=dict(self.state.provenance_markers or {}),
             )
             path = self._persistence.save_bond_state(record)
             return Path(path) if path is not None else None
@@ -464,6 +474,7 @@ class RelationshipHealth:
                 self.state.observation_candidates_snapshot or {}
             ),
             enjoyment_score=dict(self.state.enjoyment_score or {}),
+            provenance_markers=dict(self.state.provenance_markers or {}),
         )
 
     def apply_record(self, record: Any) -> BondState:
@@ -492,6 +503,10 @@ class RelationshipHealth:
                 )
                 or {},
                 "enjoyment_score": getattr(record, "enjoyment_score", {}) or {},
+                "provenance_markers": getattr(
+                    record, "provenance_markers", {}
+                )
+                or {},
             }
         self.state = BondState.from_dict(data)
         uid = None
@@ -1447,6 +1462,9 @@ class RelationshipHealth:
             enj["forces_speech"] = False
             enj["forces_question"] = False
             ctx["enjoyment_score"] = enj
+        # Audit-written potentially_stale marks (near-miss retained)
+        if self.state.provenance_markers:
+            ctx["provenance_markers"] = dict(self.state.provenance_markers)
         if self._identity_notes:
             ctx["identity_notes"] = list(self._identity_notes)
         if self.using_default_user_id:

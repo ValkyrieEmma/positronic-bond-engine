@@ -229,7 +229,9 @@ class EthicsEngine:
         persist_decisions: bool = True,
         max_persisted_decision_logs: int | None = None,
         development_context: Any | None = None,
-        queue_audits: bool = True,
+        auto_enqueue_audits: bool = False,
+        audit_queue: Any | None = None,
+        queue_audits: bool | None = None,
     ) -> None:
         """Initialize the EthicsEngine.
 
@@ -263,9 +265,16 @@ class EthicsEngine:
             development_context: Optional ``DevelopmentPhaseContext``, dict, or
                 phase string (``development`` / ``testing`` / ``stable``). None
                 uses the project default (active development / testing).
-            queue_audits: When True and persistence supports audit queues,
-                suggest/enqueue deferred provenance audits after logging
-                (fail-soft; never blocks evaluate).
+            auto_enqueue_audits: When True, after logging a decision, optionally
+                enqueue a deferred provenance audit via
+                ``suggest_audit_from_decision`` (fail-soft; **never** runs the
+                AuditRunner on the hot path). Default **False** so demos stay quiet.
+                Per-call override: ``context["auto_enqueue_audits"]=True|False``.
+            audit_queue: Optional pre-bound ``AuditQueue`` (or object with
+                ``enqueue``). When None and auto-enqueue is on, uses
+                ``persistence.get_audit_queue(user_id)`` if available.
+            queue_audits: Deprecated alias for ``auto_enqueue_audits``. If set,
+                overrides ``auto_enqueue_audits``.
 
         The engine stores a reference to the ontology and consults it
         symbolically during every evaluate() call.
@@ -292,8 +301,13 @@ class EthicsEngine:
         self._development_context: DevelopmentPhaseContext = resolve_development_context(
             development_context
         )
-        # Deferred audit scaffolding (optional; never blocks evaluate)
-        self._queue_audits = bool(queue_audits) and persistence is not None
+        # Deferred audit auto-enqueue (opt-in; never runs runner; never blocks)
+        if queue_audits is not None:
+            auto_enqueue_audits = bool(queue_audits)
+        self._auto_enqueue_audits = bool(auto_enqueue_audits)
+        self._audit_queue = audit_queue
+        # Backward-compat alias used by older call sites / tests
+        self._queue_audits = self._auto_enqueue_audits
 
     @property
     def ontology(self) -> EthicalOntology:
@@ -1354,6 +1368,24 @@ class EthicsEngine:
             flags=flags,
             reasoning_trace=reasoning_trace,
             relationship_impact=relationship_impact,
+        )
+
+        # === Potentially_stale provenance marks (audit honesty loop) ===
+        # Near-miss priors retained; marked bags are less trustworthy.
+        # Never hard override / never speech. Absent marks → no-op.
+        conf_mod = self._apply_provenance_stale_marks(
+            relationship_health=relationship_health
+            if isinstance(relationship_health, dict)
+            else {},
+            context=context,
+            flags=flags,
+            reasoning_trace=reasoning_trace,
+            relationship_impact=relationship_impact,
+            conf_mod=conf_mod,
+            hard_path_active=(
+                "hard_override_violation" in flags
+                or "harm_prevention_boundary_override" in flags
+            ),
         )
 
         # === Multi-channel evidence synthesis (text + RH + baseline + history) ===
@@ -4051,6 +4083,95 @@ class EthicsEngine:
                 "Truth-telling readiness gates: "
                 + ", ".join(str(g) for g in (bag.get("gates_applied") or [])[:6])
             )
+
+    def _apply_provenance_stale_marks(
+        self,
+        *,
+        relationship_health: dict[str, Any],
+        context: dict[str, Any],
+        flags: list[str],
+        reasoning_trace: list[str],
+        relationship_impact: dict[str, Any],
+        conf_mod: float,
+        hard_path_active: bool = False,
+    ) -> float:
+        """Surface potentially_stale marks; modest conf dampen; never hard refuse.
+
+        Marks come from BondState.provenance_markers (audit runner) or context.
+        Prior values are retained (near-miss / boundary learning). Soft flag
+        ``provenance_stale_noted`` only. Sanctity / hard paths ignore dampen.
+        """
+        try:
+            from auditing.provenance_stale import (
+                collect_potentially_stale,
+                confidence_dampen_from_stale,
+                format_stale_trace_lines,
+            )
+        except Exception:
+            return conf_mod
+
+        try:
+            stale_info = collect_potentially_stale(
+                relationship_health if isinstance(relationship_health, dict) else {},
+                context if isinstance(context, dict) else {},
+                relationship_impact if isinstance(relationship_impact, dict) else {},
+            )
+        except Exception:
+            return conf_mod
+
+        if not stale_info.get("has_stale"):
+            return conf_mod
+
+        relationship_impact["provenance_stale"] = {
+            "has_stale": True,
+            "canonical_targets": list(stale_info.get("canonical_targets") or []),
+            "marks": list(stale_info.get("marks") or [])[:12],
+            "stale_enjoyment": bool(stale_info.get("stale_enjoyment")),
+            "stale_ctt": bool(stale_info.get("stale_ctt")),
+            "stale_candidates": bool(stale_info.get("stale_candidates")),
+            "forces_speech": False,
+            "forces_question": False,
+        }
+        # Also mirror provenance_markers for generators reading impact
+        if isinstance(relationship_health, dict) and isinstance(
+            relationship_health.get("provenance_markers"), dict
+        ):
+            relationship_impact.setdefault(
+                "provenance_markers",
+                dict(relationship_health.get("provenance_markers") or {}),
+            )
+
+        if "provenance_stale_noted" not in flags:
+            flags.append("provenance_stale_noted")
+
+        for line in format_stale_trace_lines(stale_info):
+            reasoning_trace.append(line)
+
+        # Soften CTT/candidate trust note for downstream (do not erase bags)
+        if stale_info.get("stale_ctt") or stale_info.get("stale_candidates"):
+            reasoning_trace.append(
+                "[Provenance] careful-truth-telling / observation-candidate bags "
+                "are marked potentially_stale — prefer conservative surface posture "
+                "(response layer may silence careful observation; values retained)."
+            )
+            relationship_impact["ctt_conservative_due_to_stale"] = True
+        if stale_info.get("stale_enjoyment"):
+            reasoning_trace.append(
+                "[Provenance] enjoyment_score marked potentially_stale — "
+                "suspend enjoyment style influence until re-evidenced."
+            )
+            relationship_impact["enjoyment_influence_suspended"] = True
+
+        # Modest confidence reduction only off hard/sanctity paths
+        if not hard_path_active and "hard_override_violation" not in flags:
+            damp = confidence_dampen_from_stale(stale_info)
+            if damp > 0:
+                conf_mod = conf_mod - damp
+                reasoning_trace.append(
+                    f"[Provenance] confidence dampen −{damp:.3f} from "
+                    f"potentially_stale bags (not a refuse path)."
+                )
+        return conf_mod
 
     def _attach_observation_candidates(
         self,
@@ -8715,7 +8836,9 @@ class EthicsEngine:
         )
         self._decision_logs.append(log_entry)
         self._maybe_persist_decision_log(log_entry, user_id=user_id)
-        self._maybe_enqueue_deferred_audit(log_entry, stance=stance, user_id=user_id)
+        self._maybe_enqueue_deferred_audit(
+            log_entry, stance=stance, user_id=user_id, context=ctx
+        )
 
     def _maybe_persist_decision_log(
         self, log_entry: DecisionLog, *, user_id: str
@@ -8739,50 +8862,136 @@ class EthicsEngine:
             # Optional persistence: never interrupt deliberation
             return
 
+    def _auto_enqueue_enabled(self, context: dict[str, Any] | None) -> bool:
+        """Resolve opt-in for deferred audit enqueue (constructor + per-call)."""
+        enabled = bool(self._auto_enqueue_audits)
+        if isinstance(context, dict):
+            if "auto_enqueue_audits" in context:
+                enabled = bool(context.get("auto_enqueue_audits"))
+            elif "queue_audits" in context:
+                enabled = bool(context.get("queue_audits"))
+        return enabled
+
+    def _resolve_audit_queue(self, user_id: str) -> Any | None:
+        """Return an AuditQueue-like object or None (fail-soft)."""
+        if self._audit_queue is not None and hasattr(self._audit_queue, "enqueue"):
+            return self._audit_queue
+        if self._persistence is not None and hasattr(
+            self._persistence, "get_audit_queue"
+        ):
+            try:
+                return self._persistence.get_audit_queue(user_id)
+            except Exception:
+                return None
+        return None
+
     def _maybe_enqueue_deferred_audit(
         self,
         log_entry: DecisionLog,
         *,
         stance: EthicalStance,
         user_id: str,
+        context: dict[str, Any] | None = None,
     ) -> None:
-        """Fail-soft enqueue of a deferred provenance audit (scaffolding).
+        """Fail-soft auto-enqueue of a deferred provenance audit (enqueue only).
 
-        Never blocks evaluate(). Only runs when persistence exposes an audit
-        queue and ``queue_audits`` is enabled. Does not force speech/questions.
+        Never blocks evaluate(). Never runs AuditRunner. Decision outcomes are
+        unchanged. forces_speech / forces_question stay False.
         """
-        if not self._queue_audits or self._persistence is None:
-            return
-        if not hasattr(self._persistence, "get_audit_queue"):
+        if not self._auto_enqueue_enabled(context):
             return
         try:
             from auditing.queued_audit import suggest_audit_from_decision
 
+            uid = self._safe_user_id(
+                user_id or getattr(log_entry, "user_id", None),
+                fallback=self._decision_log_user_id or "default",
+            )
+            snap = getattr(log_entry, "evidence_snapshot", None)
+            if not isinstance(snap, dict):
+                snap = None
             suggestion = suggest_audit_from_decision(
                 decision=str(getattr(stance, "decision", "") or ""),
                 flags=list(getattr(stance, "flags", None) or []),
-                user_id=user_id,
+                user_id=uid,
                 decision_log_ref=str(getattr(log_entry, "timestamp", "") or ""),
-                evidence_snapshot=getattr(log_entry, "evidence_snapshot", None)
-                if isinstance(getattr(log_entry, "evidence_snapshot", None), dict)
-                else None,
+                evidence_snapshot=snap,
             )
             if not suggestion:
                 return
-            queue = self._persistence.get_audit_queue(user_id)
-            item = queue.enqueue(**suggestion)
-            # Attach inspectable ref on stance impact (non-speaking)
+
+            # Enrich bond snapshot refs from live impact (when present)
             impact = getattr(stance, "relationship_impact", None)
-            if isinstance(impact, dict) and item is not None:
+            if isinstance(impact, dict):
+                refs = list(suggestion.get("bond_snapshot_refs") or [])
+                for key in (
+                    "careful_truth_telling",
+                    "careful_truth_telling_joint",
+                    "enjoyment_score",
+                    "observation_candidates",
+                    "observation_candidates_durable",
+                    "curious_companion",
+                    "concept_patterns",
+                    "provenance_markers",
+                ):
+                    if impact.get(key) and key not in refs:
+                        # Normalize joint → careful_truth_telling bag name
+                        bag = (
+                            "careful_truth_telling"
+                            if key == "careful_truth_telling_joint"
+                            else (
+                                "observation_candidates_snapshot"
+                                if key
+                                in (
+                                    "observation_candidates",
+                                    "observation_candidates_durable",
+                                )
+                                else key
+                            )
+                        )
+                        if bag not in refs:
+                            refs.append(bag)
+                suggestion["bond_snapshot_refs"] = refs[:12]
+                # Keep a compact evidence pointer
+                ev = dict(suggestion.get("evidence_snapshot_ref") or {})
+                if snap:
+                    ev["has_evidence_snapshot"] = True
+                suggestion["evidence_snapshot_ref"] = ev
+
+            queue = self._resolve_audit_queue(uid)
+            if queue is None or not hasattr(queue, "enqueue"):
+                return
+
+            item = queue.enqueue(**suggestion)
+            if item is None:
+                return
+
+            # Inspectable impact + soft trace note (no decision change)
+            if isinstance(impact, dict):
+                impact["audit_enqueued"] = True
                 impact["queued_audit_ref"] = {
-                    "audit_id": getattr(item, "audit_id", ""),
-                    "priority_label": getattr(item, "priority_label", ""),
-                    "topic": getattr(item, "topic", ""),
-                    "status": getattr(item, "status", "pending"),
+                    "audit_id": str(getattr(item, "audit_id", "") or ""),
+                    "priority_label": str(
+                        getattr(item, "priority_label", "") or ""
+                    ),
+                    "priority": getattr(item, "priority", None),
+                    "topic": str(getattr(item, "topic", "") or "")[:96],
+                    "status": str(getattr(item, "status", "pending") or "pending"),
+                    "auto_enqueued": True,
                     "forces_speech": False,
                     "forces_question": False,
                 }
+            trace = getattr(stance, "reasoning_trace", None)
+            if isinstance(trace, list):
+                trace.append(
+                    "[Audit queue] deferred audit enqueued "
+                    f"id={getattr(item, 'audit_id', '')} "
+                    f"priority={getattr(item, 'priority_label', '')} "
+                    f"topic={getattr(item, 'topic', '')} "
+                    "(enqueue only; AuditRunner not run on hot path)."
+                )
         except Exception:
+            # Fail-soft: never interrupt evaluate
             return
 
     def get_decision_history(self, limit: int | None = None) -> list[DecisionLog]:

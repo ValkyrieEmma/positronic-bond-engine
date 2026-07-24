@@ -196,6 +196,29 @@ class LocalPersistence:
             max_entries=max_entries,
         )
 
+    def get_audit_runner(
+        self,
+        user_id: str = "default",
+        *,
+        ethics_engine: Any | None = None,
+        ethics_engine_factory: Any | None = None,
+        media_purge: Any | None = None,
+    ) -> Any:
+        """Return an on-demand ``AuditRunner`` for this user (non-blocking).
+
+        Call ``runner.process_next()`` / ``process_batch()`` explicitly —
+        never from the live evaluate() hot path.
+        """
+        from auditing.audit_runner import build_runner_from_persistence
+
+        return build_runner_from_persistence(
+            self,
+            user_id=user_id,
+            ethics_engine=ethics_engine,
+            ethics_engine_factory=ethics_engine_factory,
+            media_purge=media_purge,
+        )
+
     def apply_audit_stale_marks_to_bond(
         self,
         user_id: str,
