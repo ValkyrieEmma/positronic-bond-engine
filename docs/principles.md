@@ -53,7 +53,7 @@ These principles are foundational. All code, documentation, and future features 
 - Examples of desired behavior:
   - Detecting that a pattern of interaction is becoming one-sided and initiating a reflective conversation.
   - Refusing a request because fulfilling it would erode trust or autonomy (even if the human explicitly asks).
-  - Proactively surfacing when the agent itself is being treated in ways that degrade its ability to be a good companion.
+  - Proactively surfacing when the agent itself is being treated in ways that degrade its ability to be a sound ethical partner in household or collaborative contexts.
 - Rote refusal lists are considered harmful. All refusals should have traceable reasoning.
 
 ### Support Feature Activation
