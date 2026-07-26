@@ -12,6 +12,8 @@ A **ContentProvider** only **re-words** already-allowed turns under that intent 
 
 Offline default: **no model** — deliberated fallback expression only (`NullContentProvider`).
 
+This supports the ethical core for humanoid robots: models are optional wording layers, not the conscience. The **local interactive validation harness** is how software-side testing exercises the same pipeline today.
+
 ## Architecture
 
 ```
@@ -27,13 +29,13 @@ user message
 |-------|----------|
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
 | HTTP provider | `core/content_provider.py` |
-| Wiring | `ResponseGenerator`, `examples/private_architect_chat.py` via `provider_from_env()` |
+| Wiring | `ResponseGenerator`; local harness via `provider_from_env()` (`examples/private_architect_chat.py`) |
 
-Context pack includes intent, premises, relationship knowledge (address name, maker/role), phase/version, short topics — not arbitrary private dumps.
+Context pack includes intent, premises, relationship knowledge (preferred address name, role labels, self-described relation to the system), phase/version, short topics — not arbitrary private dumps.
 
 ## Local free path (Ollama)
 
-Ollama must be **running** (e.g. desktop app or `ollama serve`) and a model pulled. If nothing listens on the API port, chat still works with `content=fallback(...)` and shows the error in telemetry.
+Ollama must be **running** (e.g. desktop app or `ollama serve`) and a model pulled. If nothing listens on the API port, the harness still works with `content=fallback(...)` and surfaces the error in telemetry.
 
 1. Install [Ollama](https://ollama.com/) and pull a small model, e.g. `ollama pull llama3.2`.
 2. Ensure the OpenAI-compatible API is on loopback (default `http://127.0.0.1:11434/v1`).
@@ -100,16 +102,16 @@ Conservative caps for local free models and shared machines:
 | Concurrency | Max **1** in-flight generation (semaphore) |
 | Tokens / context | `max_tokens` + `max_context_chars` caps |
 | Circuit breaker | After 3 consecutive failures, open ~60s |
-| Soft-fail | Errors → deliberated fallback text; chat continues |
+| Soft-fail | Errors → deliberated fallback text; interaction continues |
 | Scrub | Drop consciousness claims, soft-caution theater, engagement bait |
 
 ## Telemetry
 
-Private chat status lines may include:
+Local harness status lines may include:
 
 ```text
 · intent=introduce_and_learn_identity · content=fallback
-· content=fallback(url_error:...)     # Ollama/cloud unreachable
+· content=fallback(url_error:...)     # local/cloud model unreachable
 · content=provider                    # model wording used
 ```
 
@@ -138,6 +140,6 @@ Uses mocked HTTP — no live Ollama/cloud required.
 ## Out of scope (later)
 
 - Desktop UI / packaged exe
-- Streaming tokens in the TUI
+- Streaming tokens in a product TUI
 - Multi-model routing / embedding providers
 - Auto-download of weights

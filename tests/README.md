@@ -6,7 +6,7 @@ Integration and smoke tests for the Positronic Bond Engine. These are **standalo
 $env:PYTHONPATH = "."
 ```
 
-## v0.4.1 — private path, speech, deliberation, providers
+## v0.4.1 — local validation path, speech, deliberation, providers
 
 ```powershell
 python tests/test_private_architect_path.py
@@ -19,8 +19,8 @@ python tests/test_content_provider.py
 
 | Script | Focus |
 |--------|--------|
-| `test_private_architect_path.py` | Isolated data root, phase/version, wipe/resume |
-| `test_communicative_deliberation.py` | Relationship knowledge, first meeting, maker+name uptake |
+| `test_private_architect_path.py` | Isolated data root, phase/version, wipe/resume for the local harness |
+| `test_communicative_deliberation.py` | Relationship knowledge, first meeting, role and name uptake |
 | `test_speech_posture.py` | social_direct vs careful_observation evidence bar |
 | `test_social_direct_content.py` | Intent-driven social speech, no soft-caution theater |
 | `test_session_time.py` | Wall-clock / idle session bags |
