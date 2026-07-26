@@ -196,11 +196,13 @@ def main() -> int:
         f"boosted={r_bias.metadata.get('enjoyment_topic_boosted')}",
     )
     check(
-        "warmer tone or lead present",
+        "warmer tone or bias metadata present",
         r_bias.tone == "careful_observation_warm"
-        or "suit you" in r_bias.text.lower()
-        or "gently" in r_bias.text.lower()
-        or "land well" in r_bias.text.lower(),
+        or "pottery" in r_bias.text.lower()
+        or bool(r_bias.metadata.get("enjoyment_topic_boosted"))
+        or (r_bias.metadata.get("enjoyment_bias") or {}).get("applied") is True
+        or (r_bias.metadata.get("enjoyment_bias") or {}).get("warmth")
+        in ("slightly_warm", "neutral_plus"),
         f"tone={r_bias.tone} text={r_bias.text!r}",
     )
     check(

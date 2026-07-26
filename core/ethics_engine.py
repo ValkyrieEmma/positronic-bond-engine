@@ -213,7 +213,7 @@ class EthicsEngine:
       active development, testing, or stable deployment posture.
     - Used primarily on self-nature, continuity, capability, and limitation paths
       (``requires_self_audit``) — not as a rote disclaimer on every action.
-    - Default: active development / testing (v0.3-dev), matching project maturity.
+    - Default: active development / testing (0.4.1-dev), matching project maturity.
     """
 
     def __init__(

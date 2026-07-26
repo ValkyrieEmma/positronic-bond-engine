@@ -36,6 +36,30 @@ from .ontology import (  # noqa: F401
 from .per_user_baseline import DeviationReport, PerUserBaseline  # noqa: F401
 from .relationship_health import BondState, RelationshipHealth  # noqa: F401
 from .response_generator import GeneratedResponse, ResponseGenerator  # noqa: F401
+from .session_time import (  # noqa: F401
+    LONG_IDLE_SECONDS,
+    SESSION_STALE_SECONDS,
+    begin_session,
+    build_session_context,
+    load_session_time,
+    touch_turn,
+)
+from .content_provider import (  # noqa: F401
+    ContentProvider,
+    ContentRequest,
+    ContentResult,
+    NullContentProvider,
+    OpenAICompatibleProvider,
+    ollama_provider,
+    provider_from_env,
+)
+from .communicative_deliberation import (  # noqa: F401
+    CommunicativeResult,
+    deliberate_communication,
+    deliberate_and_persist,
+    knowledge_is_blank,
+    load_relationship_knowledge,
+)
 from .enjoyment_score import (  # noqa: F401
     EnjoymentScore,
     soft_texture_nudge_from_enjoyment,
@@ -86,6 +110,24 @@ __all__ = [
     "RelationshipHealth",
     "resolve_development_context",
     "ResponseGenerator",
+    "LONG_IDLE_SECONDS",
+    "SESSION_STALE_SECONDS",
+    "begin_session",
+    "build_session_context",
+    "load_session_time",
+    "touch_turn",
+    "ContentProvider",
+    "ContentRequest",
+    "ContentResult",
+    "NullContentProvider",
+    "OpenAICompatibleProvider",
+    "ollama_provider",
+    "provider_from_env",
+    "CommunicativeResult",
+    "deliberate_communication",
+    "deliberate_and_persist",
+    "knowledge_is_blank",
+    "load_relationship_knowledge",
     "soft_texture_nudge_from_enjoyment",
     "TruthConfidence",
     "TruthTellingReadiness",
