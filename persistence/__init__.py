@@ -29,7 +29,13 @@ from .models import (
     UserBaseline,
     UserSettings,
 )
-from .paths import default_data_root
+from .paths import (
+    DEFAULT_DATA_DIRNAME,
+    ENV_DATA_ROOT,
+    data_root_is_isolated,
+    default_data_root,
+    is_under_repo,
+)
 from .privacy import PrivacyFilter, PrivacyPolicy
 from .stores import BondStateStore, DecisionLogStore, QueuedAuditStore
 
@@ -44,5 +50,9 @@ __all__ = [
     "UserSettings",
     "PrivacyFilter",
     "PrivacyPolicy",
+    "DEFAULT_DATA_DIRNAME",
+    "ENV_DATA_ROOT",
     "default_data_root",
+    "data_root_is_isolated",
+    "is_under_repo",
 ]

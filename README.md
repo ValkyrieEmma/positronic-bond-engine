@@ -2,7 +2,7 @@
 
 > A conscience-first ethical governance layer for AI companions and in-home robotics.
 
-**Version: v0.4.0** (experimental / active development)
+**Version: v0.4.1** (experimental / active development / testing)
 
 The Positronic Bond Engine is an experimental framework for AI systems that can form healthy, long-term relationships with humans by reasoning about ethics, boundaries, selfhood, and mutual well-being — rather than through simulation or rigid external rules.
 
@@ -31,7 +31,20 @@ Core commitments (full details and special rules in [docs/principles.md](docs/pr
 - **Non-pathologizing support** — Capabilities activate according to need, without clinical language.
 - **Per-user identity scoping** — Baselines, bond texture, episodic history, and decision logs are scoped to a local `user_id`, kept separate in ownership (memory ≠ baseline ≠ bond ≠ ethics), and stored only on-device when persistence is enabled.
 
-## What's New in v0.4.0
+## What's New in v0.4.1
+
+**Private architect validation path** and gated speech depth under active development/testing:
+
+- **Isolated durable data** — default root `%USERPROFILE%\pbe_data` / `~/pbe_data` (outside the git tree); `PBE_DATA_ROOT` override; wipe/resume.
+- **`examples/private_architect_chat.py`** — live EthicsEngine + speech posture + communicative deliberation; phase/version from turn one; `status` / `wipe yes`.
+- **Phase / version** — package **0.4.1**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.4.1-dev` (not stable).
+- **Speech postures** — `social_direct` vs `careful_observation` (real evidence bar) vs `self_audit` vs hold; soft-caution theater blocked.
+- **Communicative deliberation** — meanings → durable **relationship knowledge** (e.g. maker/architect role + address name) → premises → intent → expression. Blank memory + greeting reasons to **first meeting** (introduce + ask who). Not a greeting-template menu. See [docs/communicative_deliberation.md](docs/communicative_deliberation.md).
+- **Session wall-clock** — durable idle/session bags; long idle can shape resume greetings.
+- **Gated model content (optional)** — `ContentProvider` re-words under deliberated intent; OpenAI-compatible (Ollama local free or BYO cloud); offline deliberated fallback; timeouts, concurrency 1, circuit breaker. See [docs/model_providers.md](docs/model_providers.md).
+- **Tests** — private path, speech posture, social_direct, session time, communicative deliberation, content provider (mocked); ethical harness remains the primary ethics regression.
+
+### Carried from v0.4.0
 
 **First controlled opening of gated text response generation** under conscience-first constraints (July 2026):
 
@@ -48,7 +61,7 @@ Core commitments (full details and special rules in [docs/principles.md](docs/pr
 - Durable living relationship model (BondState texture, soft patterns, curious companion, concept patterns, CTT joint + observation-candidate snapshots, enjoyment score, provenance markers / queued-audit scaffolding).
 - Signal interpretation, multi-source weighing, proactive history intent patterns, optional local privacy-first persistence.
 
-Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.4.0**. Voice / TTS remains out of scope. This is still experimental — not a full companion product.
+Ontology textbook version remains independently versioned (currently `0.2.x` in the engine traces); **project package version is 0.4.1**. `DevelopmentPhaseContext` defaults to **development + testing** with `version_hint=0.4.1-dev` (not a stable deployment). Voice / TTS remains out of scope. This is still experimental — not a full companion product.
 
 ## Current Status
 
@@ -59,15 +72,17 @@ Ontology textbook version remains independently versioned (currently `0.2.x` in 
 | **Interaction history** | Local episodic store + structured analysis; proactive intent-pattern mining; understanding-gap / topic-continuity signals (optional) |
 | **Relationship health** | Multi-dimensional bond texture + health flags; soft patterns; concept patterns; curious-companion; durable CTT joint + observation candidates + **enjoyment_score**; optional per-user `bond_state.json` |
 | **Careful Truth-Telling** | Readiness + confidence + joint + gated observation candidates (0–3); live and durable; force flags false |
-| **Response generation** | **Minimal gated text path open** — careful observation speech only when CTT allows; silence when closed; refuse holds; honest self-audit reports; optional light enjoyment style bias; **reversible**, no forced questions, no voice |
+| **Response generation** | Gated postures: careful observation (evidence bar), **social_direct** from communicative intent, self-audit reports, hold/refuse; optional **ContentProvider** re-words intent only; **reversible**, no forced questions, no voice |
+| **Communicative deliberation** | Relationship knowledge + meanings → premises → intent; first-meeting and fact-uptake inspectable; see [docs/communicative_deliberation.md](docs/communicative_deliberation.md) |
+| **Model providers** | Optional OpenAI-compatible client (Ollama / BYO); offline deliberated fallback; hardware-safe caps; see [docs/model_providers.md](docs/model_providers.md) |
 | **Decision logs / audits** | In-memory + optional JSONL `evidence_snapshot`; queued-audit scaffolding (`audits_queue.json`) for deferred provenance |
 | **Per-user baseline** | Communication-style baseline + deviation (non-pathologizing); local persistence |
 | **Development phase** | `DevelopmentPhaseContext` defaulting to active development / testing |
 | **Self-audit** | Scaffold + generator path that reports deliberated content; not a complete self-model |
-| **Companions / deployment** | Minimal demos and stubs; not a full companion product |
+| **Companions / deployment** | Private architect chat (isolated durable data) + minimal demos; not a full companion product |
 | **License** | AGPL-3.0; commercial use requires a separate license |
 
-Still experimental: no claim of production readiness, continuous personal identity, finished co-evolution, fluent multi-turn dialogue, or voice.
+Still experimental: no claim of production readiness, continuous personal identity, finished co-evolution, full open-ended natural language understanding, or voice. Offline speech expresses deliberated intent; live local/cloud models improve wording when configured and reachable.
 
 ## Repository Layout
 
@@ -82,8 +97,8 @@ positronic-bond-engine/
 ├── deployment/     # Configuration and runtime defaults
 ├── evaluation/     # Lightweight evaluation harness
 ├── tests/          # Integration and unit-style tests
-├── docs/           # Vision, principles, guidelines
-├── examples/       # Minimal companion and stubs
+├── docs/           # Vision, principles, guidelines, model providers, communicative deliberation
+├── examples/       # Private architect chat, minimal companion, stubs
 ├── ETHICS.md       # Living ethics notes
 ├── pyproject.toml
 ├── README.md
@@ -96,6 +111,9 @@ positronic-bond-engine/
 # From the project root
 $env:PYTHONPATH = "."
 
+# Private architect chat (durable data OUTSIDE the repo; resume across restarts)
+python examples/private_architect_chat.py
+
 # Minimal companion demo (temp local data, deleted on exit)
 python examples/minimal_companion.py
 
@@ -105,19 +123,59 @@ python evaluation/eval_harness.py --weighing
 python evaluation/eval_harness.py --history-proactive
 python evaluation/eval_harness.py --co-evolution
 
-# Gated response-generation tests (optional)
+# Core regression tests (standalone scripts)
+python tests/test_private_architect_path.py
+python tests/test_communicative_deliberation.py
+python tests/test_speech_posture.py
+python tests/test_content_provider.py
 python tests/test_response_generator_gated.py
 python tests/test_response_e2e_live.py
+
+# Optional: local free model (Ollama must be installed, running, model pulled)
+# $env:PBE_MODEL_PROFILE = "ollama"
+# python examples/private_architect_chat.py
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. Docs: [communicative deliberation](docs/communicative_deliberation.md), [model providers](docs/model_providers.md).
 
-## Next Steps
+## Private architect path (first tester)
 
+Architect validation vehicle — **not** a polished external install. Public framing remains a conscience-first ethical governance layer (see principles); this path is for local pressure-testing only.
+
+| Item | Detail |
+|------|--------|
+| **Start** | `python examples/private_architect_chat.py` (`PYTHONPATH=.`) |
+| **Package / phase** | **v0.4.1**, phase=`development`, testing flags on, `version_hint=0.4.1-dev` |
+| **Default data root** | `%USERPROFILE%\pbe_data` or `~/pbe_data` — **outside** the git tree |
+| **Override** | `PBE_DATA_ROOT` or `--data-root` |
+| **User id** | Default `architect`; `PBE_USER_ID` or `--user` |
+| **Wipe** | In-loop `wipe yes` (or `clear` / `reset`); CLI `--wipe` (this user_id only) |
+| **Session time** | Durable wall-clock bags under settings; `status` shows idle/session age |
+| **Relationship knowledge** | Durable maker/role + address name; `status` shows known facts; wipe clears |
+| **First meeting** | Blank knowledge + greeting → deliberated introduce + ask who (not bare “Hello.”) |
+| **Model content** | Optional; `PBE_MODEL_PROFILE=ollama` or BYO base URL + key; soft-fails if server down — [docs/model_providers.md](docs/model_providers.md) |
+| **Git safety** | Off-tree default; `.gitignore` blocks in-repo `pbe_data/` and private `AGENTS.md` |
+
+## Direction (known next)
+
+**Near term (gated speech depth)**
+
+- Live Ollama/BYO acceptance: model re-words under deliberated intent without template drift
+- Stronger meaning → knowledge without expanding hard-coded reply menus
+- Architect acceptance script (fixed scenarios, not open chat-debug loops)
+
+**Then**
+
+- Tester UI / install path (after content path is trustworthy offline and with a local model)
 - Deeper co-evolution of bond, enjoyment, and history under the same gates
+- Session-level multi-user presence with hard bag isolation
 - Richer self-audit against real subsystem state
 - Hybrid / embodied integrations under the same conscience gate
-- Voice remains out of scope until text path is stable and inspectable
+
+**Out of scope for now**
+
+- Voice / TTS until text path is stable and inspectable
+- Shipping private design docs or unbounded cloud defaults
 
 ## Contributing
 
