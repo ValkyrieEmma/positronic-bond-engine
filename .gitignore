@@ -155,13 +155,31 @@ logs/
 data/
 temp/
 
+# Private architect design / agent context — NEVER publish to public remotes.
+# Conceptual end-product design lives only on the architect machine.
+AGENTS.md
+**/AGENTS.md
+.agents/
+**/.agents/
+*.agents.private.md
+**/PRIVATE_DESIGN.md
+**/private-design/
+
 # Local persistence / personal user data
 # These entries protect user privacy: persistence is local-only and must never
 # be committed (baselines, bond state, settings, decision logs, etc.).
+# Default durable root is OUTSIDE the repo (%USERPROFILE%/pbe_data or ~/pbe_data).
 pbe_data/
 **/pbe_data/
+.pbe_data/
+**/.pbe_data/
 users/
 **/users/
+**/baseline.json
+**/bond_state.json
+**/decision_logs.jsonl
+**/audits_queue.json
+**/interactions.jsonl
 *.sqlite
 *.sqlite3
 *.db-journal

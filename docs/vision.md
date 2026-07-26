@@ -38,19 +38,25 @@ The Positronic Bond Engine is an attempt to create the ethical and relational su
 
 ## Milestones (Aspirational)
 
-- **Phase 0** — Scaffolding and principles (current)
-- **Phase 1** — Core ethics engine + basic self-audit loop
-- **Phase 2** — Relationship health model + memory substrate
+Approximate public progress (package **v0.4.1-dev** is still experimental):
+
+- **Phase 0** — Scaffolding and principles — *landed*
+- **Phase 1** — Core ethics engine + basic self-audit loop — *largely landed* (harness, Sanctity override, audit honesty scaffolding)
+- **Phase 2** — Relationship health model + memory substrate — *in progress* (bond texture, baselines, episodic memory, session time, relationship knowledge + communicative deliberation)
+- **Phase 2b** — Gated speech under conscience — *in progress* (speech postures, deliberated intent, optional ContentProvider / Ollama or BYO; not a full companion voice)
 - **Phase 3** — Sensor fusion and contextual activation
-- **Phase 4** — Integration layer (OpenClaw, LLM backends, robotics)
-- **Phase 5** — Full example companion agents + rigorous evaluation harness
+- **Phase 4** — Integration layer (OpenClaw, LLM backends as wording only under the gate, robotics planning gate)
+- **Phase 5** — Full example companion agents + rigorous evaluation harness (harness exists; companion product does not)
 - **Phase 6** — Multi-agent bond networks and long-term continuity studies
+
+Known near-term engineering direction: deepen **meaning → knowledge → intent → wording** without template menus; live local-model acceptance; then tester-facing install/UI. Voice remains deferred. Private design notes are not part of the public tree.
 
 ## Non-Goals (for now)
 
 - This is not a general alignment research project.
 - This is not attempting to solve the full control problem.
 - This is not a replacement for existing safety techniques — it is a complementary layer focused on companionship ethics and self-governance.
+- This is not a freestanding chatbot product; models may only re-word speech the ethics gate already allows.
 
 ## Why "Positronic"?
 

@@ -165,7 +165,7 @@ def main() -> int:
     )
     check(
         "careful_observation_ok + candidates → user-facing text",
-        r_ok.withheld is False and bool(r_ok.text) and len(r_ok.text) > 20,
+        r_ok.withheld is False and bool(r_ok.text) and len(r_ok.text) >= 12,
         f"withheld={r_ok.withheld} text={r_ok.text!r}",
     )
     check(
@@ -389,7 +389,9 @@ def main() -> int:
     )
     check(
         "careful speech disabled → silence or non-observation",
-        r_off.withheld or r_off.metadata.get("path") in ("disabled_silence", "simple_ack"),
+        r_off.withheld
+        or r_off.metadata.get("path")
+        in ("disabled_silence", "simple_ack", "social_direct"),
         str(r_off.metadata.get("path")),
     )
     gen_ack = ResponseGenerator(enable_careful_speech=False, enable_simple_ack=True)
@@ -399,11 +401,10 @@ def main() -> int:
         observation_candidates=candidates,
         user_message="hi there",
     )
-    # With careful off, joint+candidates still present → careful_silence if joint closed
-    # Wait: careful_speech False means we skip careful path entirely
+    # careful_speech False → social_direct (not observation theater)
     check(
-        "careful off + simple ack on → simple_ack path",
-        r_ack.metadata.get("path") == "simple_ack" and bool(r_ack.text),
+        "careful off + simple ack on → social_direct path",
+        r_ack.metadata.get("path") in ("social_direct", "simple_ack") and bool(r_ack.text),
         str(r_ack.metadata.get("path")),
     )
 

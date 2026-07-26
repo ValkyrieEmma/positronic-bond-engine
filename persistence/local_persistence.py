@@ -15,8 +15,10 @@ explicitly references that topic in direct conversation with the AI.
 
 Local-only
 ----------
-All files live under ``data_root`` (default: ``./pbe_data``). No cloud, no
-remote APIs. Users may delete the entire folder or any per-user subdirectory.
+All files live under ``data_root`` (default: ``%USERPROFILE%/pbe_data`` on
+Windows, ``~/pbe_data`` on POSIX — **outside** the git tree). Override with
+``PBE_DATA_ROOT`` or an explicit path. No cloud, no remote APIs. Users may
+delete the entire folder or any per-user subdirectory.
 
 Extensibility
 -------------
