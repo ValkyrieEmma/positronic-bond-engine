@@ -23,7 +23,7 @@ Design constraints
 ------------------
 - Queryable structured object (dataclass) + plain dict form for evaluate() context
 - Optional overrides via EthicsEngine constructor, evaluate context, or config
-- Default reflects that the project is in active development / testing (v0.4.x)
+- Default reflects that the project is in active development / testing (v0.5.0-dev)
 - Never replaces Sanctity of Life or other hard ethical outcomes
 """
 
@@ -63,7 +63,7 @@ class DevelopmentPhaseContext:
     is_active_development: bool = True
     is_testing: bool = True
     is_stable_deployment: bool = False
-    version_hint: str = "0.4.1-dev"
+    version_hint: str = "0.5.0-dev"
     notes: tuple[str, ...] = field(default_factory=tuple)
     schema_version: int = 1
 
@@ -160,9 +160,9 @@ class DevelopmentPhaseContext:
 def get_default_development_context() -> DevelopmentPhaseContext:
     """Default for current project maturity: active development + testing.
 
-    Reflects Positronic Bond Engine v0.4.x posture: conscience-first deliberation
-    with gated response generation, audit honesty loop scaffolding, optional local
-    persistence, private architect validation path, and incomplete self-model.
+    Reflects Positronic Bond Engine v0.5.0-dev posture: conscience-first deliberation
+    with gated response generation, public interaction entry (binding contract),
+    session presence, optional local persistence, and incomplete self-model.
     Phase remains development+testing until a stable deployment is explicitly marked.
     """
     return DevelopmentPhaseContext(
@@ -171,11 +171,12 @@ def get_default_development_context() -> DevelopmentPhaseContext:
         is_active_development=True,
         is_testing=True,
         is_stable_deployment=False,
-        version_hint="0.4.1-dev",
+        version_hint="0.5.0-dev",
         notes=(
             "Ethical ontology, multi-source weighing, gated response generation, "
-            "audit honesty loop, local persistence, and private architect validation "
-            "are under active iteration; do not over-claim completeness or readiness.",
+            "public interaction entry, session presence, audit honesty loop, and "
+            "local persistence are under active iteration; do not over-claim "
+            "completeness or readiness.",
         ),
     )
 

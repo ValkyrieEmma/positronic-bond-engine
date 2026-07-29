@@ -1,8 +1,8 @@
 # Communicative deliberation & relationship knowledge
 
-Public architecture note for **v0.4.1-dev**. Pairs with [model_providers.md](model_providers.md).
+Public architecture note for **v0.5.0-dev**. Pairs with [model_providers.md](model_providers.md) and [public_entry.md](public_entry.md).
 
-Speech and interaction under the ethical gate should emerge from **reasoning about meaning and relationship**, not from a catalog of chat templates. This supports the Optimus-class target (humanoid robots that must introduce themselves, learn who they are with, and know when to stand down) and is exercised today through the **local development / validation harness**.
+Speech and interaction under the ethical gate should emerge from **reasoning about meaning and relationship**, not from a catalog of chat templates. This supports the Optimus-class target and is exercised via the **public interaction entry** (`api/`); the local CLI is a test harness only.
 
 ## Intent
 
@@ -35,7 +35,8 @@ Implementation:
 | Working agreements (name, questions, feedback) | `core/working_agreements.py` (name kept aligned with knowledge) |
 | Social expression | `core/response_generator.py` (`social_direct`) |
 | Optional wording model | `core/content_provider.py` |
-| Local interactive harness | `examples/private_architect_chat.py` (script path; local validation only) |
+| Public entry (product surface) | `api.InteractionSession` |
+| Local test harness | `examples/private_architect_chat.py` (CLI only; not the product surface) |
 
 ## Durable relationship knowledge
 

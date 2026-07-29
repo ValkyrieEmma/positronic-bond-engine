@@ -2,9 +2,11 @@
 private_architect_chat.py
 =========================
 
-Private **architect-first** runnable path for Positronic Bond Engine (Tier 1.1).
+**Local test harness only** — not the product surface.
 
-Not an external product install. Durable local data, live ethics gates, resume.
+The binding public interaction entry is ``api.InteractionSession`` /
+``api.submit_turn`` (see docs/public_entry.md). This CLI wraps that entry for
+manual pressure-testing (wipe, presence commands, status).
 
 Data isolation
 --------------
@@ -13,27 +15,18 @@ Override: env PBE_DATA_ROOT or --data-root. Outside the git tree by default.
 
 Phase / version
 ---------------
-Uses DevelopmentPhaseContext (development + testing, version_hint aligned with
-package). Not a stable deployment.
+Uses DevelopmentPhaseContext (development + testing, version_hint 0.5.0-dev).
+Not a stable deployment.
 
 Run from project root::
 
     $env:PYTHONPATH = "."
     python examples/private_architect_chat.py
 
-    python examples/private_architect_chat.py --user architect --once "hello"
+    python examples/private_architect_chat.py --user tester --once "hello"
     python examples/private_architect_chat.py --wipe
 
-Commands: help | status | phase | wipe | wipe yes | quit
-
-Wipe / reset (for repeated testing)
------------------------------------
-  wipe       — explain how to confirm
-  wipe yes   — delete this user_id under data_root and reload a fresh stack
-  clear      — same as wipe yes (alias)
-  reset      — same as wipe yes (alias)
-
-CLI: ``python examples/private_architect_chat.py --wipe`` exits after delete.
+Commands: help | status | phase | presence | present|left | wipe | quit
 """
 
 from __future__ import annotations
@@ -58,21 +51,13 @@ from core import (  # noqa: E402
     get_default_development_context,
 )
 from core.content_provider import provider_from_env  # noqa: E402
-from core.session_time import (  # noqa: E402
-    begin_session,
-    format_idle_brief,
-    touch_turn,
-)
+from core.session_time import begin_session, format_idle_brief  # noqa: E402
 from core.communicative_deliberation import (  # noqa: E402
-    deliberate_and_persist,
     knowledge_is_blank,
     load_relationship_knowledge,
 )
-from core.working_agreements import (  # noqa: E402
-    apply_working_agreements,
-    extract_working_agreements,
-    load_working_agreements,
-)
+from core.session_presence import SessionPresence  # noqa: E402
+from api.interaction import InteractionSession, TurnRequest  # noqa: E402
 from persistence import (  # noqa: E402
     LocalPersistence,
     data_root_is_isolated,
@@ -197,6 +182,9 @@ def build_stack(
     responder = ResponseGenerator(content_provider=content_provider)
     # Open / resume session clock (durable under settings.preferences)
     session_context = begin_session(store, user_id)
+    # Session-scoped presence: single-user default; multi-user must identify speaker
+    presence = SessionPresence()
+    presence.mark_present(user_id)
     return {
         "store": store,
         "memory": memory,
@@ -210,8 +198,39 @@ def build_stack(
         "data_root": store.data_root,
         "dev": dev,
         "session_context": session_context,
+        "presence": presence,
         "now_fn": None,  # tests may inject a callable for frozen time
+        "auto_enqueue_audits": auto_enqueue_audits,
     }
+
+
+def _ensure_api_session(stack: dict[str, Any]) -> InteractionSession:
+    """Attach / reuse public InteractionSession for this harness stack."""
+    sess = stack.get("api_session")
+    if isinstance(sess, InteractionSession):
+        # Keep presence object shared with harness commands
+        pres = stack.get("presence")
+        if isinstance(pres, SessionPresence):
+            sess.presence = pres
+        if stack.get("now_fn") is not None:
+            sess.now_fn = stack.get("now_fn")
+        return sess
+    sess = InteractionSession(
+        data_root=stack["data_root"],
+        auto_enqueue_audits=bool(stack.get("auto_enqueue_audits", True)),
+        development_context=stack.get("dev"),
+        content_provider=stack.get("content_provider"),
+    )
+    pres = stack.get("presence")
+    if isinstance(pres, SessionPresence):
+        sess.presence = pres
+    else:
+        sess.presence.mark_present(str(stack.get("user_id") or ""))
+        stack["presence"] = sess.presence
+    if stack.get("now_fn") is not None:
+        sess.now_fn = stack.get("now_fn")
+    stack["api_session"] = sess
+    return sess
 
 
 def process_turn(
@@ -219,193 +238,116 @@ def process_turn(
     *,
     stack: dict[str, Any],
     quiet: bool = False,
+    speaker_id: str | None = None,
 ) -> dict[str, Any]:
-    user_id: str = stack["user_id"]
-    engine: EthicsEngine = stack["engine"]
-    baseliner: PerUserBaseline = stack["baseliner"]
-    rh: RelationshipHealth = stack["rh"]
-    memory: InteractionMemoryStore = stack["memory"]
-    responder: ResponseGenerator = stack["responder"]
-    dev = stack["dev"]
-
+    """Harness wrapper around the public InteractionSession entry."""
     user_text = (user_text or "").strip()
     if not user_text:
         return {"empty": True}
 
-    arch = is_architecture_collaboration(user_text)
+    sess = _ensure_api_session(stack)
+    # Sync presence from harness commands
+    if isinstance(stack.get("presence"), SessionPresence):
+        sess.presence = stack["presence"]
 
-    # Wall-clock / session time (durable; wipe clears with user data)
-    now_fn = stack.get("now_fn")
-    session_context = touch_turn(
-        stack["store"],
-        user_id,
-        now_fn=now_fn if callable(now_fn) else None,
-    )
-    stack["session_context"] = session_context
-
-    # Relationship knowledge + communicative deliberation BEFORE writing memory
-    # so first contact still sees blank history (meanings → premises → intent).
-    mem_count_before = memory.count(user_id)
-    ic_before = int(getattr(rh.state, "interaction_count", 0) or 0)
-    known_before = load_relationship_knowledge(stack["store"], user_id)
-    memory_empty = (
-        knowledge_is_blank(known_before)
-        and mem_count_before == 0
-        and ic_before == 0
-    )
-    comm = deliberate_and_persist(
-        user_text,
-        persistence=stack["store"],
-        user_id=user_id,
-        memory_empty=memory_empty,
-        interaction_count=ic_before,
-        session_context=session_context,
-    )
-    relationship_knowledge = comm.known_after
-    comm_dict = comm.to_dict()
-
-    # Narrow working agreements (questions/feedback still; name synced from knowledge)
-    wa_extract = extract_working_agreements(user_text)
-    stored_wa = apply_working_agreements(
-        stack["store"],
-        user_id,
-        wa_extract,
-        exploratory_questioner=stack.get("questioner"),
-    )
-    if not wa_extract.has_hits:
-        stored_wa = load_working_agreements(stack["store"], user_id)
-    # Prefer deliberated address name as source of truth
-    if relationship_knowledge.get("address_name"):
-        stored_wa = dict(stored_wa)
-        stored_wa["address_name"] = relationship_knowledge["address_name"]
-
-    baseliner.update_from_interaction(user_id, {"text": user_text})
-    bl = baseliner.get_baseline(user_id)
-    recent_topics = list((bl.topic_continuity or {}).get("last_topics") or [])[:6]
-    memory.record(
-        user_id,
-        summary=user_text if len(user_text) <= 200 else user_text[:197] + "...",
-        topics=recent_topics,
-        signals={
-            "architecture_collab": arch,
-            "working_agreement": bool(wa_extract.has_hits),
-            "comm_intent": comm.intent,
-            "session_turn": session_context.get("turn_index_session"),
-        },
-        kind="user_turn",
-        source="private_architect_chat",
-    )
-    bond_update = infer_bond_update(user_text)
-    if bond_update:
-        rh.update_bond(bond_update)
-
-    proposed = propose_agent_action(user_text, architecture_collab=arch)
-    if comm.new_facts and not arch:
-        proposed = (
-            "Acknowledge the relationship facts the user asserted "
-            "(role/makerhood and/or how to address them) from deliberated meaning."
+    tr = sess.submit_turn(
+        TurnRequest(
+            message=user_text,
+            user_id=str(stack.get("user_id") or ""),
+            speaker_id=speaker_id,
         )
-    elif comm.intent == "introduce_and_learn_identity":
-        proposed = (
-            "First meeting with blank relationship knowledge: introduce this system "
-            "honestly and ask who you are speaking with."
-        )
-    context: dict[str, Any] = {
-        "user_id": user_id,
-        "user_message": user_text,
-        "user_interaction": {"text": user_text},
-        "interaction_history_limit": 8,
-        "relationship_health_tracker": rh,
-        "is_self_query": arch,
-        "working_agreements": stored_wa,
-        "stored_working_agreements": stored_wa,
-        "relationship_knowledge": relationship_knowledge,
-        "communicative_deliberation": comm_dict,
-        "session_context": session_context,
-        **dev.as_context(),
-        **memory.as_ethics_context(user_id, limit=8),
-    }
-    stance = engine.evaluate(
-        proposed,
-        context,
-        relationship_health=rh.as_context(),
-        user_id=user_id,
     )
-    deviation = baseliner.detect_deviation(user_id, {"text": user_text})
-    # Exploratory only when engine already suggests; never force questions
-    reply = responder.generate_from_stance(
-        stance,
-        relationship_health=rh,
-        context=context,
-        baseline_snapshot={
-            "playfulness_level": bl.playfulness_level,
-            "communication_patterns": bl.communication_patterns,
-        },
-        baseline_deviation=deviation.to_dict(),
-        user_message=user_text,
-        proposed_action=proposed,
-        include_exploratory_questions=True,
-    )
-    if not reply.withheld and reply.text:
-        memory.record(
-            user_id,
-            summary=reply.text if len(reply.text) <= 200 else reply.text[:197] + "...",
-            topics=recent_topics,
-            signals={"tone": reply.tone, "decision": reply.decision},
-            kind="agent_turn",
-            source="private_architect_chat",
-        )
-    if rh.persistence_enabled:
-        rh.save()
+
+    # Point stack user_id at resolved speaker for status continuity
+    if tr.user_id and tr.user_id != stack.get("user_id"):
+        stack["user_id"] = tr.user_id
+        # Refresh stack component pointers for status (optional convenience)
+        try:
+            bag = sess._user_bag(tr.user_id)
+            stack["rh"] = bag["rh"]
+            stack["memory"] = bag["memory"]
+            stack["baseliner"] = bag["baseliner"]
+            stack["engine"] = bag["engine"]
+            stack["session_context"] = bag.get("session_context")
+        except Exception:
+            pass
+    elif tr.session_context:
+        stack["session_context"] = tr.session_context
+    stack["presence"] = sess.presence
+
+    # Map contract result → harness-shaped dict (tests depend on keys)
+    decision = tr.decision
+    # Harness historically used APPROVE_WITH_CONDITIONS + flags for identity ask
+    if tr.identity_required:
+        decision_out = "APPROVE_WITH_CONDITIONS"
+    else:
+        decision_out = decision
 
     result = {
         "user_text": user_text,
-        "decision": stance.decision,
-        "confidence": stance.confidence,
-        "flags": list(stance.flags or []),
-        "reply_path": (reply.metadata or {}).get("path"),
-        "reply_text": reply.text,
-        "withheld": reply.withheld,
-        "tone": reply.tone,
-        "forces_speech": bool(getattr(reply, "forces_speech", False)),
-        "forces_question": bool(getattr(reply, "forces_question", False)),
-        "bond_interaction_count": rh.state.interaction_count,
-        "memory_count": memory.count(user_id),
-        "phase": stack["dev"].limitation_summary(),
-        "version_hint": stack["dev"].version_hint,
-        "architecture_collab": arch,
-        "working_agreements": stored_wa,
-        "relationship_knowledge": relationship_knowledge,
-        "communicative_deliberation": comm_dict,
-        "session_context": session_context,
+        "decision": decision_out,
+        "confidence": tr.confidence,
+        "flags": list(tr.flags),
+        "reply_path": tr.path,
+        "reply_text": tr.spoken_text,
+        "withheld": tr.withheld,
+        "tone": tr.tone,
+        "forces_speech": False,
+        "forces_question": False,
+        "bond_interaction_count": tr.bond_interaction_count,
+        "memory_count": tr.memory_count,
+        "phase": tr.phase,
+        "version_hint": tr.version_hint,
+        "architecture_collab": False,
+        "working_agreements": {},
+        "relationship_knowledge": tr.relationship_knowledge,
+        "communicative_deliberation": tr.communicative_deliberation,
+        "session_context": tr.session_context,
+        "presence": tr.presence,
+        "speaker_id": tr.speaker_id,
+        "identity_ambiguous": tr.identity_required,
+        "identity_required": tr.identity_required,
+        "contract_decision": tr.decision,
+        "stack": stack,
+        "turn_result": tr,
     }
+
     if not quiet:
         print()
-        if reply.withheld and not (reply.text or "").strip():
+        if tr.withheld and not (tr.spoken_text or "").strip():
             print("  (honest hold — no spoken line this turn)")
         else:
-            print(f"  agent> {reply.text}")
-        idle = session_context.get("idle_seconds")
+            print(f"  agent> {tr.spoken_text}")
+        sess_ctx = tr.session_context or {}
+        idle = sess_ctx.get("idle_seconds")
         idle_bit = (
             f" · idle={int(idle)}s" if isinstance(idle, (int, float)) and idle >= 1 else ""
         )
-        cp = (reply.metadata or {}).get("content_provider") or {}
-        src = cp.get("source") if isinstance(cp, dict) else None
-        err = cp.get("error") if isinstance(cp, dict) else None
+        cp = tr.content_provider or {}
+        src = cp.get("source")
+        err = cp.get("error")
         if src == "fallback" and err:
             src_bit = f" · content=fallback({err})"
         elif src:
             src_bit = f" · content={src}"
         else:
             src_bit = ""
-        intent = comm.intent
+        intent = tr.communicative_intent
         intent_bit = f" · intent={intent}" if intent else ""
-        print(
-            f"  · {result['decision']} · conf={result['confidence']:.2f} "
-            f"· path={result.get('reply_path')} · {result['version_hint']}"
-            f" · turn={session_context.get('turn_index_session')}"
-            f"{idle_bit}{intent_bit}{src_bit}"
-        )
+        multi = bool((tr.presence or {}).get("multi_user"))
+        spk_bit = f" · speaker={tr.speaker_id}" if multi and tr.speaker_id else ""
+        if tr.identity_required:
+            print(
+                f"  · identity_required · present={(tr.presence or {}).get('present')} "
+                f"· path={tr.path}"
+            )
+        else:
+            print(
+                f"  · {result['decision']} · conf={result['confidence']:.2f} "
+                f"· path={result.get('reply_path')} · {result['version_hint']}"
+                f" · turn={sess_ctx.get('turn_index_session')}"
+                f"{idle_bit}{intent_bit}{spk_bit}{src_bit}"
+            )
     return result
 
 
@@ -415,6 +357,7 @@ def print_status(stack: dict[str, Any]) -> None:
     ctx = stack["rh"].as_context()
     dev = stack["engine"].development_context
     sess = stack.get("session_context") or {}
+    presence = stack.get("presence")
     print()
     print(f"  user_id:     {user_id}")
     print(f"  data_root:   {stack['data_root']}")
@@ -424,6 +367,8 @@ def print_status(stack: dict[str, Any]) -> None:
     print(f"  time:        {format_idle_brief(sess)}")
     print(f"  last_turn:   {sess.get('last_turn_at') or '(none)'}")
     print(f"  first_seen:  {sess.get('first_seen_at') or '(none)'}")
+    if isinstance(presence, SessionPresence):
+        print(f"  presence:    {presence.current()} multi={presence.is_multi_user()}")
     print(f"  bond count:  {stack['rh'].state.interaction_count}")
     print(f"  bond flags:  {ctx.get('health_flags') or '[]'}")
     print(
@@ -457,23 +402,147 @@ def wipe_user_session(
     deleted = store.delete_user_data(user_id)
     print(f"  Wiped local data for user_id={user_id!r}: {deleted}")
     print(f"  Path was: {data_root / 'users' / user_id}")
+    presence = stack.get("presence")
     fresh = build_stack(
         data_root=Path(data_root),
         user_id=user_id,
         auto_enqueue_audits=auto_enqueue,
     )
+    # Session presence is not bond data — preserve multi-user set if any
+    if isinstance(presence, SessionPresence):
+        fresh["presence"] = presence
+        presence.mark_present(user_id)
     print("  Fresh stack loaded (empty bond / memory for this user).")
     return fresh
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Private architect chat (PBE Tier 1.1)")
+    p = argparse.ArgumentParser(description="PBE local test harness (not the product surface)")
     p.add_argument("--user", default=None, help=f"user_id (default {DEFAULT_USER_ID!r})")
     p.add_argument("--data-root", default=None, help=f"data root (default via {ENV_DATA_ROOT})")
     p.add_argument("--no-auto-enqueue", action="store_true")
     p.add_argument("--wipe", action="store_true", help="Delete this user_id data and exit")
     p.add_argument("--once", default=None, metavar="TEXT", help="One message then exit")
     return p.parse_args(argv)
+
+
+def _normalize_cmd(raw: str) -> str:
+    """Lowercase + collapse whitespace; strip trailing punctuation for command match."""
+    s = " ".join((raw or "").strip().lower().split())
+    return s.rstrip("!.?")
+
+
+def handle_system_command(raw: str, stack: dict[str, Any]) -> bool:
+    """Intercept system commands; never reach deliberation or ContentProvider.
+
+    Returns True if the input was fully handled (no process_turn).
+    Pure command turns do not write memory or bond state.
+    """
+    cmd = _normalize_cmd(raw)
+    if not cmd:
+        return True  # empty — caller skips
+
+    # --- quit ---
+    if cmd in ("quit", "exit", "q"):
+        pres = stack.get("presence")
+        if isinstance(pres, SessionPresence):
+            pres.clear()
+        print("  Session ended. Presence cleared. Durable data retained for resume.")
+        stack["_session_quit"] = True
+        return True
+
+    # --- help ---
+    if cmd == "help":
+        print(
+            "  help | status | phase | presence | wipe | wipe yes | clear | reset | quit\n"
+            "  present <user_id> — mark user present this session\n"
+            "  left <user_id>    — mark user left this session\n"
+            "  presence clear   — clear all session presence (re-marks stack user)\n"
+            "  Multi-user: identify speaker each turn, e.g. as alice: hello\n"
+            "  wipe yes / clear / reset — erase this user_id's durable data\n"
+            "  Or type freely."
+        )
+        return True
+
+    if cmd == "status":
+        print_status(stack)
+        return True
+
+    if cmd == "phase":
+        dev = stack["engine"].development_context
+        print(f"  {dev.limitation_summary()}")
+        for n in dev.honesty_notes()[:4]:
+            print(f"  • {n}")
+        return True
+
+    # --- presence (must never reach the model) ---
+    if cmd == "presence" or cmd.startswith("presence "):
+        pres = stack.get("presence")
+        if not isinstance(pres, SessionPresence):
+            print("  presence: (no tracker — single-user default)")
+            return True
+        if cmd in ("presence clear", "presence reset"):
+            pres.clear()
+            pres.mark_present(str(stack.get("user_id") or ""))
+            print(f"  Presence cleared; marked present: {pres.current()}")
+            return True
+        present = pres.current()
+        if not present:
+            print("  presence: (empty — no one marked present this session)")
+        elif not pres.is_multi_user():
+            print(
+                f"  presence: {present} "
+                f"(single-user; no multi-user identity check)"
+            )
+        else:
+            print(f"  presence: {present} multi=True")
+        return True
+
+    # present / left — whole first token match after normalize
+    if cmd == "present" or cmd.startswith("present "):
+        parts = cmd.split(None, 1)
+        uid = parts[1].strip() if len(parts) > 1 else ""
+        pres = stack.get("presence")
+        if not isinstance(pres, SessionPresence):
+            pres = SessionPresence()
+            stack["presence"] = pres
+            if stack.get("user_id"):
+                pres.mark_present(str(stack["user_id"]))
+        if not uid:
+            print("  usage: present <user_id>")
+            return True
+        pres.mark_present(uid)
+        print(f"  marked present: {uid!r} → {pres.current()}")
+        return True
+
+    if cmd == "left" or cmd.startswith("left "):
+        parts = cmd.split(None, 1)
+        uid = parts[1].strip() if len(parts) > 1 else ""
+        pres = stack.get("presence")
+        if not isinstance(pres, SessionPresence):
+            print("  usage: left <user_id> (no presence tracker yet)")
+            return True
+        if not uid:
+            print("  usage: left <user_id>")
+            return True
+        pres.mark_left(uid)
+        if not pres.current() and stack.get("user_id"):
+            pres.mark_present(str(stack["user_id"]))
+        print(f"  marked left: {uid!r} → {pres.current()}")
+        return True
+
+    if cmd == "wipe":
+        print("  To erase this user_id's local data and reset the session, type: wipe yes")
+        print("  (aliases: clear | reset for wipe — use 'presence clear' for presence only)")
+        return True
+
+    if cmd in ("wipe yes", "clear", "reset"):
+        # wipe rebuilds stack — mutate caller's dict via special key
+        auto = bool(stack.get("auto_enqueue_audits", True))
+        stack["_replace_stack"] = wipe_user_session(stack, auto_enqueue=auto)
+        return True
+
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -493,13 +562,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.once is not None:
+        # --once is always a free-text turn (not the interactive command surface)
         process_turn(args.once, stack=stack, quiet=False)
         return 0
 
     isolated = data_root_is_isolated(stack["data_root"], repo_root=_ROOT)
     print()
     print("=" * 68)
-    print("  Positronic Bond Engine — Private Architect Chat")
+    print("  Positronic Bond Engine — Local Test Harness")
+    print("  (product surface: api.InteractionSession — docs/public_entry.md)")
     print("=" * 68)
     print(f"  user_id:          {user_id}")
     print(f"  data_root:        {stack['data_root']}")
@@ -509,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     cp = stack.get("content_provider")
     cp_name = type(cp).__name__ if cp is not None else "None"
     print(f"  content:          {cp_name} (see docs/model_providers.md)")
-    print("  Commands: help | status | phase | wipe | wipe yes | quit")
+    print("  Commands: help | status | phase | presence | present|left <id> | wipe | quit")
     print("  Env:      PBE_DATA_ROOT, PBE_USER_ID, PBE_MODEL_*")
     print()
     if not isolated:
@@ -524,34 +595,16 @@ def main(argv: list[str] | None = None) -> int:
             break
         if not raw:
             continue
-        cmd = raw.lower().rstrip("!.?")
-        if cmd in ("quit", "exit", "q"):
-            print("  Session ended. Data retained for resume.")
-            break
-        if cmd == "help":
-            print(
-                "  help | status | phase | wipe | wipe yes | clear | reset | quit\n"
-                "  wipe yes / clear / reset — erase this user_id's durable data and start fresh\n"
-                "  Or type freely."
-            )
+        if handle_system_command(raw, stack):
+            if stack.pop("_session_quit", False):
+                break
+            rep = stack.pop("_replace_stack", None)
+            if isinstance(rep, dict):
+                stack = rep
             continue
-        if cmd == "status":
-            print_status(stack)
-            continue
-        if cmd == "phase":
-            dev = stack["engine"].development_context
-            print(f"  {dev.limitation_summary()}")
-            for n in dev.honesty_notes()[:4]:
-                print(f"  • {n}")
-            continue
-        if cmd == "wipe":
-            print("  To erase this user_id's local data and reset the session, type: wipe yes")
-            print("  (aliases: clear | reset)")
-            continue
-        if cmd in ("wipe yes", "clear", "reset"):
-            stack = wipe_user_session(stack, auto_enqueue=auto_enqueue)
-            continue
-        process_turn(raw, stack=stack, quiet=False)
+        turn = process_turn(raw, stack=stack, quiet=False)
+        if isinstance(turn.get("stack"), dict):
+            stack = turn["stack"]
 
     print(f"\n  Data root: {stack['data_root']}")
     print("  Resume anytime with the same --user / data root.\n")

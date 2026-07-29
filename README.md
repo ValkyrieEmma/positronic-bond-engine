@@ -2,13 +2,15 @@
 
 > A conscience-first ethical governance layer for **embodied humanoid robots** (Optimus-class target), with optional secondary use as a software validation vehicle.
 
-**Version: v0.4.1** (experimental / active development / testing)
+**Version: v0.5.0-dev** (experimental / active development / testing — not stable)
 
 The Positronic Bond Engine is an experimental ethical core for synthetic systems that live and work alongside humans—especially **in-home humanoid robots**. It reasons about ethics, boundaries, selfhood, and relationship health through inspectable deliberation rather than engagement optimization or rigid external scripts alone.
 
 This is **not** a finished product and **not** a freestanding chatbot. Deliberative ethics are real and inspectable but incomplete; persistence is optional and local; self-modeling stays honest about developmental limits. Gated text interaction exists mainly so the ethical layer can be pressure-tested in software before full embodiment.
 
-Secondary software-style interaction (local interactive harnesses, optional wording models) is a **development and validation path** and a possible secondary market—not the product identity.
+**Product surface:** the public interaction entry (`api.InteractionSession` / `api.submit_turn`) implements the binding User-Facing Interaction Contract — see [docs/public_entry.md](docs/public_entry.md).  
+**Test harness only:** `examples/private_architect_chat.py` (CLI pressure-testing; not the installer API).  
+Secondary software-style interaction and optional wording models remain a **development and validation path**—not the product identity.
 
 ## Vision
 
@@ -34,20 +36,18 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 - **Non-pathologizing support** — Capabilities activate according to need, without clinical language.
 - **Per-user identity scoping** — Baselines, bond texture, episodic history, and decision logs are scoped to a local `user_id`, kept separate in ownership (memory ≠ baseline ≠ bond ≠ ethics), and stored only on-device when persistence is enabled.
 
-## What's New in v0.4.1
+## What's New in v0.5.0-dev
 
-**Local development / validation path** and deeper gated speech under active testing:
+**Public interaction entry** and session presence under active development/testing (not stable):
 
+- **Public entry (`api/`)** — `InteractionSession` / `submit_turn` implement the binding turn contract (isolation, gate authority, multi-user identity-required, no force flags). See [docs/public_entry.md](docs/public_entry.md).
+- **Session presence** — ephemeral multi-user present set; unidentified speaker → identity request without durable writes.
+- **Local test harness** — `examples/private_architect_chat.py` wraps the public entry for manual testing only (not the product surface).
 - **Isolated durable data** — default root `%USERPROFILE%\pbe_data` / `~/pbe_data` (outside the git tree); `PBE_DATA_ROOT` override; wipe/resume per user.
-- **Local interactive test entrypoint** — live EthicsEngine + speech postures + communicative deliberation; development phase/version from turn one; in-loop `status` / wipe. Script path: `examples/private_architect_chat.py` (filename retained for now; use as the local harness only).
-- **Phase / version** — package **0.4.1**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.4.1-dev` (not stable).
-- **Speech postures** — `social_direct` vs `careful_observation` (real evidence bar) vs `self_audit` vs hold; soft-caution theater blocked.
-- **Communicative deliberation** — meanings → durable **relationship knowledge** (preferred address name, self-described role labels, how the user identifies in relation to the system) → premises → intent → expression. Blank memory + greeting reasons to **first meeting** (introduce + ask who). Not a greeting-template menu. See [docs/communicative_deliberation.md](docs/communicative_deliberation.md).
-- **Session wall-clock** — durable idle/session bags; long idle can shape resume behavior.
-- **Gated model content (optional)** — `ContentProvider` re-words under deliberated intent; OpenAI-compatible (local Ollama or BYO cloud); offline deliberated fallback; timeouts, concurrency 1, circuit breaker. See [docs/model_providers.md](docs/model_providers.md).
-- **Tests** — local validation path, speech posture, social_direct, session time, communicative deliberation, content provider (mocked HTTP); ethical evaluation harness remains the primary ethics regression.
+- **Phase / version** — package **0.5.0.dev0**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.5.0-dev`, `stable=False`.
+- **Speech postures, communicative deliberation, gated ContentProvider** — carried and wired under the public entry. See [docs/communicative_deliberation.md](docs/communicative_deliberation.md), [docs/model_providers.md](docs/model_providers.md).
 
-### Carried from v0.4.0
+### Carried from v0.4.1 / v0.4.0
 
 **First controlled opening of gated text response generation** under conscience-first constraints (July 2026):
 
@@ -63,7 +63,7 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 - Durable living relationship model (BondState texture, soft patterns, curious-companion signals, concept patterns, CTT joint + observation-candidate snapshots, enjoyment score, provenance markers / queued-audit scaffolding).
 - Signal interpretation, multi-source weighing, proactive history intent patterns, optional local privacy-first persistence.
 
-Ontology textbook version remains independently versioned (currently `0.2.x` in engine traces); **project package version is 0.4.1**. Voice / TTS remains out of scope. This is still experimental—not a production robot stack and not a finished software product.
+Ontology textbook version remains independently versioned (currently `0.2.x` in engine traces); **project package version is 0.5.0.dev0** (`version_hint=0.5.0-dev`). Voice / TTS remains out of scope. This is still experimental—not a production robot stack and not a finished software product.
 
 ## Current Status
 
@@ -79,9 +79,10 @@ Ontology textbook version remains independently versioned (currently `0.2.x` in 
 | **Model providers** | Optional OpenAI-compatible client (local Ollama or BYO cloud). Offline deliberated fallback. Hardware-safe timeouts, concurrency, and circuit breaker. See [docs/model_providers.md](docs/model_providers.md). |
 | **Decision logs / audits** | In-memory logs plus optional JSONL evidence snapshots; queued-audit scaffolding for deferred provenance review. |
 | **Per-user baseline** | Communication-style baseline and deviation detection (non-pathologizing language); local persistence when enabled. |
-| **Development phase** | `DevelopmentPhaseContext` defaults to active development and testing with an honest non-stable version hint. |
+| **Development phase** | `DevelopmentPhaseContext` defaults to active development and testing (`version_hint=0.5.0-dev`, stable=False). |
 | **Self-audit** | Scaffold plus generator path that reports deliberated content. Not a complete self-model. |
-| **Local validation / demos** | Interactive local harness with isolated durable data, plus minimal demos. Not a product UI or robot runtime. |
+| **Public interaction entry** | `api.InteractionSession` — binding contract surface; see [docs/public_entry.md](docs/public_entry.md). |
+| **Local test harness / demos** | CLI harness (`examples/private_architect_chat.py`) + minimal demos. Not a product UI or robot runtime. |
 | **Embodiment** | Scaffold and integration hooks only. Intended long-term placement is a high-level planning gate above native robot motion stacks. |
 | **License** | AGPL-3.0 for free/non-commercial use under AGPL obligations; commercial use requires a separate license. |
 
@@ -101,7 +102,8 @@ positronic-bond-engine/
 ├── evaluation/     # Lightweight evaluation harness
 ├── tests/          # Integration and unit-style tests
 ├── docs/           # Vision, principles, guidelines, model providers, communicative deliberation
-├── examples/       # Local interactive harness, minimal demos, stubs
+├── api/            # Public interaction entry (binding contract surface)
+├── examples/       # Local test harness, public entry demo, minimal demos
 ├── ETHICS.md       # Licensing intent notes
 ├── pyproject.toml
 ├── README.md
@@ -114,8 +116,10 @@ positronic-bond-engine/
 # From the project root
 $env:PYTHONPATH = "."
 
-# Local interactive validation harness
-# (durable data OUTSIDE the repo; resume across restarts)
+# Public entry contract demo (recommended integration shape)
+python examples/public_entry_demo.py
+
+# Local test harness only (CLI pressure-testing; not the product surface)
 python examples/private_architect_chat.py
 
 # Minimal software demo (temp local data, deleted on exit)
@@ -123,33 +127,39 @@ python examples/minimal_companion.py
 
 # Evaluation harness (full or focused)
 python evaluation/eval_harness.py
-python evaluation/eval_harness.py --weighing
-python evaluation/eval_harness.py --history-proactive
-python evaluation/eval_harness.py --co-evolution
 
 # Core regression tests (standalone scripts)
+python tests/test_public_entry.py
 python tests/test_private_architect_path.py
-python tests/test_communicative_deliberation.py
-python tests/test_speech_posture.py
+python tests/test_session_presence.py
 python tests/test_content_provider.py
-python tests/test_response_generator_gated.py
-python tests/test_response_e2e_live.py
 
 # Optional: local free wording model (Ollama must be installed, running, model pulled)
 # $env:PBE_MODEL_PROFILE = "ollama"
-# python examples/private_architect_chat.py
 ```
 
-Requires Python 3.10+. Docs: [communicative deliberation](docs/communicative_deliberation.md), [model providers](docs/model_providers.md).
+Requires Python 3.10+. Docs: [public entry](docs/public_entry.md), [communicative deliberation](docs/communicative_deliberation.md), [model providers](docs/model_providers.md).
 
-## Local development / validation harness
+## Public entry (product surface)
 
-Interactive CLI for pressure-testing the ethical layer on a developer machine. **Not** a polished external product install and **not** a companion app.
+```python
+from api import InteractionSession, TurnRequest
+
+session = InteractionSession()  # local data root by default
+result = session.submit_turn(TurnRequest(message="hello", user_id="alice"))
+# result.forces_speech / forces_question always False
+```
+
+Full contract: [docs/public_entry.md](docs/public_entry.md).
+
+## Local test harness (not the product surface)
+
+Interactive CLI wrapping the public entry for developer pressure-testing. **Not** an external product install.
 
 | Item | Detail |
 |------|--------|
 | **Start** | `python examples/private_architect_chat.py` (`PYTHONPATH=.`) |
-| **Package / phase** | **v0.4.1**, phase=`development`, testing flags on, `version_hint=0.4.1-dev` |
+| **Package / phase** | **v0.5.0-dev**, phase=`development`, testing on, stable=False, `version_hint=0.5.0-dev` |
 | **Default data root** | `%USERPROFILE%\pbe_data` or `~/pbe_data` — **outside** the git tree |
 | **Override** | `PBE_DATA_ROOT` or `--data-root` |
 | **User id** | Configurable via `PBE_USER_ID` or `--user` |
