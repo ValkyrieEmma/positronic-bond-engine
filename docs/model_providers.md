@@ -12,7 +12,7 @@ A **ContentProvider** only **re-words** already-allowed turns under that intent 
 
 Offline default: **no model** — deliberated fallback expression only (`NullContentProvider`).
 
-This supports the ethical core for humanoid robots: models are optional wording layers, not the conscience. The **local interactive validation harness** is how software-side testing exercises the same pipeline today.
+This supports the ethical core for humanoid robots: models are optional wording layers, not the conscience. Callers use the **public entry** (`api/`); the local CLI harness exercises the same pipeline for testing.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ user message
 |-------|----------|
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
 | HTTP provider | `core/content_provider.py` |
-| Wiring | `ResponseGenerator`; local harness via `provider_from_env()` (`examples/private_architect_chat.py`) |
+| Wiring | `ResponseGenerator`; public entry and local test harness via `provider_from_env()` |
 
 Context pack includes intent, premises, relationship knowledge (preferred address name, role labels, self-described relation to the system), phase/version, short topics — not arbitrary private dumps.
 
