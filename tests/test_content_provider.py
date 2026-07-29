@@ -136,6 +136,27 @@ def test_scrub() -> None:
     long = "word " * 300
     scrubbed = scrub_provider_text(long)
     check("long text capped", len(scrubbed) <= 800 and scrubbed.endswith("…"), str(len(scrubbed)))
+    # address_name is the USER only — never self-claim
+    check(
+        "I am Mother scrubbed when address_name=Mother",
+        scrub_provider_text("I am Mother.", address_name="Mother") == "",
+    )
+    check(
+        "I'm Mother scrubbed",
+        scrub_provider_text("I'm Mother and ready.", address_name="Mother") == "",
+    )
+    check(
+        "Hello Mother kept",
+        "Mother" in scrub_provider_text("Hello, Mother.", address_name="Mother"),
+    )
+    check(
+        "I'll call you Mother kept",
+        scrub_provider_text("I'll call you Mother.", address_name="Mother") != "",
+    )
+    check(
+        "no address_name still allows I am X for unrelated",
+        scrub_provider_text("I am ready.") != "",
+    )
 
 
 def test_build_context_pack() -> None:

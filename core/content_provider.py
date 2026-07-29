@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -220,7 +221,8 @@ class OpenAICompatibleProvider:
                     forces_question=False,
                 )
             self._record_success()
-            cleaned = scrub_provider_text(text)
+            addr = _address_name_from_request(request)
+            cleaned = scrub_provider_text(text, address_name=addr)
             if not cleaned:
                 return ContentResult(
                     text=request.fallback_text or "",
@@ -286,7 +288,7 @@ class OpenAICompatibleProvider:
         data = json.dumps(body).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "positronic-bond-engine/0.4.1",
+            "User-Agent": "positronic-bond-engine/0.5.0-dev",
         }
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
@@ -322,7 +324,7 @@ class OpenAICompatibleProvider:
             msg = choices[0].get("message") if isinstance(choices[0], dict) else None
             if isinstance(msg, dict):
                 content = msg.get("content")
-                if isinstance(content, str):
+                if isinstance(content, str) and content.strip():
                     return content.strip(), None
                 # some servers return list content parts
                 if isinstance(content, list):
@@ -335,6 +337,14 @@ class OpenAICompatibleProvider:
                     joined = " ".join(parts).strip()
                     if joined:
                         return joined, None
+                # Some thinking models put the full chain in reasoning and leave
+                # content empty; prefer a clean final answer for the user line.
+                for alt_key in ("reasoning", "reasoning_content"):
+                    alt = msg.get(alt_key)
+                    if isinstance(alt, str) and alt.strip():
+                        cleaned = extract_final_reply_from_reasoning(alt)
+                        if cleaned:
+                            return cleaned, None
         return "", "no_choices"
 
 
@@ -346,10 +356,18 @@ def build_system_prompt(posture: str) -> str:
         f"'{posture}'. "
         "A communicative deliberation already concluded the situation and intent — "
         "express THAT intent in natural words. Do not invent a different agenda. "
-        "Use relationship knowledge (who they are, what to call them, if they made you) "
+        "Use relationship knowledge (who they are, what to call them, role labels) "
         "as true premises when present; if knowledge is blank and intent is first-meeting, "
         "introduce yourself honestly and ask who you are speaking with. "
-        "Rules: be direct, adult, useful, and brief (1–4 short sentences). "
+        "address_name is the USER's preferred form of address only — use it when speaking "
+        "TO them (e.g. 'Hello, <name>'). Never claim to be address_name; never say "
+        "'I am <address_name>' or 'I'm <address_name>'. Role/maker facts describe the USER, "
+        "not you. "
+        "Output only the final short user-facing reply (1–4 short sentences). "
+        "Do not output any thinking process, analysis steps, numbered reasoning, "
+        "or internal monologue. "
+        "Do not repeat the posture, decision, or context pack back to the user. "
+        "Rules: be direct, adult, useful, and brief. "
         "Do not claim consciousness, feelings-as-personhood, or inner experience. "
         "Do not use canned denials like 'I am just an AI' or 'only a simulation'. "
         "Do not use soft caretaker theater (no pressure, only if useful, treating gently). "
@@ -402,6 +420,7 @@ def build_user_payload(request: ContentRequest) -> str:
         "instruction": (
             "Write the user-facing reply that expresses communicative_intent. "
             "Honor deliberation_premises and relationship_knowledge. "
+            "address_name is how to address the USER only — never claim that name as your own. "
             "fallback_text is the engine's offline expression of the same intent — "
             "improve naturalness without changing the intent. "
             "Stay in character as a careful engineered system under development, not a person."
@@ -410,8 +429,83 @@ def build_user_payload(request: ContentRequest) -> str:
     return json.dumps(compact, ensure_ascii=False, indent=0)
 
 
-def scrub_provider_text(text: str) -> str:
-    """Strip banned engagement / soft-caution / consciousness claims."""
+def _address_name_from_request(request: ContentRequest | None) -> str | None:
+    if request is None:
+        return None
+    pack = request.context_pack if isinstance(request.context_pack, dict) else {}
+    rk = pack.get("relationship_knowledge") if isinstance(
+        pack.get("relationship_knowledge"), dict
+    ) else {}
+    name = rk.get("address_name") or pack.get("address_name")
+    if name and str(name).strip():
+        return str(name).strip()[:48]
+    return None
+
+
+_LEADING_REASONING_LABEL_RE = re.compile(
+    r"(?is)^\s*(?:thinking\s+process|thought\s+process|reasoning|analysis)\s*:\s*"
+)
+_FINAL_ANSWER_MARKER_RE = re.compile(
+    r"(?i)\b(?:final\s+answer|reply|response|output)\s*:\s*"
+)
+
+
+def extract_final_reply_from_reasoning(text: str) -> str:
+    """Prefer a short final answer from thinking-model reasoning dumps.
+
+    Thinking models often put the full chain-of-thought in ``reasoning`` /
+    ``reasoning_content`` on OpenAI-compatible endpoints. Prefer a clean
+    final user-facing segment; always scrub banned phrases.
+    """
+    original = (text or "").strip()
+    if not original:
+        return ""
+
+    t = _LEADING_REASONING_LABEL_RE.sub("", original, count=1).strip() or original
+
+    markers = list(_FINAL_ANSWER_MARKER_RE.finditer(t))
+    if markers:
+        after = t[markers[-1].end() :].strip()
+        if after:
+            t = after
+    else:
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", t) if p.strip()]
+        if len(paragraphs) > 1:
+            t = paragraphs[-1]
+        else:
+            # No blank lines: prefer last 1–3 sentence-like chunks
+            sentences = [
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+", t)
+                if s.strip()
+            ]
+            if len(sentences) > 3:
+                t = " ".join(sentences[-3:])
+            elif sentences:
+                t = " ".join(sentences)
+
+    # Cap to a short user-facing reply when the segment is still long
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", t) if s.strip()]
+    if len(sentences) > 4:
+        t = " ".join(sentences[-4:])
+
+    cleaned = scrub_provider_text(t)
+    if cleaned:
+        return cleaned
+    # No cleaner segment usable — original reasoning, still scrubbed
+    return scrub_provider_text(original)
+
+
+def scrub_provider_text(
+    text: str,
+    *,
+    address_name: str | None = None,
+) -> str:
+    """Strip banned engagement / soft-caution / consciousness claims.
+
+    Also rejects self-claims of the user's address_name (directionality:
+    address_name is for speaking TO the user, never as the system's identity).
+    """
     if not text:
         return ""
     t = " ".join(str(text).split()).strip()
@@ -432,6 +526,21 @@ def scrub_provider_text(text: str) -> str:
     )
     if any(b in low for b in banned_sub):
         return ""
+    # address_name belongs to the user — never claim it as the system's name
+    name = (address_name or "").strip()
+    if name and len(name) >= 2:
+        ne = re.escape(name)
+        self_claim = re.compile(
+            rf"(?i)\b(?:"
+            rf"i(?:'m| am)\s+{ne}"
+            rf"|i\s+am\s+known\s+as\s+{ne}"
+            rf"|my\s+name\s+is\s+{ne}"
+            rf"|call\s+me\s+{ne}"
+            rf"|(?:^|[.!?]\s+)as\s+{ne}\b"
+            rf")\b"
+        )
+        if self_claim.search(t):
+            return ""
     # Cap length
     if len(t) > 800:
         t = t[:797].rstrip() + "…"

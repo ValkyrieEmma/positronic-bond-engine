@@ -50,7 +50,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def main() -> int:
     print("=" * 70)
-    print("PRIVATE ARCHITECT PATH + PHASE/VERSION")
+    print("LOCAL HARNESS PATH + PHASE/VERSION")
     print("=" * 70)
 
     # --- version / phase alignment ---
@@ -60,8 +60,8 @@ def main() -> int:
     check("is_testing", dev.is_testing is True)
     check("not stable deployment", dev.is_stable_deployment is False)
     check(
-        "version_hint aligned with 0.4.1 package line",
-        "0.4.1" in (dev.version_hint or ""),
+        "version_hint aligned with 0.5.0-dev line",
+        "0.5.0" in (dev.version_hint or "") and str(dev.version_hint).endswith("-dev"),
         dev.version_hint,
     )
     check("version_hint is -dev (not stable claim)", str(dev.version_hint).endswith("-dev"))
@@ -86,8 +86,8 @@ def main() -> int:
         stack = build_stack(data_root=tmp, user_id=user_id, auto_enqueue_audits=True)
         check("stack isolated", data_root_is_isolated(stack["data_root"], repo_root=_ROOT))
         check(
-            "stack dev version_hint 0.4.1-dev",
-            stack["dev"].version_hint == "0.4.1-dev",
+            "stack dev version_hint 0.5.0-dev",
+            stack["dev"].version_hint == "0.5.0-dev",
             stack["dev"].version_hint,
         )
 
@@ -124,7 +124,7 @@ def main() -> int:
             "development_phase_noted" in flags
             or "requires_self_audit" in flags
             or "development" in (r_arch.get("phase") or "").lower()
-            or "0.4.1" in str(r_arch.get("version_hint") or "")
+            or "0.5.0" in str(r_arch.get("version_hint") or "")
         )
         check("architecture turn surfaces phase/version context", phase_visible, str(flags))
         check(

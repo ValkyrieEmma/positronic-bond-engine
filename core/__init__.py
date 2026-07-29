@@ -60,6 +60,12 @@ from .communicative_deliberation import (  # noqa: F401
     knowledge_is_blank,
     load_relationship_knowledge,
 )
+from .session_presence import (  # noqa: F401
+    SessionPresence,
+    extract_speaker_id,
+    identity_request_reply,
+    strip_speaker_prefix,
+)
 from .enjoyment_score import (  # noqa: F401
     EnjoymentScore,
     soft_texture_nudge_from_enjoyment,
@@ -128,6 +134,10 @@ __all__ = [
     "deliberate_and_persist",
     "knowledge_is_blank",
     "load_relationship_knowledge",
+    "SessionPresence",
+    "extract_speaker_id",
+    "identity_request_reply",
+    "strip_speaker_prefix",
     "soft_texture_nudge_from_enjoyment",
     "TruthConfidence",
     "TruthTellingReadiness",
