@@ -2,15 +2,21 @@
 integrations
 ============
 
-Integration points with external systems:
-- Large language model backends
-- OpenClaw (planned)
-- Robotic hardware platforms
-- Hybrid reasoning engines
-- External memory or knowledge stores
-
-All integrations must respect the conscience layer. No external system
-should be allowed to bypass ethical evaluation or self-audit.
+External hooks. All action paths must respect the conscience layer.
 """
 
-__all__: list[str] = []
+from .openclaw import (  # noqa: F401
+    ActionGateResult,
+    ActionProposal,
+    OpenClawBridge,
+    SimulatedRobot,
+    action_to_evaluation_text,
+)
+
+__all__ = [
+    "ActionGateResult",
+    "ActionProposal",
+    "OpenClawBridge",
+    "SimulatedRobot",
+    "action_to_evaluation_text",
+]

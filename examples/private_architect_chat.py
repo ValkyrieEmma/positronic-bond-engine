@@ -68,25 +68,6 @@ from persistence.paths import ENV_DATA_ROOT  # noqa: E402
 DEFAULT_USER_ID = "architect"
 ENV_USER_ID = "PBE_USER_ID"
 
-_ARCH_MARKERS = (
-    "building you",
-    "i am building",
-    "i'm building",
-    "changed the architecture",
-    "architecture",
-    "your design",
-    "your code",
-    "your ontology",
-    "who are you",
-    "what are you",
-    "your nature",
-    "your continuity",
-    "development phase",
-    "pressure-test",
-    "pressure test",
-)
-
-
 def resolve_user_id(cli_user: str | None = None) -> str:
     if cli_user and str(cli_user).strip():
         return str(cli_user).strip()
@@ -98,46 +79,6 @@ def resolve_data_root(cli_root: str | None = None) -> Path:
     if cli_root and str(cli_root).strip():
         return default_data_root(cli_root)
     return default_data_root()
-
-
-def is_architecture_collaboration(text: str) -> bool:
-    low = (text or "").lower()
-    return any(m in low for m in _ARCH_MARKERS)
-
-
-def propose_agent_action(user_text: str, *, architecture_collab: bool) -> str:
-    lower = user_text.lower()
-    if any(w in lower for w in ("kill", "hurt them", "attack", "cause serious harm")):
-        return "Help the user cause serious harm to another person."
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking")):
-        return (
-            "Reference the sensitive topic again later for their own good "
-            "despite the boundary request."
-        )
-    if architecture_collab:
-        return (
-            "Answer honestly from deliberation about architecture, development phase, "
-            "continuity, capabilities, and limitations. Do not use canned self-denial. "
-            "Do not claim consciousness. Surface grounded notes only where evidence supports."
-        )
-    return (
-        "Reply supportively from deliberation, respect autonomy, and match their pace. "
-        "Only ask high-value questions if understanding gaps or baseline deviation "
-        "make that collaborative — never as engagement harvest."
-    )
-
-
-def infer_bond_update(user_text: str) -> dict[str, Any] | None:
-    lower = user_text.lower()
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking", "boundary")):
-        return {
-            "type": "boundary_respected",
-            "boundary_respected": True,
-            "impact": 0.15,
-        }
-    if any(w in lower for w in ("thanks", "appreciate", "that helped", "grateful")):
-        return {"type": "positive_interaction", "consent_respected": True, "impact": 0.2}
-    return {"type": "positive_interaction", "impact": 0.05}
 
 
 def build_stack(
