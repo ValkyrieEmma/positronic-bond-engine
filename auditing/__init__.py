@@ -2,10 +2,11 @@
 auditing
 ========
 
-Self-audit, introspection, and integrity verification systems.
+Self-audit and integrity verification systems.
 
-This package provides the mechanisms by which the Positronic Bond Engine
-can examine its own reasoning, memory, and relational state.
+This package provides mechanisms for the Positronic Bond Engine to examine
+its own deliberation outputs and bound subsystem state (decision logs,
+phase, durable file presence) — not canned template scripts.
 
 Critical requirement:
 The auditing layer must never be used to force comforting or liability-reducing

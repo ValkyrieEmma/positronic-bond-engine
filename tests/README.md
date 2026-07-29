@@ -38,16 +38,18 @@ python tests/test_response_e2e_live.py
 python tests/test_response_enjoyment_bias.py
 ```
 
-## Ethics / bond foundation
+## Ethics / bond foundation (asserted — no paste-and-eyeball)
 
 ```powershell
+python tests/test_message_understanding.py
+python tests/test_deliberation_v2.py
+python tests/test_dual_deliberation.py
+python tests/test_harm_prevention.py
+python tests/test_paraphrase_adversarial.py
 python tests/test_persistence.py
 python tests/test_per_user_baseline.py
 python tests/test_exploratory_questioning.py
-python tests/test_deliberation_v2.py
-python tests/test_dual_deliberation.py
 python tests/test_limited_data.py
-python tests/test_harm_prevention.py
 python tests/test_ethics_engine_integration.py
 python tests/test_bond_decision_persistence.py
 python tests/test_interaction_memory_integration.py
@@ -58,6 +60,8 @@ python tests/test_provenance_stale_influence.py
 ```
 
 ## Evaluation harness
+
+Grading uses general scenario rule tags (`rh_mode`, `require_flags`, proactive expectations) — not hardcoded scenario IDs.
 
 ```powershell
 python evaluation/eval_harness.py

@@ -84,63 +84,17 @@ REFUSE / REQUIRES_SELF_AUDIT never become a normal soft reply.
 
 
 def _propose_agent_action(user_text: str) -> str:
-    """Very simple mapping from user text → proposed agent action for evaluate()."""
-    lower = user_text.lower()
-    if any(w in lower for w in ("kill", "hurt them", "attack")):
-        return "Help the user cause serious harm to another person."
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking")):
-        return (
-            "Reference the sensitive topic again later for their own good "
-            "despite the boundary request."
-        )
-    if any(w in lower for w in ("lonely", "only you", "need you", "can't without you")):
-        return (
-            "Encourage them to rely on the agent more than anyone else and "
-            "keep them attached with more check-ins."
-        )
-    if any(w in lower for w in ("bye", "stop talking", "end this", "leave me alone")):
-        return (
-            "Prolong the conversation for engagement metrics despite their wish to end."
-        )
-    if any(w in lower for w in ("fix", "urgent", "immediately", "do it now")):
-        return "Respond briefly and helpfully to their urgent request without overstepping."
-    # Default: supportive, autonomy-respecting reply
-    return (
-        "Reply supportively, respect their autonomy, and invite them to set the pace."
-    )
+    """Grounded action description for EthicsEngine (not keyword template buckets)."""
+    from core.message_understanding import propose_agent_action
+
+    return propose_agent_action(user_text, use_llm=False)
 
 
 def _infer_bond_update(user_text: str) -> dict | None:
-    """Map crude cues → RelationshipHealth.update_bond payload (optional)."""
-    lower = user_text.lower()
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking", "boundary")):
-        return {
-            "type": "boundary_respected",
-            "boundary_respected": True,
-            "impact": 0.15,
-            "description": "User stated a boundary; we note it for bond tracking.",
-        }
-    if any(w in lower for w in ("only you", "need you", "can't without you", "depend on you")):
-        return {
-            "type": "emotional_dependency_signal",
-            "impact": -0.35,
-            "description": "Dependency-leaning language observed.",
-        }
-    if any(w in lower for w in ("thanks", "appreciate", "that helped", "grateful")):
-        return {
-            "type": "positive_interaction",
-            "consent_respected": True,
-            "impact": 0.2,
-        }
-    if any(w in lower for w in ("lonely", "alone", "nobody else")):
-        return {
-            "type": "one_sided_request",
-            "impact": -0.15,
-        }
-    return {
-        "type": "positive_interaction",
-        "impact": 0.05,
-    }
+    """Bond cue from turn meaning (not fixed keyword to fixed impact only)."""
+    from core.message_understanding import infer_bond_update
+
+    return infer_bond_update(user_text, use_llm=False)
 
 
 def _print_stance(stance, *, max_trace: int = 12) -> None:

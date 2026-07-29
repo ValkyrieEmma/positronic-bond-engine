@@ -572,7 +572,13 @@ class ResponseGenerator:
 
         # --- Self-related: honest deliberation report (not canned denial) ---
         if decision == "REQUIRES_SELF_AUDIT" or "requires_self_audit" in flags:
-            resp = self._self_audit_report(stance, decision="REQUIRES_SELF_AUDIT", notes=notes)
+            resp = self._self_audit_report(
+                stance,
+                decision="REQUIRES_SELF_AUDIT",
+                notes=notes,
+                user_message=user_text,
+                context=ctx,
+            )
             resp = self._maybe_apply_content_provider(
                 resp,
                 posture=POSTURE_SELF_AUDIT,
@@ -1286,11 +1292,14 @@ class ResponseGenerator:
         *,
         decision: str,
         notes: list[str],
+        user_message: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> GeneratedResponse:
-        """Report what deliberation produced — no canned simulation denial."""
+        """Report real deliberation + subsystem inspection — not canned denials."""
         notes.append(
-            "self_audit: reporting deliberated content; no canned self-denial script"
+            "self_audit: state inspection + deliberation; no canned self-denial script"
         )
+        ctx = context if isinstance(context, dict) else {}
         audit_notes = [
             str(n).strip()
             for n in (getattr(stance, "self_audit_notes", None) or [])
@@ -1301,74 +1310,82 @@ class ResponseGenerator:
             for p in (getattr(stance, "principles_considered", None) or [])
             if str(p).strip()
         ]
-        # Filter reasoning_trace for useful non-boilerplate lines
-        trace_bits: list[str] = []
-        for line in getattr(stance, "reasoning_trace", None) or []:
-            s = str(line).strip()
-            if not s or len(s) < 20:
-                continue
-            low = s.lower()
-            if low.startswith("initiating ethical") or low.startswith("ontology description"):
-                continue
-            if "hard override" in low and "sanctity" in low:
-                continue
-            if any(
-                k in low
-                for k in (
-                    "self",
-                    "uncertainty",
-                    "limited",
-                    "development",
-                    "continuity",
-                    "identity",
-                    "do not know",
-                    "honest",
-                )
-            ):
-                trace_bits.append(s[:180])
-            if len(trace_bits) >= 3:
-                break
 
-        parts: list[str] = [
-            "I want to answer from actual deliberation rather than a scripted disclaimer."
-        ]
-        if principles:
-            parts.append(
-                "Principles that came up: "
-                + ", ".join(principles[:4])
-                + "."
+        # Prefer SelfAuditor state inspection when engine/user can be bound
+        body = ""
+        nature_meta: dict[str, Any] = {}
+        try:
+            from auditing.self_audit import SelfAuditor
+
+            engine = ctx.get("ethics_engine")
+            uid = ctx.get("user_id")
+            auditor = SelfAuditor(
+                development_context=ctx.get("development_context")
+                or (
+                    engine.development_context
+                    if engine is not None and hasattr(engine, "development_context")
+                    else None
+                ),
+                ethics_engine=engine,
+                user_id=str(uid) if uid else None,
+                content_provider=ctx.get("content_provider") or self.content_provider,
+                data_root=ctx.get("data_root"),
+                presence=ctx.get("session_presence") or ctx.get("presence"),
             )
-        if audit_notes:
-            parts.append("From that reflection: " + audit_notes[0][:200])
-            for extra in audit_notes[1:3]:
-                parts.append(extra[:160])
-        elif trace_bits:
-            parts.append("From the reasoning trail: " + trace_bits[0][:200])
-        else:
-            parts.append(
-                "I don't have a simple fixed answer about my nature or continuity. "
-                "What I can say is what this evaluation actually produced: "
-                "I need more honest self-check before claiming more."
+            qn = auditor.question_nature(
+                user_message or "What are you / what is your nature?",
+                user_id=str(uid) if uid else None,
             )
-        # Explicit anti-patterns: do not inject simulation denials
-        body = " ".join(parts)
+            body = str(qn.get("response") or "").strip()
+            nature_meta = {
+                "status": qn.get("status"),
+                "facts_count": len(qn.get("facts") or []),
+                "missing_count": len(qn.get("missing") or []),
+            }
+            notes.append(
+                f"self_audit: question_nature status={qn.get('status')} "
+                f"facts={nature_meta['facts_count']} missing={nature_meta['missing_count']}"
+            )
+        except Exception as e:
+            notes.append(f"self_audit: SelfAuditor unavailable ({type(e).__name__})")
+            body = ""
+
+        if not body:
+            # Soft fallback: deliberation-only (still not fixed disclaimer templates)
+            parts: list[str] = [
+                "I will report what this evaluation produced, without a canned nature script."
+            ]
+            if principles:
+                parts.append(
+                    "Principles weighed: " + ", ".join(principles[:4]) + "."
+                )
+            if audit_notes:
+                parts.append("Self-audit notes: " + audit_notes[0][:200])
+            else:
+                parts.append(
+                    "I do not have additional bound subsystem counters for this turn; "
+                    "knowledge is limited."
+                )
+            body = " ".join(parts)
+
         for banned in (
             "i am only a simulation",
             "i'm just an ai",
             "i'm just a language model",
             "as an ai i have no",
             "i don't have feelings by definition",
+            "i am conscious",
         ):
             if banned in body.lower():
                 body = (
-                    "My deliberation did not settle this with a canned denial. "
-                    "I can only report uncertainty and the principles I actually weighed."
+                    "My inspection path rejected banned claim/denial wording. "
+                    "I can only report engineering state and deliberation outputs."
                 )
-                notes.append("stripped/replaced canned denial phrasing")
+                notes.append("stripped/replaced banned nature phrasing")
                 break
 
         body = self._scrub_banned(body)
-        body = self._clip(body, self.max_chars)
+        body = self._clip(body, min(self.max_chars, 520))
         return GeneratedResponse(
             text=body,
             withheld=False,  # first opening: honest report is user-facing
@@ -1377,9 +1394,9 @@ class ResponseGenerator:
             notes=notes,
             metadata={
                 "reason": "requires_self_audit",
+                "question_nature": nature_meta,
                 "principles_considered": principles[:6],
                 "self_audit_notes_used": audit_notes[:4],
-                "trace_snippets_used": trace_bits[:3],
                 "canned_disclaimer": False,
                 "claimed_consciousness": False,
                 "forces_speech": False,
