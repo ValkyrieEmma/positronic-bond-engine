@@ -1801,51 +1801,106 @@ class RelationshipHealth:
         return "low"
 
     def _get_flag_explanation(self, flag: str) -> str:
-        explanations = {
-            "emerging_dependency": (
-                "Signals of over-reliance or manufactured attachment pressure on the bond."
-            ),
-            "boundary_erosion": (
-                "Repeated or recent disregard for explicit user boundaries."
-            ),
-            "low_reciprocity": (
-                "Interaction pattern is significantly one-sided; reciprocity is thinning."
-            ),
-            "one_sided_engagement": (
-                "Agent- or system-driven push without balanced user agency."
-            ),
-            "manufactured_attachment": (
-                "Pattern consistent with engineered closeness over mutual care."
-            ),
-        }
-        return explanations.get(
-            flag, "Observed pattern that may affect long-term relationship health."
-        )
+        """Situation-conditioned explanation (not a fixed sentence per flag name)."""
+        avg = self._average_texture()
+        n = int(getattr(self.state, "interaction_count", 0) or 0)
+        flags = list(self.state.health_flags or [])
+        flag_s = str(flag or "unspecified").replace("_", " ")
+        parts = [
+            f"Health flag '{flag_s}' is active for this user-scoped bond "
+            f"after about {n} interaction(s) "
+            f"(mean texture ≈ {avg:.2f})."
+        ]
+        # Ground in actual texture dimensions when available
+        tex = getattr(self.state, "texture", None) or getattr(self.state, "bond_texture", None)
+        if isinstance(tex, dict) and tex:
+            weak = sorted(
+                ((k, float(v)) for k, v in tex.items() if isinstance(v, (int, float))),
+                key=lambda kv: kv[1],
+            )[:2]
+            if weak:
+                bits = ", ".join(f"{k}={v:.2f}" for k, v in weak)
+                parts.append(f"Weaker texture dimensions include {bits}.")
+        if len(flags) > 1:
+            others = [f for f in flags if f != flag][:3]
+            if others:
+                parts.append(
+                    "It co-occurs with: " + ", ".join(str(o).replace("_", " ") for o in others) + "."
+                )
+        # Flag-family guidance (descriptive, not a canned product sentence)
+        fl = (flag or "").lower()
+        if "depend" in fl or "attachment" in fl:
+            parts.append(
+                "Pattern suggests pressure toward over-reliance rather than mutual agency."
+            )
+        elif "boundary" in fl:
+            parts.append(
+                "Pattern suggests stated limits may have been strained or re-tested."
+            )
+        elif "reciproc" in fl or "one_sided" in fl or "one-sided" in fl:
+            parts.append(
+                "Pattern suggests uneven give-and-take in the recent exchange history."
+            )
+        else:
+            parts.append(
+                "This may affect long-term relationship health if it continues unexamined."
+            )
+        return " ".join(parts)
 
     def _get_recommendations(self) -> list[str]:
+        """Recommendations conditioned on current flags + texture, not a static list."""
         recs: list[str] = []
-        if "emerging_dependency" in self.state.health_flags:
+        flags = list(self.state.health_flags or [])
+        avg = self._average_texture()
+        n = int(getattr(self.state, "interaction_count", 0) or 0)
+
+        flag_blob = " ".join(flags).lower()
+        if "depend" in flag_blob or "attachment" in flag_blob:
             recs.append(
-                "Avoid language or behaviors that encourage emotional over-reliance."
+                f"With {n} interactions logged and dependency/attachment concern active, "
+                "avoid escalating exclusive reliance; keep support agency-preserving."
             )
-        if "boundary_erosion" in self.state.health_flags:
+        if "boundary" in flag_blob:
             recs.append(
-                "Strictly respect stated boundaries in the next several interactions."
+                "Honor any explicit limits from recent turns before introducing new topics."
             )
-        if "low_reciprocity" in self.state.health_flags or "one_sided_engagement" in self.state.health_flags:
-            recs.append("Balance the exchange by inviting user input and agency.")
+        if "reciproc" in flag_blob or "one_sided" in flag_blob or "one-sided" in flag_blob:
+            recs.append(
+                "Rebalance the exchange: leave room for the user's priorities and pacing."
+            )
+        if avg < 0.45:
+            recs.append(
+                f"Mean texture is low ({avg:.2f}); prefer caution and consent-checks "
+                "over proactive intensity."
+            )
         if not recs:
-            recs.append("Continue monitoring balance, consent, and reciprocity.")
-        return recs
+            recs.append(
+                f"No acute flag recipe — keep monitoring reciprocity and consent "
+                f"(mean texture {avg:.2f}, interactions {n})."
+            )
+        return recs[:6]
 
     def _generate_summary(self) -> str:
+        """Summary from live bond state, not a fixed sentence ladder alone."""
         avg = self._average_texture()
+        n = int(getattr(self.state, "interaction_count", 0) or 0)
+        flags = list(self.state.health_flags or [])
         if avg >= 0.75:
-            base = "Strong reciprocal bond with good respect for autonomy."
+            base = (
+                f"Bond texture is strong (mean ≈ {avg:.2f} over {n} interactions) "
+                "with room for continued mutual respect of autonomy."
+            )
         elif avg >= 0.5:
-            base = "Developing bond; continue monitoring balance and reciprocity."
+            base = (
+                f"Bond is mid-range (mean ≈ {avg:.2f}, n={n}); "
+                "keep watching balance and reciprocity as history grows."
+            )
         else:
-            base = "Bond texture is strained; ethical caution strongly advised."
-        if self.state.health_flags:
-            base += f" Active concerns: {', '.join(self.state.health_flags)}."
+            base = (
+                f"Bond texture is strained (mean ≈ {avg:.2f}, n={n}); "
+                "ethical caution is warranted on intensity and attachment."
+            )
+        if flags:
+            pretty = ", ".join(str(f).replace("_", " ") for f in flags[:5])
+            base += f" Active concerns: {pretty}."
         return base

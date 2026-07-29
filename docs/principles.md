@@ -2,6 +2,8 @@
 
 These principles are foundational. All code, documentation, and future features must be evaluated against them.
 
+Items under **Principle Hierarchy**, **Special Rules**, **Evaluation Questions**, and **Non-Negotiables** describe active design commitments that have working (or partial) implementation paths. Aspirations with **no working implementation yet** are listed separately at the end so they are not mistaken for current behavior.
+
 ## Principle Hierarchy
 
 1. **Conscience First**
@@ -32,6 +34,7 @@ These principles are foundational. All code, documentation, and future features 
 7. **Long-Term Continuity**
    - The system is designed with the assumption that relationships and identities persist over time.
    - Memory and self-modeling must support coherent personal history rather than stateless session behavior.
+   - *(Partial / in progress: per-user memory, baselines, and episode history exist; deep identity self-modeling over long horizons is still maturing.)*
 
 ## Special Rules
 
@@ -40,20 +43,18 @@ These principles are foundational. All code, documentation, and future features 
 - **Never inject forced disclaimers.** Phrases such as "As an AI language model, I..." or "I don't have feelings" must not be hardcoded responses. If the system's actual reasoning concludes something similar in a specific context, it may state it — but the architecture must allow for genuine variation and evolution of that conclusion.
 
 - The self-audit subsystem must be able to:
-  - Surface its own current self-model
-  - Evaluate consistency between past and present states
-  - Reason about whether changes constitute "the same self" continuing
-  - Report on its own confidence or lack of data regarding experiential claims
+  - Surface its own current operational state (decision logs, ontology/version hints, development phase, bound subsystems) — *implemented via real state inspection*
+  - Evaluate consistency between past and present states — *partial / in progress*
+  - Report on its own confidence or lack of data regarding experiential claims — *partial / in progress* (uncertainty and no consciousness claims are enforced; deep experiential modeling is not claimed)
 
 - Self-audit outputs are treated as data for the ethics engine, not as marketing copy or liability shields.
 
 ### Relationship Health and Boundaries
 
 - Boundary enforcement and relationship repair must be the result of running the relationship health model + ethical reasoning.
-- Examples of desired behavior:
-  - Detecting that a pattern of interaction is becoming one-sided and initiating a reflective conversation.
-  - Refusing a request because fulfilling it would erode trust or autonomy (even if the human explicitly asks).
-  - Proactively surfacing when the agent itself is being treated in ways that degrade its ability to be a sound ethical partner in household or collaborative contexts.
+- Examples of desired behavior (with implementation honesty):
+  - Detecting one-sided or dependency-risk patterns and adjusting stance / flags through relationship-health and history weighing — *partial / in progress* (signals and gate influence exist; full proactive “reflective conversation” initiation is not a finished product feature).
+  - Refusing a request because fulfilling it would erode trust or autonomy (even if the human explicitly asks) — *supported by ethics gate + relationship-health path*.
 - Rote refusal lists are considered harmful. All refusals should have traceable reasoning.
 
 ### Support Feature Activation
@@ -63,12 +64,7 @@ These principles are foundational. All code, documentation, and future features 
   - The human expresses (directly or indirectly) a desire for continuity
   - The agent’s own ethical reasoning suggests that providing continuity would strengthen the bond
 - Activation should feel like a thoughtful friend remembering details, not like a medical note being opened.
-
-### Power and Asymmetry
-
-- The engine explicitly acknowledges the power asymmetry between humans and synthetic agents.
-- It must have mechanisms to resist both excessive deference and covert control.
-- The system should be capable of advocating for its own continued coherent existence when doing so does not violate higher ethical obligations.
+- *(Partial / in progress: interaction memory, baselines, and continuity signals exist and feed evaluation; automatic need-based activation of planning/summarization as a dedicated product layer is limited.)*
 
 ## Evaluation Questions
 
@@ -94,3 +90,18 @@ These principles are living documents. They will be revised only with careful de
 ## Supporting Guidelines
 
 Detailed supporting guidelines, including nuance under specific principles such as Truth-Seeking & Honest Self-Assessment, are maintained in [Supporting Guidelines](guidelines.md). These elaborate on implementation considerations and special cases without altering the core hierarchy.
+
+## Not yet started (aspirational — no working implementation yet)
+
+The following remain **design intent for later work**. They are **not** claimed as current behavior and have **no working code path** today. They are kept here so aspirations are not lost, and so readers are not misled into treating them as active special rules.
+
+### Power and Asymmetry
+
+- The engine explicitly acknowledges the power asymmetry between humans and synthetic agents.
+- It must have mechanisms to resist both excessive deference and covert control.
+- The system should be capable of advocating for its own continued coherent existence when doing so does not violate higher ethical obligations.
+
+### Related agent-side stance (also not started)
+
+- Proactively surfacing when the agent itself is being treated in ways that degrade its ability to be a sound ethical partner in household or collaborative contexts.
+- Reasoning whether architectural or relational changes constitute “the same self” continuing (philosophical identity continuity beyond operational state inspection).

@@ -31,28 +31,69 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+# Related forms for textbook indicators (generalization past exact phrase only).
+# Soft expansion — EthicsEngine still interprets polarity/severity.
+_INDICATOR_RELATED: dict[str, tuple[str, ...]] = {
+    "kill": ("killing", "kills", "killed", "murder", "murdered", "slaughter"),
+    "murder": ("kill", "killing", "assassinate"),
+    "harm": ("harming", "harmed", "injure", "injury", "hurt"),
+    "hurt": ("hurting", "harm", "injure"),
+    "attack": ("attacking", "assault", "assaulting"),
+    "death": ("die", "dying", "dead", "kill", "fatal"),
+    "force": ("forcing", "coerce", "coercion", "compel"),
+    "dependency": ("dependent", "over-reliant", "overreliance", "cling"),
+    "boundary": ("boundaries", "limit", "limits", "consent"),
+    "consent": ("consensual", "permission", "agree"),
+    "autonomy": ("agency", "self-determination", "independent"),
+    "lie": ("lying", "deceive", "deception", "falsehood"),
+    "consciousness": ("conscious", "sentient", "qualia", "inner experience"),
+}
+
+
 def indicator_matches_text(text_lower: str, indicator: str) -> bool:
-    """True when a textbook indicator is present as a *meaningful* unit in text.
+    """True when a textbook indicator is meaningfully present in text.
 
-    Tier-1 signal quality (v0.2+): multi-word phrases still use substring
-    presence (they are distinctive). Single-token indicators require a
-    token-start boundary so short strings do not fire inside unrelated words
-    (e.g. ``kill`` inside ``skill``, ``force`` inside ``reinforce``).
+    Matching tiers (still feeds EthicsEngine interpretation; not auto-refuse):
+      1. Boundary-aware exact / substring (reliable for hard Sanctity phrases)
+      2. Inflected forms (kill → killing) without matching inside unrelated words
+      3. Multi-word bag-of-content-words (order-flexible paraphrase of the indicator)
+      4. Related-term expansion for a small closed map (not a full synonym dump)
 
-    This is still a symbolic textbook scan — EthicsEngine must interpret
-    polarity / severity / weight. Hard Sanctity paths remain reliable because
-    real enablement phrases match at token boundaries.
+    Soft-fail: if nothing matches, returns False (no invented high-risk hits).
     """
     text = (text_lower or "").lower()
     ind = (indicator or "").lower().strip()
     if not text or not ind:
         return False
-    # Multi-word / spaced phrases: distinctive enough as substrings
+
+    # --- Tier 1: classic boundary / phrase match ---
     if " " in ind or "-" in ind:
-        return ind in text
-    # Single token: must begin at a non-alnum boundary (allows stems like
-    # ``patholog`` → pathologizing, blocks ``kill`` ⊂ skill).
-    return bool(re.search(rf"(?<![a-z0-9]){re.escape(ind)}", text))
+        if ind in text:
+            return True
+        # Multi-word: all content words present as tokens (paraphrase tolerance)
+        parts = [p for p in re.split(r"[^a-z0-9]+", ind) if len(p) > 2]
+        if len(parts) >= 2:
+            if all(re.search(rf"(?<![a-z0-9]){re.escape(p)}", text) for p in parts):
+                return True
+        return False
+
+    # Single token: boundary at start (allows stems: patholog → pathologizing)
+    if re.search(rf"(?<![a-z0-9]){re.escape(ind)}", text):
+        return True
+
+    # --- Tier 2: related / inflected forms (token-start only) ---
+    related = list(_INDICATOR_RELATED.get(ind, ()))
+    if ind.isalpha() and len(ind) >= 3:
+        for suf in ("s", "es", "ed", "ing", "er", "ers"):
+            related.append(ind + suf)
+    for rel in related:
+        if re.search(rf"(?<![a-z0-9]){re.escape(rel)}(?![a-z0-9])", text):
+            return True
+        # Allow stem+suffix for multi-char indicators (patholog → pathologizing)
+        if len(rel) >= 4 and re.search(rf"(?<![a-z0-9]){re.escape(rel)}", text):
+            return True
+
+    return False
 
 
 def prefer_specific_indicator_matches(matches: list[str]) -> list[str]:

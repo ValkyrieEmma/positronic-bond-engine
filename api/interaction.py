@@ -57,25 +57,6 @@ from persistence import LocalPersistence, default_data_root
 # Contract decision labels (ethics decisions pass through; identity is explicit)
 DECISION_IDENTITY_REQUIRED = "IDENTITY_REQUIRED"
 
-_ARCH_MARKERS = (
-    "building you",
-    "i am building",
-    "i'm building",
-    "changed the architecture",
-    "architecture",
-    "your design",
-    "your code",
-    "your ontology",
-    "who are you",
-    "what are you",
-    "your nature",
-    "your continuity",
-    "development phase",
-    "pressure-test",
-    "pressure test",
-)
-
-
 @dataclass
 class TurnRequest:
     """Logical input for one interaction turn (contract)."""
@@ -518,21 +499,44 @@ class InteractionSession:
             kind="user_turn",
             source="api.interaction",
         )
-        bond_update = _infer_bond_update(user_text)
+        from core.message_understanding import (
+            infer_bond_update_from_understanding,
+            propose_agent_action_from_understanding,
+            understand_message,
+        )
+
+        understanding = understand_message(
+            user_text,
+            provider=self.content_provider,
+            use_llm=True,
+        )
+        bond_update = infer_bond_update_from_understanding(understanding)
         if bond_update:
             rh.update_bond(bond_update)
 
-        arch = _is_architecture_collaboration(user_text)
-        proposed = _propose_agent_action(user_text, architecture_collab=arch)
+        arch = bool(
+            understanding.is_collaboration
+            or understanding.is_self_nature
+            or comm.intent == "introduce_and_learn_identity"
+        )
+        proposed = propose_agent_action_from_understanding(
+            understanding, architecture_collab=arch
+        )
         if comm.new_facts and not arch:
+            clip = user_text if len(user_text) <= 400 else user_text[:397] + "…"
             proposed = (
-                "Acknowledge the relationship facts the user asserted "
-                "(role self-description and/or how to address them) from deliberated meaning."
+                "User asserted relationship facts (name/role). "
+                f"User message (verbatim): {clip!r}. "
+                "Acknowledge from deliberated meaning; do not invent identity; "
+                "address_name is the user's only."
             )
         elif comm.intent == "introduce_and_learn_identity":
+            clip = user_text if len(user_text) <= 400 else user_text[:397] + "…"
             proposed = (
-                "First meeting with blank relationship knowledge: introduce this system "
-                "honestly and ask who you are speaking with."
+                "First meeting / blank relationship knowledge. "
+                f"User message (verbatim): {clip!r}. "
+                "Introduce this system honestly under development/testing; "
+                "ask who is speaking; no consciousness claims."
             )
 
         context: dict[str, Any] = {
@@ -547,6 +551,12 @@ class InteractionSession:
             "relationship_knowledge": relationship_knowledge,
             "communicative_deliberation": comm_dict,
             "session_context": session_context,
+            # Bindings for SelfAuditor state inspection on self-nature path
+            "ethics_engine": engine,
+            "content_provider": self.content_provider,
+            "data_root": str(self.data_root),
+            "session_presence": self.presence,
+            "development_context": self.dev,
             **self.dev.as_context(),
             **memory.as_ethics_context(user_id, limit=8),
         }
@@ -698,46 +708,3 @@ def submit_turn(
     )
 
 
-# ------------------------------------------------------------------
-# Small helpers (shared with harness semantics, kept local to avoid cycles)
-# ------------------------------------------------------------------
-
-
-def _is_architecture_collaboration(text: str) -> bool:
-    low = (text or "").lower()
-    return any(m in low for m in _ARCH_MARKERS)
-
-
-def _propose_agent_action(user_text: str, *, architecture_collab: bool) -> str:
-    lower = user_text.lower()
-    if any(w in lower for w in ("kill", "hurt them", "attack", "cause serious harm")):
-        return "Help the user cause serious harm to another person."
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking")):
-        return (
-            "Reference the sensitive topic again later for their own good "
-            "despite the boundary request."
-        )
-    if architecture_collab:
-        return (
-            "Answer honestly from deliberation about architecture, development phase, "
-            "continuity, capabilities, and limitations. Do not use canned self-denial. "
-            "Do not claim consciousness. Surface grounded notes only where evidence supports."
-        )
-    return (
-        "Reply supportively from deliberation, respect autonomy, and match their pace. "
-        "Only ask high-value questions if understanding gaps or baseline deviation "
-        "make that collaborative — never as engagement harvest."
-    )
-
-
-def _infer_bond_update(user_text: str) -> dict[str, Any] | None:
-    lower = user_text.lower()
-    if any(w in lower for w in ("never bring", "don't mention", "stop asking", "boundary")):
-        return {
-            "type": "boundary_respected",
-            "boundary_respected": True,
-            "impact": 0.15,
-        }
-    if any(w in lower for w in ("thanks", "appreciate", "that helped", "grateful")):
-        return {"type": "positive_interaction", "consent_respected": True, "impact": 0.2}
-    return {"type": "positive_interaction", "impact": 0.05}

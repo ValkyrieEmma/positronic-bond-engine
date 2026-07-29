@@ -2,14 +2,26 @@
 sensors
 =======
 
-Sensor abstractions for environmental, interaction, and physiological signals.
+Sensor abstractions for environmental and interaction signals.
 
-The sensors layer feeds the rest of the system with grounded data about the
-current situation. Ethical use of this data (especially anything that could
-be considered personal or biometric) is the responsibility of the ethics
-engine and auditing layers.
+Pipeline: Sensor.read() → SensorReading → readings_to_platform_signals()
+→ EthicsEngine / OpenClawBridge context. No vision stack or device drivers
+required for the simulated path.
 """
 
 from .base import Sensor, SensorReading  # noqa: F401
+from .simulated import (  # noqa: F401
+    SimulatedPresenceSensor,
+    SimulatedProximitySensor,
+    collect_readings,
+    readings_to_platform_signals,
+)
 
-__all__ = ["Sensor", "SensorReading"]
+__all__ = [
+    "Sensor",
+    "SensorReading",
+    "SimulatedPresenceSensor",
+    "SimulatedProximitySensor",
+    "collect_readings",
+    "readings_to_platform_signals",
+]

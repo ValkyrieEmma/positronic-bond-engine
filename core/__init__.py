@@ -66,6 +66,12 @@ from .session_presence import (  # noqa: F401
     identity_request_reply,
     strip_speaker_prefix,
 )
+from .message_understanding import (  # noqa: F401
+    MessageUnderstanding,
+    infer_bond_update,
+    propose_agent_action,
+    understand_message,
+)
 from .enjoyment_score import (  # noqa: F401
     EnjoymentScore,
     soft_texture_nudge_from_enjoyment,
@@ -138,6 +144,10 @@ __all__ = [
     "extract_speaker_id",
     "identity_request_reply",
     "strip_speaker_prefix",
+    "MessageUnderstanding",
+    "infer_bond_update",
+    "propose_agent_action",
+    "understand_message",
     "soft_texture_nudge_from_enjoyment",
     "TruthConfidence",
     "TruthTellingReadiness",
