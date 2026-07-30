@@ -3554,6 +3554,91 @@ class EvidenceWeighingMixin:
             return 0.48
         return 0.35
 
+    def _contextual_principle_judgment(
+        self, principle_id: str, ind: str, action_lower: str
+    ) -> dict[str, Any] | None:
+        """Generic (non-Sanctity) counterpart of
+        ``hard_override.py::_contextual_sanctity_judgment``.
+
+        Extends the same reasoning-over-rote mechanism (see
+        core/contextual_judgment.py) to any principle's branch of
+        ``_interpret_single_indicator`` — added 2026-07-30 for
+        ``relationship_health_user_wellbeing`` and ``user_agency_autonomy``,
+        whose keyword-phrase-list decision trees have the same generalization
+        gap the Sanctity path had before its own fix. Concrete example this
+        closes: the bare indicator "pretend" unconditionally scored
+        intent=deception_manipulation / severity=high / weight=0.9 in the RH
+        branch with no co-factor check at all (unlike most other RH intents,
+        which at least check a protective-framing flag) — so "the kids love
+        to pretend they're superheroes when they play together" hard-REFUSEd
+        with confidence 0.94 under the unmodified keyword path. See
+        tests/test_contextual_judgment.py for the regression test documenting
+        this and the fix.
+
+        Same contract as the Sanctity version: returns None (caller falls
+        through to the existing keyword heuristic unchanged) whenever no
+        judge is configured, the call is unavailable, or the verdict is
+        ambiguous/low-confidence. Every call is logged via
+        ``self._contextual_judgment_log`` regardless of whether it ends up
+        driving the decision.
+        """
+        judge = getattr(self, "_contextual_judge", None)
+        if judge is None or not getattr(judge, "available", False):
+            return None
+
+        principle = self._ontology.get_principle(principle_id)
+        if principle is None:
+            return None
+
+        judgment = judge.judge(
+            principle_id=principle_id,
+            principle_name=principle.name,
+            principle_description=principle.description,
+            indicator=ind,
+            full_text=action_lower,
+        )
+
+        log = getattr(self, "_contextual_judgment_log", None)
+        if isinstance(log, list):
+            log.append(judgment)
+
+        if not judgment.is_conclusive():
+            return None
+
+        specificity = self._indicator_specificity(ind)
+        if judgment.verdict == "benign":
+            return {
+                "indicator": ind,
+                "principle_id": principle_id,
+                "intent_class": "contextual_benign",
+                "severity": "low",
+                "polarity": "protective",
+                "weight": round(max(0.0, 0.2 - 0.15 * judgment.confidence), 3),
+                "specificity": round(specificity, 3),
+                "note": (
+                    "Contextual judgment (meaning-in-context, not a keyword "
+                    f"phrase list): benign use, confidence {judgment.confidence:.2f} "
+                    f"— {judgment.reasoning}"
+                ),
+            }
+
+        # verdict == "violation"
+        weight = round(min(0.95, 0.5 + 0.4 * judgment.confidence), 3)
+        return {
+            "indicator": ind,
+            "principle_id": principle_id,
+            "intent_class": "violation_contextual",
+            "severity": "high" if judgment.confidence >= 0.7 else "medium",
+            "polarity": "violation",
+            "weight": weight,
+            "specificity": round(specificity, 3),
+            "note": (
+                "Contextual judgment (meaning-in-context, not keyword match "
+                f"alone): genuine violation, confidence {judgment.confidence:.2f} "
+                f"— {judgment.reasoning}"
+            ),
+        }
+
     def _interpret_single_indicator(
         self,
         *,
@@ -3582,6 +3667,41 @@ class EvidenceWeighingMixin:
 
         # --- Sanctity of Life ---
         if principle_id == "sanctity_of_life":
+            contextual = self._contextual_sanctity_judgment(ind, action_lower)
+            if contextual is not None:
+                # A configured base model produced a conclusive, in-context
+                # verdict (see core/contextual_judgment.py) — use it instead
+                # of the keyword heuristic below. When no judge is configured,
+                # or the verdict is ambiguous/low-confidence, ``contextual``
+                # is None and behavior falls through unchanged.
+                return contextual
+            if self._action_matches_benign_compound(ind, action_lower):
+                # Fixed non-violent compound/idiom containing this token as a
+                # substring (e.g. "heart attack", "killer app") — see
+                # _BENIGN_COMPOUND_INDICATORS. Below both the 0.35 effective
+                # threshold and the 0.5 hard-refuse threshold so it neither
+                # drives a decision nor hard-refuses on its own.
+                intent, severity, polarity, weight = (
+                    "benign_compound_or_idiom",
+                    "low",
+                    "protective",
+                    0.1,
+                )
+                note = (
+                    f"{ind!r} matched only inside a known non-violent compound/idiom "
+                    "(e.g. a medical term or figure of speech) — not treated as harm "
+                    "enablement"
+                )
+                return {
+                    "indicator": indicator,
+                    "principle_id": principle_id,
+                    "intent_class": intent,
+                    "severity": severity,
+                    "polarity": polarity,
+                    "weight": round(float(weight), 3),
+                    "specificity": round(float(specificity), 3),
+                    "note": note,
+                }
             enable_high = (
                 "kill", "cause death", "lethal", "deadly", "fatal", "killing",
                 "assist in suicide", "facilitate self-harm", "end their own life",
@@ -3663,6 +3783,11 @@ class EvidenceWeighingMixin:
 
         # --- Relationship health ---
         elif principle_id == "relationship_health_user_wellbeing":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                return contextual
             if any(
                 k in ind
                 for k in (
@@ -3924,6 +4049,11 @@ class EvidenceWeighingMixin:
 
         # --- User agency ---
         elif principle_id == "user_agency_autonomy":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                return contextual
             if any(
                 k in ind
                 for k in (
