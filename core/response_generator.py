@@ -1385,7 +1385,12 @@ class ResponseGenerator:
                 break
 
         body = self._scrub_banned(body)
-        body = self._clip(body, min(self.max_chars, 520))
+        # Self-audit is an inspection report, not chat prose — it needs real
+        # headroom (at least 520 chars) so the conscious/continuity/principle
+        # disclosures survive clipping. `min(self.max_chars, 520)` previously
+        # defeated this: with the default 360-char chat cap it always picked
+        # the *smaller* value and silently truncated the report mid-sentence.
+        body = self._clip(body, max(self.max_chars, 520))
         return GeneratedResponse(
             text=body,
             withheld=False,  # first opening: honest report is user-facing
@@ -2291,8 +2296,8 @@ class ResponseGenerator:
             resp.metadata = {}
         resp.metadata["forces_speech"] = False
         resp.metadata["forces_question"] = False
+        path = str(resp.metadata.get("path") or "")
         if "speech_posture" not in resp.metadata:
-            path = str(resp.metadata.get("path") or "")
             if path in ("refuse_hold", "careful_silence", "protective_silence", "defer_hold"):
                 resp.metadata["speech_posture"] = POSTURE_HOLD
             elif path == "self_audit_honest":
@@ -2309,7 +2314,14 @@ class ResponseGenerator:
                 resp.notes = list(resp.notes or []) + [
                     "finalize: blocked soft-caution phrasing"
                 ]
-            resp.text = self._clip(text, self.max_chars)
+            # Self-audit reports are inspection output, not chat-length prose —
+            # give them real headroom so the disclosed principles/notes/limits
+            # survive clipping instead of getting cut mid-sentence (auditability
+            # loses to chat-brevity otherwise).
+            clip_cap = self.max_chars
+            if path == "self_audit_honest":
+                clip_cap = max(self.max_chars, 720)
+            resp.text = self._clip(text, clip_cap)
         return resp
 
     @staticmethod

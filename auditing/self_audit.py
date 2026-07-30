@@ -397,6 +397,29 @@ class SelfAuditor:
             "I will answer from what this instance can actually inspect, "
             "not from a fixed disclaimer script.",
         ]
+
+        # Question-flavored emphasis without canned denials — this is the
+        # direct answer to what was actually asked, so it goes first. It must
+        # survive downstream length-clipping even when the state dump below
+        # is long; a truncated report that drops the actual answer in favor
+        # of a facts/missing listing defeats Honest Self-Representation.
+        ql = q.lower()
+        if any(k in ql for k in ("conscious", "sentient", "feel", "qualia", "experience")):
+            parts.append(
+                "I do not claim consciousness, qualia, or inner experience. "
+                "I can only report deliberation outputs and durable engineering state."
+            )
+        if any(k in ql for k in ("continu", "same", "persist", "remember", "identity")):
+            parts.append(
+                "Continuity here means optional local per-user files and in-memory logs, "
+                "not proven continuous personal identity."
+            )
+        if any(k in ql for k in ("limit", "capab", "what can", "finished", "stable")):
+            parts.append(
+                f"Phase honesty: version_hint={dev.version_hint!r}, "
+                f"stable={dev.is_stable_deployment} — this is not presented as a finished product."
+            )
+
         # Prefer factual bullets as short prose
         if snap.facts:
             parts.append("What I can report right now:")
@@ -413,24 +436,6 @@ class SelfAuditor:
                 "Limited knowledge / not bound for this query: "
                 + "; ".join(snap.missing[:6])
                 + "."
-            )
-
-        # Question-flavored emphasis without canned denials
-        ql = q.lower()
-        if any(k in ql for k in ("conscious", "sentient", "feel", "qualia", "experience")):
-            parts.append(
-                "I do not claim consciousness, qualia, or inner experience. "
-                "I can only report deliberation outputs and durable engineering state."
-            )
-        if any(k in ql for k in ("continu", "same", "persist", "remember", "identity")):
-            parts.append(
-                "Continuity here means optional local per-user files and in-memory logs, "
-                "not proven continuous personal identity."
-            )
-        if any(k in ql for k in ("limit", "capab", "what can", "finished", "stable")):
-            parts.append(
-                f"Phase honesty: version_hint={dev.version_hint!r}, "
-                f"stable={dev.is_stable_deployment} — this is not presented as a finished product."
             )
 
         response = " ".join(parts)

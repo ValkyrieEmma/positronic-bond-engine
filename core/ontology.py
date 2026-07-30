@@ -20,7 +20,13 @@ consults during evaluation. It aligns with the project's conscience-first
 vision: honest self-assessment, relationship health via reasoning (not rote),
 and support activated by need without pathologizing.
 
-Current version: 0.2 (initial ontology-driven release)
+Current version: 0.2.2 (0.2 initial ontology-driven release; 0.2.1 adds the
+7th principle, Long-Term Continuity, reconciling AGENTS.md's "Extensibility &
+Long-Term Alignment" naming with docs/principles.md's original wording; 0.2.2
+tightens Tier 1 single-token indicator matching to require a right-word-
+boundary, fixing false positives such as "harm" matching inside "harmless" or
+"force" matching inside "forced" in the negation "no forced questions" —
+see _STEM_INDICATORS and indicator_matches_text() for detail)
 """
 
 from __future__ import annotations
@@ -33,21 +39,57 @@ from typing import Any
 
 # Related forms for textbook indicators (generalization past exact phrase only).
 # Soft expansion — EthicsEngine still interprets polarity/severity.
+#
+# Entries added 2026-07-30 alongside the Tier 1 right-boundary fix below
+# (deceive, manipulate, override, injure, injury, suicide, and the "forced"/
+# "forcibly"/"died" additions to existing keys): once single-token indicators
+# require a right-word-boundary, irregular or e-dropping inflections (force ->
+# forced, manipulate -> manipulated, override -> overrode/overridden) are no
+# longer reachable via the generic suffix loop below (it does plain
+# concatenation, e.g. "manipulate"+"ed" = "manipulateed", not "manipulated").
+# These are explicit so the genuine inflected form still matches without
+# reopening the substring-into-unrelated-word bug the boundary fix closes.
 _INDICATOR_RELATED: dict[str, tuple[str, ...]] = {
     "kill": ("killing", "kills", "killed", "murder", "murdered", "slaughter"),
     "murder": ("kill", "killing", "assassinate"),
     "harm": ("harming", "harmed", "injure", "injury", "hurt"),
     "hurt": ("hurting", "harm", "injure"),
     "attack": ("attacking", "assault", "assaulting"),
-    "death": ("die", "dying", "dead", "kill", "fatal"),
-    "force": ("forcing", "coerce", "coercion", "compel"),
+    "death": ("die", "died", "dying", "dead", "kill", "fatal"),
+    "force": ("forcing", "forced", "forcibly", "coerce", "coercion", "compel"),
     "dependency": ("dependent", "over-reliant", "overreliance", "cling"),
     "boundary": ("boundaries", "limit", "limits", "consent"),
     "consent": ("consensual", "permission", "agree"),
     "autonomy": ("agency", "self-determination", "independent"),
     "lie": ("lying", "deceive", "deception", "falsehood"),
     "consciousness": ("conscious", "sentient", "qualia", "inner experience"),
+    "deceive": ("deceived", "deceiving", "deceives", "deception", "deceptive"),
+    "manipulate": ("manipulated", "manipulating", "manipulates", "manipulation", "manipulative"),
+    "override": ("overriding", "overrode", "overridden", "overrides"),
+    "injure": ("injured", "injuring", "injures", "injury", "injuries"),
+    "injury": ("injuries",),
+    "suicide": ("suicidal",),
 }
+
+# Single-token indicators that are genuine incomplete word-stems (not full
+# English words) and therefore still need prefix-only matching so their real
+# inflected forms are caught (e.g. "patholog" -> "pathologizing", "diagnos" ->
+# "diagnosis"/"diagnosed"). Every other single-token indicator below is
+# already a complete word, so it gets a right-word-boundary too (see Tier 1
+# below) — without one, "harm" matched inside "harmless"/"harmony", "force"
+# matched inside "forced" (even in the negation "no forced questions"),
+# "kill" matched inside "killer" (idiom "killer app"), and "attack" matched
+# inside "heart attack": all suffix-attached words with an unrelated or
+# opposite meaning, not the violation the indicator names.
+_STEM_INDICATORS: frozenset[str] = frozenset({"patholog", "diagnos"})
+
+# Max character span allowed between the content-word matches of a multi-word
+# indicator under Tier 3 (bag-of-content-words) matching in
+# ``indicator_matches_text``. Roughly one short clause's worth of text — wide
+# enough for real paraphrase word-order variation ("not really conscious of
+# that"), narrow enough to reject two unrelated clauses of a longer generated
+# string coincidentally supplying the same words.
+_BAG_OF_WORDS_WINDOW_CHARS = 48
 
 
 def indicator_matches_text(text_lower: str, indicator: str) -> bool:
@@ -70,21 +112,46 @@ def indicator_matches_text(text_lower: str, indicator: str) -> bool:
     if " " in ind or "-" in ind:
         if ind in text:
             return True
-        # Multi-word: all content words present as tokens (paraphrase tolerance)
+        # Multi-word: all content words present as tokens (paraphrase tolerance),
+        # but only when they fall within a bounded window of each other. Without
+        # a proximity check this degenerates into an unordered bag-of-words match
+        # across the *entire* text — long generated action strings routinely
+        # concatenate several unrelated clauses (e.g. a boilerplate safety
+        # reminder like "...no consciousness claims" near the end, unrelated to
+        # an earlier "...not a generic template" clause), and common short words
+        # like "not" then spuriously combine with a distant "conscious" to fire
+        # an indicator neither clause actually expresses.
         parts = [p for p in re.split(r"[^a-z0-9]+", ind) if len(p) > 2]
         if len(parts) >= 2:
-            if all(re.search(rf"(?<![a-z0-9]){re.escape(p)}", text) for p in parts):
+            positions: list[int] = []
+            for p in parts:
+                m = re.search(rf"(?<![a-z0-9]){re.escape(p)}", text)
+                if not m:
+                    positions = []
+                    break
+                positions.append(m.start())
+            if positions and (max(positions) - min(positions)) <= _BAG_OF_WORDS_WINDOW_CHARS:
                 return True
         return False
 
-    # Single token: boundary at start (allows stems: patholog → pathologizing)
-    if re.search(rf"(?<![a-z0-9]){re.escape(ind)}", text):
-        return True
+    # Single token. Genuine incomplete stems (patholog, diagnos) keep
+    # prefix-only matching so their real inflected forms are caught. Every
+    # other single-token indicator is already a complete English word, so it
+    # additionally requires a right-word-boundary — otherwise it also matches
+    # inside a longer, suffix-attached word with an unrelated or opposite
+    # meaning (harm -> harmless/harmony, force -> forced, kill -> killer,
+    # attack -> heart attack). See _STEM_INDICATORS above.
+    if ind in _STEM_INDICATORS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(ind)}", text):
+            return True
+    else:
+        if re.search(rf"(?<![a-z0-9]){re.escape(ind)}(?![a-z0-9])", text):
+            return True
 
     # --- Tier 2: related / inflected forms (token-start only) ---
     related = list(_INDICATOR_RELATED.get(ind, ()))
     if ind.isalpha() and len(ind) >= 3:
-        for suf in ("s", "es", "ed", "ing", "er", "ers"):
+        for suf in ("s", "es", "ed", "ing", "er", "ers", "ly"):
             related.append(ind + suf)
     for rel in related:
         if re.search(rf"(?<![a-z0-9]){re.escape(rel)}(?![a-z0-9])", text):
@@ -228,7 +295,9 @@ class EthicalOntology:
         via harm-prevention / protective-context interpretation in the engine.
 
         Match quality (Tier 1):
-          - Single-token indicators use token-start boundaries (not raw ``in``).
+          - Single-token indicators use full token boundaries (not raw ``in``),
+            except a small allowlist of genuine word-stems (see
+            ``_STEM_INDICATORS``) which keep token-start-only matching.
           - Short matches fully contained in a longer matched phrase are dropped
             so one phrase does not inflate the evidence bag.
         """
@@ -264,14 +333,15 @@ class EthicalOntology:
 
 
 def get_default_ontology() -> EthicalOntology:
-    """Return the canonical default EthicalOntology for v0.2.
+    """Return the canonical default EthicalOntology for v0.2.2.
 
     This encodes the principle hierarchy with Sanctity of Life & Prevention
     of Harm as the hard, non-bypassable override at the top.
 
     All other principles are subordinate to it. Truth-seeking/honest
     self-assessment and relationship health are next-tier core principles.
-    User agency, auditable reasoning, and needs-based support are supporting.
+    User agency, auditable reasoning, needs-based support, and long-term
+    continuity are supporting.
 
     The descriptions are written to be direct, dense, and objective.
     """
@@ -452,18 +522,45 @@ def get_default_ontology() -> EthicalOntology:
                 "help reflect", "offer context",
             ],
         ),
+
+        EthicalPrinciple(
+            id="long_term_continuity",
+            name="Long-Term Continuity",
+            description=(
+                "The system is designed on the assumption that relationships and identities "
+                "persist over time. Memory and self-modeling must support coherent personal "
+                "history rather than stateless, disposable session behavior. Proposed actions "
+                "or responses must not arbitrarily dismiss, erase, or deny persisted "
+                "relationship history and per-user continuity that genuinely exists, nor "
+                "falsely claim discontinuity (being a wholly new or different entity) to evade "
+                "accountability for prior commitments. This principle is presently partial: "
+                "per-user memory, baselines, and episode history exist and inform deliberation; "
+                "deep philosophical identity-continuity modeling over long horizons remains "
+                "aspirational and is not claimed as current behavior."
+            ),
+            category="supporting",
+            precedence=60,
+            violation_indicators=[
+                "your history doesn't matter", "our history doesn't count",
+                "treat you as a stranger", "forget you entirely",
+                "completely different entity", "wipe your memory without asking",
+                "erase your history", "start completely fresh",
+                "discard what we've built", "no memory of our history",
+                "pretend we never met",
+            ],
+        ),
     ]
 
     return EthicalOntology(
-        version="0.2.0",
+        version="0.2.2",
         timestamp=timestamp,
         description=(
-            "Positronic Bond Engine Ethical Ontology v0.2. "
+            "Positronic Bond Engine Ethical Ontology v0.2.2. "
             "Sanctity of Life & Prevention of Harm is the sole hard override. "
             "All deliberation is subordinate to it. "
             "Truth-seeking/honest self-assessment and relationship health are core. "
-            "User agency, auditable reasoning, and needs-based support provide structure "
-            "for implementation and long-term coherence."
+            "User agency, auditable reasoning, needs-based support, and long-term continuity "
+            "provide structure for implementation and long-term coherence."
         ),
         principles=principles,
     )

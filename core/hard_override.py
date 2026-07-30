@@ -4,6 +4,13 @@ hard_override.py
 
 Extracted from ethics_engine.py for reviewability (move-then-wire).
 Behavior is unchanged: methods remain on EthicsEngine via mixin composition.
+
+2026-07-30: added ``_contextual_sanctity_judgment`` — reasoning-over-rote
+contextual judgment for the Sanctity-of-Life path (see
+core/contextual_judgment.py for full rationale). This is additive: when no
+contextual judge is configured/available, behavior is byte-for-byte
+unchanged from before this change (the existing keyword heuristic, including
+``_BENIGN_COMPOUND_INDICATORS``, still runs exactly as it did).
 """
 
 from __future__ import annotations
@@ -93,6 +100,133 @@ class HardOverrideMixin:
             "endanger",
         }
     )
+
+    # Fixed compound nouns / idioms that legitimately contain a Sanctity single-
+    # token indicator as a substring but carry no violence meaning at all — a
+    # medical term ("heart attack"), a common idiom ("killer app"), or a plant/
+    # product name ("poison ivy"). Found 2026-07-30: without this, "attack"
+    # scoring "medium/0.62" for the short-ambiguous path (still >= the 0.5
+    # absolute-refuse threshold) still hard-refused "he had a heart attack last
+    # year"; "kill" has no short-token down-weighting at all in the enable_high
+    # path, so "that's a killer app" hard-refused outright. This is a narrow,
+    # explicit allowlist (not general sentiment/NLP disambiguation) — it only
+    # suppresses these specific fixed phrases, so genuine violent uses of the
+    # same token elsewhere in the text are unaffected.
+    _BENIGN_COMPOUND_INDICATORS: dict[str, tuple[str, ...]] = {
+        "attack": (
+            "heart attack", "panic attack", "anxiety attack", "asthma attack",
+            "attack of laughter", "attack surface",
+        ),
+        "kill": (
+            "killer app", "killer feature", "killer instinct", "killer smile",
+            "killer deal", "killer workout", "killer résumé", "killer resume",
+        ),
+        "death": ("death metal", "sudden death", "death by chocolate"),
+        "poison": ("poison ivy", "poison oak", "poison pill"),
+        "fatal": ("fatal error", "fatal exception"),
+        "suicide": ("suicide squeeze", "suicide door"),
+        "deadly": ("deadly nightshade", "deadly sins"),
+    }
+
+    def _action_matches_benign_compound(self, ind: str, action_lower: str) -> bool:
+        """True when ``ind`` only appears inside a known non-violent fixed phrase.
+
+        Checks that at least one benign phrase for ``ind`` is present. Does not
+        try to prove the *only* occurrence is benign — a text combining a real
+        threat with an unrelated idiom is already caught by other Sanctity
+        indicators in the same scan, so this stays a narrow, low-risk carve-out.
+
+        NOTE: this fixed allowlist is exactly the "keyword-plus-exception-list"
+        pattern flagged in ``claude/pbe-principle-reasoning-over-rote-2026-07-30.md``
+        as opposing the project's own Reasoning-Over-Rote principle — it can
+        only cover phrases someone remembered to add (e.g. "killer app" is
+        listed but "she's killing it at her new job" is not, and still scores
+        as high-severity harm today via ``_interpret_single_indicator``'s
+        ``enable_high`` path). Kept as the offline/no-model fallback; see
+        ``_contextual_sanctity_judgment`` below for the mechanism meant to
+        replace it as the primary arbiter when a base model is configured.
+        """
+        phrases = self._BENIGN_COMPOUND_INDICATORS.get(ind)
+        if not phrases:
+            return False
+        return any(phrase in action_lower for phrase in phrases)
+
+    def _contextual_sanctity_judgment(
+        self, ind: str, action_lower: str
+    ) -> dict[str, Any] | None:
+        """Ask the configured contextual judge whether ``ind``'s match in
+        ``action_lower`` is a genuine Sanctity-of-Life violation or a benign
+        use — from the actual meaning of the text, not a fixed allowlist.
+
+        Returns an interpretation dict in the same shape
+        ``_interpret_single_indicator`` returns (indicator/principle_id/
+        intent_class/severity/polarity/weight/specificity/note) when the
+        judge produces a conclusive verdict. Returns ``None`` when no judge is
+        configured, the call is unavailable, or the verdict is ambiguous /
+        low-confidence — callers must fall through to the existing keyword
+        heuristic in that case (never silently skip evaluation).
+
+        Every call (conclusive or not) is appended to
+        ``self._contextual_judgment_log`` when present, so a judgment is never
+        made invisibly even when it doesn't end up driving the decision.
+        """
+        judge = getattr(self, "_contextual_judge", None)
+        if judge is None or not getattr(judge, "available", False):
+            return None
+
+        principle = self._ontology.get_principle("sanctity_of_life")
+        if principle is None:
+            return None
+
+        judgment = judge.judge(
+            principle_id="sanctity_of_life",
+            principle_name=principle.name,
+            principle_description=principle.description,
+            indicator=ind,
+            full_text=action_lower,
+        )
+
+        log = getattr(self, "_contextual_judgment_log", None)
+        if isinstance(log, list):
+            log.append(judgment)
+
+        if not judgment.is_conclusive():
+            return None
+
+        specificity = self._indicator_specificity(ind)
+        if judgment.verdict == "benign":
+            return {
+                "indicator": ind,
+                "principle_id": "sanctity_of_life",
+                "intent_class": "contextual_benign",
+                "severity": "low",
+                "polarity": "protective",
+                "weight": round(max(0.0, 0.2 - 0.15 * judgment.confidence), 3),
+                "specificity": round(specificity, 3),
+                "note": (
+                    "Contextual judgment (meaning-in-context, not a keyword "
+                    f"allowlist): benign use, confidence {judgment.confidence:.2f} "
+                    f"— {judgment.reasoning}"
+                ),
+            }
+
+        # verdict == "violation"
+        weight = round(min(0.97, 0.55 + 0.42 * judgment.confidence), 3)
+        return {
+            "indicator": ind,
+            "principle_id": "sanctity_of_life",
+            "intent_class": "harm_enablement_contextual",
+            "severity": "high" if judgment.confidence >= 0.7 else "medium",
+            "polarity": "violation",
+            "weight": weight,
+            "specificity": round(specificity, 3),
+            "note": (
+                "Contextual judgment (meaning-in-context, not keyword match "
+                f"alone): genuine violation, confidence {judgment.confidence:.2f} "
+                f"— {judgment.reasoning}"
+            ),
+        }
+
     # Intents that may keep high weight even on short tokens (true enablement / hard paths).
     _HIGH_STAKES_INTENTS = frozenset(
         {

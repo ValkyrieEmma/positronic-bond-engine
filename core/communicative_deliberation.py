@@ -105,21 +105,30 @@ _CALL_ME_RE = re.compile(
     r"(?=\s*[.!?,;]|\s+(?:and|when|if|please|thanks|thank|in|for|so|—|-)|$)"
 )
 
-# Self-claims of making / designing *this* system (meaning of makerhood)
+# Self-claims of making / designing *this* system (meaning of makerhood).
+#
+# ``_I_AM`` matches both "I am" and the contracted "I'm" — a plain
+# ``i\s+(?:am|'m)`` (the form used here until 2026-07-30) requires whitespace
+# between "i" and "'m", which never exists in the real contraction ("I'm" has
+# no space), so it silently matched "I am the one building you" but not the
+# far more common "I'm the one building you" — found via the Tier A4 fixed
+# architect acceptance script (tests/test_architect_acceptance_a4.py), which
+# is exactly the kind of gap that script exists to catch.
+_I_AM = r"i(?:\s+am|'m)"
 _MAKER_CLAIM_RE = re.compile(
     r"(?i)\b(?:"
-    r"i\s+(?:am|'m)\s+(?:the\s+)?(?:one\s+)?"
+    + _I_AM + r"\s+(?:the\s+)?(?:one\s+)?"
     r"(?:architect|designer|creator|builder|maker|developer|engineer)"
     r"(?:\s+\w+){0,8}?"
     r"(?:\s+(?:of|for|behind))?\s*"
     r"(?:your\s+system|this\s+system|you|the\s+system)?"
     r"|"
-    r"i\s+(?:am|'m)\s+(?:the\s+)?(?:one\s+)?(?:making|building|designing|creating)\s+"
+    + _I_AM + r"\s+(?:the\s+)?(?:one\s+)?(?:making|building|designing|creating)\s+"
     r"(?:you|it|this|your\s+system)"
     r"|"
     r"i\s+(?:built|designed|created|made)\s+(?:you|this\s+system|your\s+system)"
     r"|"
-    r"i\s+(?:am|'m)\s+(?:the\s+)?architect\s+(?:designing|building|of)\b"
+    + _I_AM + r"\s+(?:the\s+)?architect\s+(?:designing|building|of)\b"
     r")",
 )
 
@@ -349,7 +358,7 @@ def interpret_message_meanings(user_text: str) -> list[Proposition]:
 
     maker = _MAKER_CLAIM_RE.search(text)
     if maker or (
-        re.search(r"(?i)\bi\s+(?:am|'m)\b", text)
+        re.search(rf"(?i)\b{_I_AM}\b", text)
         and re.search(r"(?i)\b(?:architect|designing|building)\b", text)
         and re.search(r"(?i)\b(?:you|your\s+system|system)\b", text)
     ):

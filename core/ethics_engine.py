@@ -27,6 +27,7 @@ from .decision_logging import DecisionLog, DecisionLoggingMixin
 from .hard_override import HardOverrideMixin
 from .evidence_weighing import EvidenceWeighingMixin
 from .self_audit_support import SelfAuditSupportMixin
+from .contextual_judgment import ContextualJudge
 
 if TYPE_CHECKING:
     from .exploratory_questioning import ExploratoryQuestioner, QuestionDecision
@@ -185,6 +186,7 @@ class EthicsEngine(
         auto_enqueue_audits: bool = False,
         audit_queue: Any | None = None,
         queue_audits: bool | None = None,
+        contextual_judge: Any | None = None,
     ) -> None:
         """Initialize the EthicsEngine.
 
@@ -228,6 +230,16 @@ class EthicsEngine(
                 ``persistence.get_audit_queue(user_id)`` if available.
             queue_audits: Deprecated alias for ``auto_enqueue_audits``. If set,
                 overrides ``auto_enqueue_audits``.
+            contextual_judge: Optional ``ContextualJudge`` (or duck-typed object
+                with ``.available`` and ``.judge(...)``) used by the Sanctity-
+                of-Life path to judge candidate indicator hits from full
+                context rather than keyword allowlists alone (see
+                core/contextual_judgment.py). Defaults to
+                ``ContextualJudge()``, which reads the same ``PBE_MODEL_*``
+                environment variables as content_provider.py and is inert
+                (behaves identically to today) when no model is configured —
+                fully backward compatible. Pass a stub/fake in tests to
+                exercise the contextual path deterministically.
 
         The engine stores a reference to the ontology and consults it
         symbolically during every evaluate() call.
@@ -261,6 +273,15 @@ class EthicsEngine(
         self._audit_queue = audit_queue
         # Backward-compat alias used by older call sites / tests
         self._queue_audits = self._auto_enqueue_audits
+        # Reasoning-over-rote contextual judgment (Sanctity-of-Life path only
+        # for now — see core/contextual_judgment.py). Constructing
+        # ContextualJudge() only reads env config; it makes no network call
+        # and is a no-op fallback when no model is configured, so this is
+        # backward compatible by default.
+        self._contextual_judge = (
+            contextual_judge if contextual_judge is not None else ContextualJudge()
+        )
+        self._contextual_judgment_log: list[Any] = []
 
     @property
     def ontology(self) -> EthicalOntology:
@@ -284,6 +305,19 @@ class EthicsEngine(
     def interaction_memory(self) -> Any | None:
         """Optional InteractionMemoryStore instance attached to this engine (or None)."""
         return self._interaction_memory
+
+    @property
+    def contextual_judge(self) -> Any | None:
+        """The ContextualJudge (or duck-typed equivalent) attached to this engine."""
+        return self._contextual_judge
+
+    def get_contextual_judgment_log(self) -> list[Any]:
+        """Return every contextual-judgment call made so far (conclusive or
+        not), newest last. A copy is returned so callers cannot mutate the
+        internal log. See core/contextual_judgment.py — every call is
+        recorded here even when its verdict was too weak to act on, so
+        contextual judgment is never invisible to an auditor."""
+        return list(self._contextual_judgment_log)
 
     @property
     def default_user_id(self) -> str:
