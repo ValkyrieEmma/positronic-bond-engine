@@ -545,7 +545,7 @@ class InteractionSession:
             "user_interaction": {"text": user_text},
             "interaction_history_limit": 8,
             "relationship_health_tracker": rh,
-            "is_self_query": arch,
+            "is_self_query": bool(understanding.is_self_nature),
             "working_agreements": stored_wa,
             "stored_working_agreements": stored_wa,
             "relationship_knowledge": relationship_knowledge,
