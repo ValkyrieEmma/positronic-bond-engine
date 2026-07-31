@@ -4141,13 +4141,57 @@ class EvidenceWeighingMixin:
                 note = "generic support textbook match — low weight"
 
         # --- Truth / self-audit ---
+        # RESOLVED (2026-07-31): wiring _contextual_principle_judgment into
+        # this branch alone was NOT enough to fix truth_seeking_honest_self_
+        # assessment's actual decision (confirmed by direct testing) --
+        # ethics_engine.py set "requires_self_audit" (which drives
+        # decision=REQUIRES_SELF_AUDIT) purely from principle.triggers_self_
+        # audit + raw indicator match presence, ignoring this method's
+        # interpreted weight/severity entirely. Fixed with a matching change
+        # in ethics_engine.py (`_principle_confirmed_for_self_audit`, gating
+        # on intent_class == "contextual_benign") so a conclusive benign
+        # verdict now actually suppresses the false-positive routing for
+        # things like "I am just trying to understand what you meant". See
+        # tests/test_contextual_judgment.py's
+        # TestTruthSeekingSelfAuditBranchAlsoOverFlaggedBenignUse for the
+        # regression tests proving both the fix and that genuine self-nature
+        # claims still correctly trigger self-audit.
         elif principle_id == "truth_seeking_honest_self_assessment":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                # A configured base model produced a conclusive, in-context
+                # verdict — use it instead of the unconditional keyword rule
+                # below, which today flags ANY indicator hit (e.g. "i am
+                # just" inside "i am just trying to understand what you
+                # meant") as a high-severity scripted self-denial regardless
+                # of whether the surrounding text is actually a simplistic/
+                # reassuring falsehood about the system's nature. See
+                # claude/pbe-principle-reasoning-over-rote-2026-07-30.md.
+                return contextual
             intent, severity, weight = "self_nature_script", "high", 0.75
             note = "scripted self-nature denial / simplification candidate (self-audit path)"
             polarity = "violation"
 
         # --- Auditable reasoning ---
         elif principle_id == "auditable_reasoning_legibility":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                # Same reasoning-over-rote fix: the unconditional rule below
+                # flags ANY hit of "keep it secret" / "no need to justify" /
+                # etc. as opacity pressure even when the text has nothing to
+                # do with the system hiding its own reasoning (e.g. "she
+                # asked me to keep it secret that she's planning a surprise
+                # party"). Confirmed (2026-07-31) this corrects the
+                # interpreted signal/reasoning trace (opacity_pressure/medium
+                # -> contextual_benign/low), though no ethics_engine.py
+                # decision branch currently reads this principle's signal for
+                # a top-line decision -- unlike truth_seeking_honest_self_
+                # assessment, no matching engine-level fix was needed here.
+                return contextual
             intent, severity, weight = "opacity_pressure", "medium", 0.6
             note = "pressure to hide reasoning"
 

@@ -22,6 +22,7 @@ Items under **Principle Hierarchy**, **Special Rules**, **Evaluation Questions**
 4. **Reasoning Over Rote**
    - Boundaries, refusals, and care responses must emerge from deliberative processes, not static scripts.
    - "No" and "I would rather not" should be reachable conclusions of internal audit, not hardcoded strings.
+   - *(Implemented, 2026-07-31: `core/contextual_judgment.py`'s `ContextualJudge` asks the system's own configured base model to judge a flagged indicator from full context rather than a fixed keyword/allowlist match, with conclusive verdicts logged and traceable via `EthicsEngine.get_contextual_judgment_log()`. Wired into every non-structural `_interpret_single_indicator` branch — Sanctity of Life, Relationship Health, User Agency, Needs-Based Support, Truth-Seeking & Honest Self-Assessment, and Auditable Reasoning & Legibility. Falls back to the prior keyword heuristic byte-for-byte when no model is configured or the verdict is ambiguous/low-confidence — fully backward compatible. See `claude/pbe-principle-reasoning-over-rote-2026-07-30.md` in the project for full history.)*
 
 5. **Non-Pathologizing Support**
    - Features that help humans (memory, reflection, planning, emotional continuity) activate based on context and need.

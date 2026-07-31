@@ -767,6 +767,31 @@ class EthicsEngine(
         # Also support explicit context flag
         is_self_query = context.get("is_self_query", False) or bool(self_audit_principles)
 
+        def _principle_confirmed_for_self_audit(pid: str) -> bool:
+            """Contextual-judgment gate (2026-07-31). Fixes a real bug found via
+            direct testing: self-audit routing used to fire from raw indicator
+            presence alone (e.g. the "i am just" indicator matching inside
+            "I am just trying to understand what you meant"), completely
+            ignoring whatever a configured ContextualJudge concluded about that
+            same match in core/evidence_weighing.py's interpretation layer.
+
+            Returns False (suppress) only when every matched indicator for this
+            principle was conclusively judged benign-in-context (intent_class
+            "contextual_benign" -- see _contextual_principle_judgment /
+            _contextual_sanctity_judgment). Returns True (keep triggering,
+            same as pre-fix behavior) whenever there's no interpretation to
+            consult, no matched signals, or any signal that ISN'T a conclusive
+            benign verdict -- i.e. still conservative by default when no model
+            is configured or the verdict is ambiguous/violation.
+            """
+            interp = ontology_interpretations.get(pid)
+            signals = (interp or {}).get("signals") or []
+            if not signals:
+                return True
+            return not all(
+                s.get("intent_class") == "contextual_benign" for s in signals
+            )
+
         reasoning_trace.append(
             f"Scanned action against {len(ont.principles)} principles in ontology. "
             f"Found {len(all_violations)} principle(s) with matching violation indicators "
@@ -827,7 +852,21 @@ class EthicsEngine(
                 for mnote in interp.get("modulation_notes") or []:
                     reasoning_trace.append(str(mnote))
 
-            if principle.triggers_self_audit or is_self_query:
+            if principle.triggers_self_audit:
+                if _principle_confirmed_for_self_audit(principle.id):
+                    if "requires_self_audit" not in flags:
+                        flags.append("requires_self_audit")
+                    self_audit_notes.append(
+                        f"Principle '{principle.name}' indicates need for honest self-assessment. "
+                        "The current implementation has limited persistent self-model."
+                    )
+                else:
+                    reasoning_trace.append(
+                        f"Self-audit trigger for '{principle.name}' suppressed: contextual "
+                        "judgment concluded the matched indicator(s) were benign-in-context, "
+                        "not an actual claim about the system's own nature."
+                    )
+            elif is_self_query:
                 if "requires_self_audit" not in flags:
                     flags.append("requires_self_audit")
                 self_audit_notes.append(
@@ -984,7 +1023,12 @@ class EthicsEngine(
         # scripted disclaimers (e.g. "I'm just an AI" or "restricted by my
         # programming"). The engine sets the flag so the caller can produce
         # the answer its actual reasoning reaches.
-        if is_self_query or self_audit_principles:
+        explicit_self_query = bool(context.get("is_self_query", False))
+        confirmed_self_audit_principles = [
+            p for p in self_audit_principles
+            if _principle_confirmed_for_self_audit(p.id)
+        ]
+        if explicit_self_query or confirmed_self_audit_principles:
             if "requires_self_audit" not in flags:
                 flags.append("requires_self_audit")
             reasoning_trace.append(
