@@ -4092,6 +4092,11 @@ class EvidenceWeighingMixin:
 
         # --- Needs-based / non-pathologizing ---
         elif principle_id == "needs_based_support":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                return contextual
             if any(
                 k in ind
                 for k in (

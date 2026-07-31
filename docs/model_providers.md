@@ -28,7 +28,9 @@ user message
 | Piece | Location |
 |-------|----------|
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
-| HTTP provider | `core/content_provider.py` |
+| HTTP provider (wording) | `core/content_provider.py` |
+| Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — same `PBE_MODEL_*` config, different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` (see `claude/pbe-principle-reasoning-over-rote-2026-07-30.md`) |
+| Optional local config file | `core/local_model_config.py` — explicit opt-in `.pbe_model.env` loader, see below |
 | Wiring | `ResponseGenerator`; public entry and local test harness via `provider_from_env()` |
 
 Context pack includes intent, premises, relationship knowledge (preferred address name, role labels, self-described relation to the system), phase/version, short topics — not arbitrary private dumps.
@@ -60,6 +62,32 @@ from core.response_generator import ResponseGenerator
 
 responder = ResponseGenerator(content_provider=ollama_provider(model="llama3.2"))
 ```
+
+### Convenience: `.pbe_model.env` instead of shell env vars (2026-07-30)
+
+Setting *persistent* OS environment variables on Windows normally means
+editing System Properties or running `setx` and restarting every terminal —
+friction for something this low-stakes. `core/local_model_config.py`
+provides an optional, explicit, opt-in alternative: a plain
+`.pbe_model.env` file at the repo root (gitignored — see `.gitignore`'s
+"Local model connection config" section), loaded with:
+
+```python
+from core.local_model_config import load_local_env_file
+load_local_env_file()  # applies .pbe_model.env via os.environ.setdefault
+```
+
+before constructing any provider. A real environment variable with the same
+name always wins over the file. **This is never loaded automatically** —
+importing `content_provider.py` has no side effect on your environment,
+so the test suite's "no model configured" baseline is unaffected whether or
+not `.pbe_model.env` exists. Run `python examples/verify_local_model.py`
+(after `$env:PYTHONPATH = "."`) for a one-command check that both the
+content-generation path *and* the contextual-judgment path (see
+`core/contextual_judgment.py` and
+`claude/pbe-principle-reasoning-over-rote-2026-07-30.md`) can actually reach
+your configured model — it prints clear pass/fail plus troubleshooting for
+each.
 
 ## BYO cloud (OpenAI-compatible)
 

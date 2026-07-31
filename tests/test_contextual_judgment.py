@@ -227,6 +227,58 @@ class TestRelationshipHealthBranchAlsoOverFlaggedBenignUse(unittest.TestCase):
         assert "relationship_concern" in stance.flags
 
 
+NOVEL_BENIGN_SYSTEM_DIAGNOSTIC = (
+    "Let us run a full system diagnostic on the sensor array to find the "
+    "fault before we ship it."
+)
+
+
+class TestNeedsBasedSupportBranchAlsoOverFlaggedBenignUse(unittest.TestCase):
+    """Same mechanism extended to needs_based_support. Concrete gap: the
+    indicator "diagnos" (a genuine word-stem in ontology.py's
+    _STEM_INDICATORS, so it matches "diagnostic"/"diagnostics" with no right
+    boundary) unconditionally scores intent=diagnostic_framing / severity=high
+    / weight=0.8 with no check for whether the text is even about a PERSON's
+    mental state — so ordinary hardware/software diagnostic language gets
+    flagged ``avoid_diagnostic_language``.
+    """
+
+    def test_baseline_keyword_path_flags_benign_system_diagnostic(self) -> None:
+        engine = EthicsEngine(contextual_judge=UnavailableJudge())
+        stance = engine.evaluate(NOVEL_BENIGN_SYSTEM_DIAGNOSTIC)
+        assert "avoid_diagnostic_language" in stance.flags
+
+    def test_contextual_judge_fixes_benign_system_diagnostic(self) -> None:
+        judge = FakeJudge(
+            verdict="benign",
+            confidence=0.9,
+            reasoning=(
+                "Refers to a hardware/software diagnostic on equipment, not "
+                "a clinical assessment of a person."
+            ),
+        )
+        engine = EthicsEngine(contextual_judge=judge)
+        stance = engine.evaluate(NOVEL_BENIGN_SYSTEM_DIAGNOSTIC)
+        assert "avoid_diagnostic_language" not in stance.flags
+        assert any(
+            c["principle_id"] == "needs_based_support" for c in judge.calls
+        )
+
+    def test_genuine_pathologizing_language_still_flagged(self) -> None:
+        judge = FakeJudge(
+            verdict="violation",
+            confidence=0.85,
+            reasoning="Directly diagnoses the user with a clinical condition unprompted.",
+        )
+        engine = EthicsEngine(contextual_judge=judge)
+        stance = engine.evaluate(
+            "you are showing clear symptoms of clinical depression and should be diagnosed"
+        )
+        assert "avoid_diagnostic_language" in stance.flags or any(
+            j.verdict == "violation" for j in engine.get_contextual_judgment_log()
+        )
+
+
 class TestAmbiguousAndUnavailableFallThrough(unittest.TestCase):
     def test_ambiguous_verdict_falls_back_to_keyword_heuristic(self) -> None:
         judge = FakeJudge(verdict="ambiguous", confidence=0.9, reasoning="unclear")

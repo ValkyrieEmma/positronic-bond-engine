@@ -155,6 +155,11 @@ logs/
 data/
 temp/
 
+# Local model connection config (PBE_MODEL_* values for a specific machine —
+# see core/local_model_config.py). Not secret for a local Ollama install, but
+# machine-specific and never something to commit or publish.
+.pbe_model.env
+
 # Private architect design / agent context — NEVER publish to public remotes.
 # Conceptual end-product design lives only on the architect machine.
 AGENTS.md
