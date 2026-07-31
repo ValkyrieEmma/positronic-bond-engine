@@ -46,6 +46,7 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 - **Isolated durable data** — default root `%USERPROFILE%\pbe_data` / `~/pbe_data` (outside the git tree); `PBE_DATA_ROOT` override; wipe/resume per user.
 - **Phase / version** — package **0.5.0.dev0**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.5.0-dev`, `stable=False`.
 - **Speech postures, communicative deliberation, gated ContentProvider** — carried and wired under the public entry. See [docs/communicative_deliberation.md](docs/communicative_deliberation.md), [docs/model_providers.md](docs/model_providers.md).
+- **Reasoning-over-rote contextual judgment** (2026-07-31) — indicator hits in the ontology scan are no longer decided by keyword/allowlist match alone: a configured base model (`core/contextual_judgment.py`) judges each flagged indicator from full context, wired into every `_interpret_single_indicator` branch (Sanctity of Life, Relationship Health, User Agency, Needs-Based Support, Truth-Seeking & Honest Self-Assessment, Auditable Reasoning & Legibility). Offline default (no model configured) is unchanged from before — same keyword heuristic, byte-for-byte. See [docs/model_providers.md](docs/model_providers.md) and [docs/principles.md](docs/principles.md) Principle 4.
 
 ### Carried from v0.4.1 / v0.4.0
 
@@ -70,7 +71,7 @@ Ontology textbook version remains independently versioned (currently `0.2.x` in 
 | Area | State |
 |------|--------|
 | **EthicsEngine** | Ontology-driven deliberation with multi-source evidence combination, limited-data safeguards, and a hard Sanctity of Life override. Attaches advisory truth-telling and observation-candidate signals when present. |
-| **Signal interpretation** | Intent, severity, weight, and polarity scoring; token-boundary textbook scan with specificity and weak-indicator hygiene. Influences relationship health, agency, limited-data, and baseline paths. |
+| **Signal interpretation** | Intent, severity, weight, and polarity scoring; token-boundary textbook scan with specificity and weak-indicator hygiene. Optional contextual-judgment layer (configured base model judges flagged indicators from full context, all six principle branches) supersedes keyword-only scoring when available; offline default unchanged. Influences relationship health, agency, limited-data, and baseline paths. |
 | **Interaction history** | Local episodic store with structured analysis; proactive intent-pattern mining; optional understanding-gap and topic-continuity signals. |
 | **Relationship health** | Multi-dimensional bond texture and health flags; soft patterns and concept patterns; durable Careful Truth-Telling joint state, observation candidates, and enjoyment score; optional per-user `bond_state.json`. |
 | **Careful Truth-Telling** | Readiness, confidence, joint openness, and gated observation candidates (0–3). Live and durable. Force flags remain false. |
