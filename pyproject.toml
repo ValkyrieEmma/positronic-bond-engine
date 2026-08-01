@@ -33,7 +33,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
-dependencies = []
+dependencies = [
+    # zoneinfo (core/session_time.py's set_timezone) needs an IANA tz database;
+    # Windows ships none, so this is required there for real validation instead
+    # of the best-effort/unvalidated fallback. Harmless no-op install elsewhere.
+    "tzdata; sys_platform == 'win32'",
+]
 
 [project.optional-dependencies]
 dev = [
