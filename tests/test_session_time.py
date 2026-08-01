@@ -26,8 +26,12 @@ if str(_ROOT) not in sys.path:
 from core.session_time import (  # noqa: E402
     LONG_IDLE_SECONDS,
     SESSION_STALE_SECONDS,
+    TOUCH_HISTORY_MAX_AGE_DAYS,
+    TOUCH_HISTORY_MAX_ENTRIES,
     begin_session,
+    get_timezone,
     load_session_time,
+    set_timezone,
     touch_turn,
 )
 from examples.private_architect_chat import (  # noqa: E402
@@ -143,6 +147,79 @@ def main() -> int:
             "no soft caution on time greeting",
             "no pressure" not in text and "only if useful" not in text,
             r.get("reply_text"),
+        )
+
+        # Timezone: best-effort validated when a tz database is available,
+        # always stored either way; a rejection must not clobber a prior value.
+        tz_probe = set_timezone(store, uid, "America/New_York")
+        check("set_timezone ok for valid IANA name", tz_probe.get("ok") is True, str(tz_probe))
+        check(
+            "get_timezone returns stored value",
+            get_timezone(store, uid) == "America/New_York",
+            str(get_timezone(store, uid)),
+        )
+        if tz_probe.get("validated"):
+            bad = set_timezone(store, uid, "Not/AZone")
+            check(
+                "invalid timezone rejected when tz database available",
+                bad.get("ok") is False,
+                str(bad),
+            )
+            check(
+                "rejected timezone does not overwrite prior value",
+                get_timezone(store, uid) == "America/New_York",
+            )
+        else:
+            print(
+                "  [SKIP] invalid-timezone rejection"
+                " (no tz database available in this environment)"
+            )
+
+        # Touch history: real turns accumulate; opening a session alone does not.
+        th_uid = "touch_history_user"
+        clock3 = _Clock(datetime(2026, 7, 1, 8, 0, 0, tzinfo=timezone.utc))
+        begin_session(store, th_uid, now_fn=clock3, force_new=True)
+        after_begin = load_session_time(store, th_uid)
+        check(
+            "begin_session alone adds no touch_history entries",
+            after_begin.touch_history == [],
+            str(after_begin.touch_history),
+        )
+        touch_turn(store, th_uid, now_fn=clock3)
+        clock3.advance(minutes=5)
+        touch_turn(store, th_uid, now_fn=clock3)
+        clock3.advance(minutes=5)
+        touch_turn(store, th_uid, now_fn=clock3)
+        after_touches = load_session_time(store, th_uid)
+        check(
+            "touch_history has one entry per real turn",
+            len(after_touches.touch_history) == 3,
+            str(after_touches.touch_history),
+        )
+
+        # Pruning by count: exceed the cap, confirm it's trimmed to the max.
+        for _ in range(TOUCH_HISTORY_MAX_ENTRIES + 5):
+            clock3.advance(seconds=1)
+            touch_turn(store, th_uid, now_fn=clock3)
+        capped = load_session_time(store, th_uid)
+        check(
+            "touch_history capped at TOUCH_HISTORY_MAX_ENTRIES",
+            len(capped.touch_history) == TOUCH_HISTORY_MAX_ENTRIES,
+            str(len(capped.touch_history)),
+        )
+
+        # Pruning by age: entries past the age cap drop off on the next save.
+        age_uid = "touch_age_user"
+        clock4 = _Clock(datetime(2026, 1, 1, 8, 0, 0, tzinfo=timezone.utc))
+        begin_session(store, age_uid, now_fn=clock4, force_new=True)
+        touch_turn(store, age_uid, now_fn=clock4)  # old touch
+        clock4.advance(days=TOUCH_HISTORY_MAX_AGE_DAYS + 1)
+        touch_turn(store, age_uid, now_fn=clock4)  # recent touch triggers prune
+        aged = load_session_time(store, age_uid)
+        check(
+            "touch_history drops entries past the age cap",
+            len(aged.touch_history) == 1,
+            str(aged.touch_history),
         )
 
         # Wipe clears session_time

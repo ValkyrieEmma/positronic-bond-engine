@@ -14,12 +14,33 @@ Design
 - Inject ``now_fn`` for tests (no freezes on real wall clock required).
 - Social use is light: greetings may note a long gap; never soft theater.
 - Wipe via ``delete_user_data`` clears this bag with the user folder.
+
+Touch history & timezone (added for Phase 2 — engagement window model)
+------------------------------------------------------------------------
+``touch_history`` is a bounded, pruned-on-save list of ISO timestamps for
+real user turns (recorded in ``touch_turn``, not ``begin_session`` — opening
+a session with nobody saying anything yet is not evidence of an activity
+pattern). It exists so a later per-user "when does this person usually talk
+to me" model (``core/engagement_window.py``, not built yet) has raw history
+to learn from, without this module knowing anything about windows, recharge
+cycles, or proactive candidates itself — this module only records and prunes.
+
+``timezone`` is a per-user IANA name (e.g. ``"America/Los_Angeles"``), the
+single source of truth for localizing that history — "hour of day" is
+meaningless without it, and a fixed UTC-offset integer would silently drift
+across DST. Set via ``set_timezone``; best-effort validated against the
+system's IANA database when one is available (see ``set_timezone`` docstring
+for what happens when it isn't, e.g. a bare Windows Python without the
+``tzdata`` package).
+
+Both fields default to empty/None so old ``session_time`` bags on disk load
+correctly (``from_dict`` never requires either key).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -32,6 +53,10 @@ LONG_IDLE_SECONDS = 6 * 3600  # 6 hours
 # Idle gap that starts a *new* process-session id on next touch if process died
 # (also used when begin_session is called explicitly)
 SESSION_STALE_SECONDS = 30 * 60  # 30 minutes
+
+# Touch-history retention: whichever cap binds first, checked on every save.
+TOUCH_HISTORY_MAX_ENTRIES = 500
+TOUCH_HISTORY_MAX_AGE_DAYS = 90
 
 
 def _utc_now() -> datetime:
@@ -57,6 +82,24 @@ def _fmt(dt: datetime | None) -> str | None:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _prune_touch_history(history: list[str], now: datetime) -> list[str]:
+    """Drop entries older than the age cap, then cap total count.
+
+    Unparseable entries are dropped rather than kept (defensive — should not
+    happen from our own writes, but a hand-edited or corrupted bag should not
+    poison the model with a garbage timestamp).
+    """
+    cutoff = now - timedelta(days=TOUCH_HISTORY_MAX_AGE_DAYS)
+    kept: list[str] = []
+    for ts in history:
+        dt = _parse_iso(ts)
+        if dt is not None and dt >= cutoff:
+            kept.append(ts)
+    if len(kept) > TOUCH_HISTORY_MAX_ENTRIES:
+        kept = kept[-TOUCH_HISTORY_MAX_ENTRIES:]
+    return kept
+
+
 @dataclass
 class SessionTimeState:
     """In-memory + durable session time snapshot."""
@@ -66,7 +109,11 @@ class SessionTimeState:
     last_turn_at: str | None = None
     session_id: str | None = None
     turn_index_session: int = 0
-    schema_version: int = 1
+    # Per-user IANA timezone name (e.g. "America/Los_Angeles"); None until set.
+    timezone: str | None = None
+    # Bounded, pruned-on-save list of ISO turn timestamps (see module docstring).
+    touch_history: list[str] = field(default_factory=list)
+    schema_version: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +122,8 @@ class SessionTimeState:
             "last_turn_at": self.last_turn_at,
             "session_id": self.session_id,
             "turn_index_session": int(self.turn_index_session),
+            "timezone": self.timezone,
+            "touch_history": list(self.touch_history),
             "schema_version": int(self.schema_version),
         }
 
@@ -82,6 +131,12 @@ class SessionTimeState:
     def from_dict(cls, data: dict[str, Any] | None) -> SessionTimeState:
         if not isinstance(data, dict):
             return cls()
+        raw_history = data.get("touch_history")
+        history = (
+            [str(t) for t in raw_history if t]
+            if isinstance(raw_history, list)
+            else []
+        )
         return cls(
             first_seen_at=str(data["first_seen_at"])
             if data.get("first_seen_at")
@@ -92,6 +147,8 @@ class SessionTimeState:
             last_turn_at=str(data["last_turn_at"]) if data.get("last_turn_at") else None,
             session_id=str(data["session_id"]) if data.get("session_id") else None,
             turn_index_session=int(data.get("turn_index_session") or 0),
+            timezone=str(data["timezone"]) if data.get("timezone") else None,
+            touch_history=history,
             schema_version=int(data.get("schema_version") or 1),
         )
 
@@ -123,6 +180,98 @@ def _save_session_time(
     persistence.save_settings(settings)
 
 
+def _record_touch(
+    persistence: LocalPersistence | None,
+    user_id: str,
+    now: datetime,
+) -> None:
+    """Append+prune touch_history for a real turn. Fail-soft, local only."""
+    if persistence is None:
+        return
+    try:
+        state = load_session_time(persistence, user_id)
+        state.touch_history = _prune_touch_history(
+            list(state.touch_history) + [_fmt(now)], now
+        )
+        _save_session_time(persistence, user_id, state)
+    except Exception:
+        pass
+
+
+def set_timezone(
+    persistence: LocalPersistence | None,
+    user_id: str,
+    tz_name: str,
+) -> dict[str, Any]:
+    """Set this user's IANA timezone (e.g. ``"America/Los_Angeles"``).
+
+    Best-effort validated against the system's tz database via ``zoneinfo``.
+    Three distinct outcomes, reported honestly rather than collapsed into a
+    single boolean:
+
+    - The name is a real IANA zone: stored, ``validated=True``.
+    - The name is checked against a known-good canary ("UTC") to confirm a tz
+      database is actually available, and it isn't a real zone: rejected,
+      ``ok=False``, nothing is stored.
+    - No tz database is available at all (the canary itself fails — common on
+      a bare Windows Python install without the ``tzdata`` PyPI package, since
+      Windows ships no system IANA data): the name is stored as given
+      (best-effort, matching this module's fail-soft persistence elsewhere)
+      but ``validated=False``, so callers can surface that honestly instead of
+      claiming a check that never actually ran.
+
+    Returns a dict: ``{"ok", "timezone", "validated", "error"}``.
+    """
+    name = str(tz_name or "").strip()
+    result: dict[str, Any] = {
+        "ok": False,
+        "timezone": None,
+        "validated": False,
+        "error": None,
+    }
+    if not name:
+        result["error"] = "empty timezone name"
+        return result
+
+    validated = False
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(name)
+            validated = True
+        except ZoneInfoNotFoundError:
+            try:
+                ZoneInfo("UTC")  # canary: is a tz database available at all?
+            except Exception:
+                pass  # no database available — fall through, store best-effort
+            else:
+                result["error"] = f"unknown IANA timezone: {name}"
+                return result
+    except ImportError:
+        pass  # zoneinfo unavailable (pre-3.9) — store best-effort
+
+    state = load_session_time(persistence, user_id)
+    state.timezone = name
+    if persistence is not None:
+        try:
+            _save_session_time(persistence, user_id, state)
+        except Exception:
+            result["error"] = "failed to persist"
+            return result
+
+    result.update({"ok": True, "timezone": name, "validated": validated})
+    return result
+
+
+def get_timezone(
+    persistence: LocalPersistence | None,
+    user_id: str,
+) -> str | None:
+    """Convenience accessor — this user's stored IANA timezone, if any set."""
+    return load_session_time(persistence, user_id).timezone
+
+
 def begin_session(
     persistence: LocalPersistence | None,
     user_id: str,
@@ -135,6 +284,10 @@ def begin_session(
     If the last turn was recent and ``force_new`` is False, keeps the same
     ``session_id`` (process restart mid-session). Long idle or first run
     creates a new session id.
+
+    Does not touch ``touch_history`` — a session opening with nobody having
+    said anything yet is not evidence of an activity pattern; ``touch_turn``
+    is where real touches are recorded.
     """
     now = (now_fn or _utc_now)()
     if now.tzinfo is None:
@@ -177,8 +330,11 @@ def touch_turn(
         now = now.replace(tzinfo=timezone.utc)
     state = load_session_time(persistence, user_id)
     if not state.session_id:
-        # begin_session was not called — open one
-        return begin_session(persistence, user_id, now_fn=lambda: now, force_new=True)
+        # begin_session was not called — open one, but this call is still a
+        # real touch, so record it in touch_history too before returning.
+        ctx = begin_session(persistence, user_id, now_fn=lambda: now, force_new=True)
+        _record_touch(persistence, user_id, now)
+        return ctx
 
     last_turn = _parse_iso(state.last_turn_at)
     idle_before = (now - last_turn).total_seconds() if last_turn else None
@@ -194,6 +350,9 @@ def touch_turn(
         state.first_seen_at = _fmt(now)
     if not state.last_session_start:
         state.last_session_start = _fmt(now)
+    state.touch_history = _prune_touch_history(
+        list(state.touch_history) + [_fmt(now)], now
+    )
 
     if persistence is not None:
         try:
@@ -246,6 +405,8 @@ def build_session_context(
         "new_session": new_session,
         "long_idle_threshold_seconds": LONG_IDLE_SECONDS,
         "session_stale_threshold_seconds": SESSION_STALE_SECONDS,
+        "timezone": state.timezone,
+        "touch_history_count": len(state.touch_history),
         "forces_speech": False,
         "forces_question": False,
         "schema_version": 1,
