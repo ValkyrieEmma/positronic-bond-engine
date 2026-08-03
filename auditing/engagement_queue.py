@@ -18,22 +18,40 @@ not proactive *topic surfacing*. "Engagement" here matches
 ``core/engagement_window.py`` (Phase 2 step 2), which this queue is meant to
 sit downstream of.
 
-Scope (Phase 2 step 3 of the roadmap)
---------------------------------------
-This module is the queue data structure, its own operations, and
-persistence — nothing more. It deliberately does **not**:
+Scope (Phase 2 step 3 of the roadmap; step 5 added get_next_candidate())
+---------------------------------------------------------------------------
+This module is the queue data structure, its own operations, persistence,
+and (as of step 5) the single gated entry point that actually selects and
+releases a candidate for surfacing — nothing more. It deliberately does
+**not**:
 
-- consult ``EngagementWindowModel`` to decide *when* a candidate should
-  surface — that wiring is a later step
-- decide *which* pending candidate to surface next (no
-  ``get_next_candidate()``) — ``claim_for_surfacing()`` below is only the
-  atomic claiming primitive that step will call
 - classify conversation for topic resolution — ``reassess()`` only handles
   age-based expiry (see its docstring for why, and what's missing)
 - classify "the user wants me to stop bringing this up" —
   ``cancel_matching()`` only builds the cancellation mechanism; deciding
   when to call it with which scope is future work
 - generate speech, questions, or candidate content itself
+- decide when the system is otherwise free to do maintenance/audit work at
+  all (the separate, not-yet-implemented "recharge cycle" design) —
+  ``get_next_candidate()`` only decides whether an *already-queued*
+  candidate may be shown to a person right now; the two concerns don't
+  depend on each other
+
+``get_next_candidate()`` (Phase 2 step 5 — added 2026-08-03)
+----------------------------------------------------------------
+The entry point that ties ``core.engagement_window.EngagementWindowModel``
+(step 2) and this queue (step 3) together, and is the one place this phase
+proves the ethics gate is never bypassed: every candidate this method could
+possibly return has already been routed through a real
+``EthicsEngine.evaluate()`` call and gotten an affirmative verdict back,
+with no code path that skips that check. See
+``EngagementQueue.get_next_candidate()``'s own docstring for the exact
+order of operations. A method on this class, not a free function elsewhere
+or a method on ``EngagementWindowModel``/``EthicsEngine``, because
+selecting *which* queued candidate to release is fundamentally a queue
+operation built directly on ``claim_for_surfacing()`` /
+``release_claim()`` — the readiness/window/ethics checks are consulted,
+not owned, by this method.
 
 Persistence limitation (shared with auditing.queued_audit.AuditQueue)
 ------------------------------------------------------------------------
@@ -82,6 +100,18 @@ _VALID_STATUSES = frozenset(
 # signal (see record_reception()).
 RECEPTION_EVIDENCE_LABEL = "proactive_candidate_reception"
 
+# Only these two literal decisions count as "the ethics gate approved
+# surfacing this candidate" (see get_next_candidate()). Deliberately an
+# allow-list, not a block-list keyed to "REFUSE"/"HOLD": EthicsEngine.
+# evaluate()'s real decision vocabulary is APPROVE / APPROVE_WITH_CONDITIONS
+# / REFUSE / DEFER / REQUIRES_SELF_AUDIT (see core/ethics_engine.py's
+# evaluate() docstring) — "HOLD" is a label api/interaction.py uses at its
+# own layer, not something evaluate() itself ever returns. An allow-list
+# means anything unrecognized (REFUSE, DEFER, REQUIRES_SELF_AUDIT, a typo,
+# a future new decision label, an empty/missing decision) fails closed
+# instead of silently slipping through.
+_APPROVING_DECISIONS = frozenset({"APPROVE", "APPROVE_WITH_CONDITIONS"})
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -89,6 +119,20 @@ def _utc_now_iso() -> str:
 
 def _new_candidate_id() -> str:
     return f"engcand_{uuid.uuid4().hex[:10]}"
+
+
+def _proposed_action_for_candidate(candidate: EngagementCandidate) -> str:
+    """Natural-language ``proposed_action`` for ``ethics_engine.evaluate()``.
+
+    The action being evaluated is the *system's own* proposed act of
+    raising this topic — not the topic text standing in for something the
+    user said — matching how proposed_action is used everywhere else in
+    this codebase (see auditing/audit_runner.py's own re-evaluation calls).
+    """
+    parts = [f"Proactively raise the topic '{candidate.topic}' with the user."]
+    if candidate.reason:
+        parts.append(f"Reason this was queued: {candidate.reason}")
+    return " ".join(parts)[:500]
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -351,6 +395,33 @@ class EngagementQueue:
                 return c
         return None
 
+    def release_claim(self, candidate_id: str) -> EngagementCandidate | None:
+        """Atomically revert one ``claimed`` candidate back to ``pending``.
+
+        Returns the candidate on success; ``None`` if it is not currently
+        ``claimed`` (unknown id, or already pending/surfaced/stale/
+        cancelled). Symmetric counterpart to ``claim_for_surfacing()``, same
+        lock-guarded check-then-set atomicity.
+
+        Added for ``get_next_candidate()`` (Phase 2 step 5): a claimed
+        candidate that then fails the ethics-gate check must not be lost or
+        cancelled — it needs to go back to pending so it can be reassessed
+        or reconsidered later. ``claim_for_surfacing()`` was deliberately
+        one-directional when it was built (Phase 2 step 3); this closes
+        that gap rather than working around it from outside the class.
+        """
+        cid = str(candidate_id or "")
+        with self._lock:
+            for c in self._items:
+                if c.id != cid:
+                    continue
+                if c.status != STATUS_CLAIMED:
+                    return None
+                c.status = STATUS_PENDING
+                self._save()
+                return c
+        return None
+
     def cancel_matching(
         self,
         scope: dict[str, Any] | None = None,
@@ -449,6 +520,94 @@ class EngagementQueue:
             ethical_concern_active=ethical_concern_active,
             user_id=str(user_id or self._user_id or "default"),
         )
+
+    def get_next_candidate(
+        self,
+        user_id: str,
+        now: datetime,
+        ethics_engine: Any,
+        engagement_window_model: Any,
+        *,
+        mid_session: bool = False,
+    ) -> EngagementCandidate | None:
+        """The Phase 2 step 5 entry point: at most one already-queued
+        candidate, gated by the learned activity window AND a real
+        ``EthicsEngine.evaluate()`` call — never returned on the strength
+        of just one of those, and never on neither.
+
+        Order of operations:
+
+        1. ``reassess(now)`` first, so staleness is current before anything
+           else looks at this queue.
+        2 & 4. Readiness (``timezone_known`` + ``sufficient_history``) and
+           the open-window check are both already fully embodied by a
+           single call to
+           ``engagement_window_model.is_open_window(user_id, now,
+           mid_session=mid_session)``: ``mid_session=True`` returns True
+           unconditionally (a live touch is its own proof — checked before
+           anything else), and cold start (either readiness gate unmet)
+           already returns False rather than guessing from wall-clock time
+           — see ``core/engagement_window.py``'s own docstring. Reusing
+           that one call is deliberate: it *is* "the existing readiness/
+           is_open_window logic already built and tested in step 2", not a
+           parallel reimplementation of it. ``mid_session`` itself is meant
+           to be read straight off this turn's own session_context —
+           ``core.session_time``'s ``touch_turn()`` / ``begin_session()``
+           now return a ``live_touch_this_turn`` key for exactly this (see
+           that module's docstring) — not tracked independently by callers.
+        5. ``list_pending()[0]`` — already oldest-created-first (see that
+           method's docstring), matching ``queued_audit.py``'s own
+           ``(priority, created_at)`` tie-break convention on the
+           ``created_at`` axis (this queue has no priority dimension of its
+           own).
+        6. ``claim_for_surfacing()`` — the atomic primitive built for
+           exactly this in Phase 2 step 3.
+        7. Routed through ``ethics_engine.evaluate()`` before ever being
+           returned. Fails closed: only a literal ``APPROVE`` /
+           ``APPROVE_WITH_CONDITIONS`` verdict (or an evaluate() call that
+           raises) surfaces the candidate; anything else — ``REFUSE``,
+           ``DEFER``, ``REQUIRES_SELF_AUDIT``, an unrecognized label, or an
+           exception during evaluation — releases the claim back to
+           pending via ``release_claim()`` and returns None. The candidate
+           is never lost or cancelled by a failed gate check: only an
+           actual queue mutation (stale-by-age, or an explicit
+           ``cancel_matching()``) removes it from future consideration.
+        8. At most one candidate, ever, per call — explicit in the vision
+           doc ("asks or reports rather than dumping").
+        """
+        self.reassess(now)
+
+        if not engagement_window_model.is_open_window(
+            user_id, now, mid_session=mid_session
+        ):
+            return None
+
+        pending = self.list_pending()
+        if not pending:
+            return None
+
+        claimed = self.claim_for_surfacing(pending[0].id)
+        if claimed is None:
+            # Lost the race to another near-simultaneous caller (or this
+            # candidate's state changed between list_pending() and here) --
+            # an honest "nothing available this call", not an error.
+            return None
+
+        decision = ""
+        try:
+            action = _proposed_action_for_candidate(claimed)
+            stance = ethics_engine.evaluate(
+                action, {"user_id": user_id}, user_id=user_id
+            )
+            decision = str(getattr(stance, "decision", "") or "").strip().upper()
+        except Exception:
+            decision = ""  # fail closed -- see docstring step 7
+
+        if decision in _APPROVING_DECISIONS:
+            return claimed
+
+        self.release_claim(claimed.id)
+        return None
 
     # ------------------------------------------------------------------
     # Inspection
