@@ -19,6 +19,10 @@ from .development_context import (  # noqa: F401
     get_default_development_context,
     resolve_development_context,
 )
+from .engagement_window import (  # noqa: F401
+    EngagementWindowModel,
+    WindowModelReadiness,
+)
 from .ethics_engine import DecisionLog, EthicalStance, EthicsEngine  # noqa: F401
 from .exploratory_questioning import ExploratoryQuestioner, QuestionDecision  # noqa: F401
 from .interaction_memory import (  # noqa: F401
@@ -103,6 +107,8 @@ __all__ = [
     "DecisionLog",
     "DevelopmentPhaseContext",
     "DeviationReport",
+    "EngagementWindowModel",
+    "WindowModelReadiness",
     "EnjoymentScore",
     "EthicalStance",
     "EthicsEngine",
