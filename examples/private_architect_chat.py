@@ -51,6 +51,7 @@ from core import (  # noqa: E402
     get_default_development_context,
 )
 from core.content_provider import provider_from_env  # noqa: E402
+from core.local_model_config import load_local_env_file  # noqa: E402
 from core.session_time import begin_session, format_idle_brief  # noqa: E402
 from core.communicative_deliberation import (  # noqa: E402
     knowledge_is_blank,
@@ -86,7 +87,18 @@ def build_stack(
     data_root: Path,
     user_id: str,
     auto_enqueue_audits: bool = True,
+    auto_load_local_model_config: bool = True,
 ) -> dict[str, Any]:
+    # Applies .pbe_model.env (if present) before provider_from_env() below —
+    # a no-op when the file is absent, never overrides a real OS env var
+    # (see core/local_model_config.py). Matches InteractionSession's own
+    # default (api/interaction.py) so the architect's interactive CLI session
+    # and the real product entry point behave the same way out of the box.
+    # Tests that need deterministic/offline behavior regardless of the host
+    # machine's local Ollama setup pass auto_load_local_model_config=False
+    # (see tests/test_architect_acceptance_a4.py).
+    if auto_load_local_model_config:
+        load_local_env_file()
     store = LocalPersistence(data_root)
     memory = InteractionMemoryStore(store, max_entries=500)
     baseliner = PerUserBaseline(store, min_samples_for_deviation=3)
@@ -142,6 +154,7 @@ def build_stack(
         "presence": presence,
         "now_fn": None,  # tests may inject a callable for frozen time
         "auto_enqueue_audits": auto_enqueue_audits,
+        "auto_load_local_model_config": auto_load_local_model_config,
     }
 
 
@@ -161,6 +174,9 @@ def _ensure_api_session(stack: dict[str, Any]) -> InteractionSession:
         auto_enqueue_audits=bool(stack.get("auto_enqueue_audits", True)),
         development_context=stack.get("dev"),
         content_provider=stack.get("content_provider"),
+        auto_load_local_model_config=bool(
+            stack.get("auto_load_local_model_config", True)
+        ),
     )
     pres = stack.get("presence")
     if isinstance(pres, SessionPresence):

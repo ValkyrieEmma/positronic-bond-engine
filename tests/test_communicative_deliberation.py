@@ -165,6 +165,7 @@ def test_live_stack() -> None:
             user_id="comm_user",
             data_root=Path(tmp),
             auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
         )
         r1 = process_turn("Hello", stack=stack, quiet=True)
         text1 = (r1.get("reply_text") or "").lower()

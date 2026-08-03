@@ -115,7 +115,12 @@ def main() -> int:
 
         # Long idle greeting via private chat
         clock2 = _Clock(datetime(2026, 7, 26, 18, 0, 0, tzinfo=timezone.utc))
-        stack = build_stack(data_root=tmp, user_id="greet_user", auto_enqueue_audits=False)
+        stack = build_stack(
+            data_root=tmp,
+            user_id="greet_user",
+            auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
+        )
         stack["now_fn"] = clock2
         # seed name + a turn
         process_turn(
