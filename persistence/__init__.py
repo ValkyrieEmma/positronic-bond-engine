@@ -37,7 +37,12 @@ from .paths import (
     is_under_repo,
 )
 from .privacy import PrivacyFilter, PrivacyPolicy
-from .stores import BondStateStore, DecisionLogStore, QueuedAuditStore
+from .stores import (
+    BondStateStore,
+    DecisionLogStore,
+    EngagementCandidateStore,
+    QueuedAuditStore,
+)
 
 __all__ = [
     "LocalPersistence",
@@ -46,6 +51,7 @@ __all__ = [
     "BondStateStore",
     "DecisionLogRecord",
     "DecisionLogStore",
+    "EngagementCandidateStore",
     "QueuedAuditStore",
     "UserSettings",
     "PrivacyFilter",
