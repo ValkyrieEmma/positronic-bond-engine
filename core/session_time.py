@@ -35,6 +35,24 @@ for what happens when it isn't, e.g. a bare Windows Python without the
 
 Both fields default to empty/None so old ``session_time`` bags on disk load
 correctly (``from_dict`` never requires either key).
+
+``live_touch_this_turn`` (added for Phase 2 step 5 — get_next_candidate)
+--------------------------------------------------------------------------
+``session_context`` (the dict returned by ``touch_turn`` / ``begin_session``
+/ ``build_session_context``) gained one new boolean key,
+``live_touch_this_turn``: True only on the context returned by an actual
+``touch_turn()`` call (a real user turn happened just now), False from a
+bare ``begin_session()`` (opening a session with nobody having said
+anything yet, same distinction ``touch_history`` itself already draws — see
+above). This is the existing, narrowly-scoped signal
+``auditing.engagement_queue.EngagementQueue.get_next_candidate()``'s
+``mid_session`` parameter is meant to be derived from: a caller sitting in
+the same turn-processing path as a live ``touch_turn()`` call already has
+this turn's ``session_context`` in hand and can read the key straight off
+it, rather than tracking a second, parallel "are we mid-session" flag of
+its own. Not exposed anywhere before this — this module had no way to tell
+a live-touch context from a session-open-only context from the outside
+until now.
 """
 
 from __future__ import annotations
@@ -334,6 +352,7 @@ def touch_turn(
         # real touch, so record it in touch_history too before returning.
         ctx = begin_session(persistence, user_id, now_fn=lambda: now, force_new=True)
         _record_touch(persistence, user_id, now)
+        ctx["live_touch_this_turn"] = True
         return ctx
 
     last_turn = _parse_iso(state.last_turn_at)
@@ -361,7 +380,7 @@ def touch_turn(
             pass
 
     return build_session_context(
-        state, now=now, idle_before_turn=idle_before, just_began=False
+        state, now=now, idle_before_turn=idle_before, just_began=False, live_touch=True
     )
 
 
@@ -371,6 +390,7 @@ def build_session_context(
     now: datetime | None = None,
     idle_before_turn: float | None = None,
     just_began: bool = False,
+    live_touch: bool = False,
 ) -> dict[str, Any]:
     """Plain dict for evaluate context, status, and social_direct."""
     now = now or _utc_now()
@@ -407,6 +427,7 @@ def build_session_context(
         "session_stale_threshold_seconds": SESSION_STALE_SECONDS,
         "timezone": state.timezone,
         "touch_history_count": len(state.touch_history),
+        "live_touch_this_turn": bool(live_touch),
         "forces_speech": False,
         "forces_question": False,
         "schema_version": 1,
