@@ -231,7 +231,12 @@ def main() -> int:
     # 5. Live private chat multi-turn hello stays reasonable
     tmp = Path(tempfile.mkdtemp(prefix="pbe_posture_"))
     try:
-        stack = build_stack(data_root=tmp, user_id="posture_user", auto_enqueue_audits=False)
+        stack = build_stack(
+            data_root=tmp,
+            user_id="posture_user",
+            auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
+        )
         for msg in ("hello", "hello", "hi"):
             r = process_turn(msg, stack=stack, quiet=True)
             soft = _soft_in(r.get("reply_text") or "")
