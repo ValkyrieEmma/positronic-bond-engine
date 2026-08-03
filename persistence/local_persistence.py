@@ -42,6 +42,7 @@ from .stores import (
     BaselineStore,
     BondStateStore,
     DecisionLogStore,
+    EngagementCandidateStore,
     QueuedAuditStore,
     SettingsStore,
 )
@@ -68,6 +69,8 @@ Layout (all paths scoped to users/<user_id>/)
   settings.json          — user controls (memory, exploratory prefs, …)
   decision_logs.jsonl    — EthicsEngine audit lines + evidence_snapshot
   audits_queue.json      — deferred QueuedAudit scaffolding (non-blocking)
+  engagement_queue.json  — proactive EngagementCandidate queue (scaffolding
+                           only; not surfaced to users yet)
   interactions.jsonl     — InteractionMemoryStore episodic feed
                            (owned by core.interaction_memory; same folder)
 
@@ -106,6 +109,7 @@ class LocalPersistence:
         self.bonds = BondStateStore(self.backend, self.privacy)
         self.decision_logs = DecisionLogStore(self.backend, self.privacy)
         self.audits = QueuedAuditStore(self.backend, self.privacy)
+        self.engagement_candidates = EngagementCandidateStore(self.backend, self.privacy)
         self.settings = SettingsStore(self.backend, self.privacy)
 
         self._ensure_readme()
@@ -253,6 +257,37 @@ class LocalPersistence:
                 "last_audit_id": audit_id,
                 "last_audit_at": now,
             },
+        )
+
+    # ------------------------------------------------------------------
+    # Engagement candidates (proactive topic queue; Phase 2 step 3 —
+    # queue scaffolding only, not wired into EthicsEngine yet)
+    # ------------------------------------------------------------------
+
+    def load_engagement_candidates(self, user_id: str = "default") -> list[dict[str, Any]]:
+        return self.engagement_candidates.load(user_id)
+
+    def save_engagement_candidates(
+        self, user_id: str, candidates: list[dict[str, Any]]
+    ) -> Path:
+        return self.engagement_candidates.save(user_id, candidates)
+
+    def get_engagement_queue(
+        self, user_id: str = "default", *, max_entries: int = 200
+    ) -> Any:
+        """Return an ``EngagementQueue`` bound to this user's durable queue file.
+
+        Same shape as ``get_audit_queue``: local, fail-soft, never blocks
+        evaluate().
+        """
+        from auditing.engagement_queue import EngagementQueue
+
+        return EngagementQueue(
+            user_id=user_id,
+            persist_load=lambda uid: self.load_engagement_candidates(uid),
+            persist_save=lambda uid, rows: self.save_engagement_candidates(uid, rows),
+            fail_soft=True,
+            max_entries=max_entries,
         )
 
     # ------------------------------------------------------------------

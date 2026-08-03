@@ -13,6 +13,7 @@ Ownership (per user_id under users/<id>/)
 - BondStateStore → bond_state.json (RelationshipHealth living bond model)
 - DecisionLogStore → decision_logs.jsonl (EthicsEngine audit / provenance)
 - QueuedAuditStore → audits_queue.json (deferred provenance audits)
+- EngagementCandidateStore → engagement_queue.json (proactive topic queue)
 - SettingsStore → settings.json (user controls)
 
 Episodic interaction transcripts are **not** here — see
@@ -300,6 +301,69 @@ class QueuedAuditStore:
             {
                 "user_id": user_id,
                 "audits": cleaned,
+                "schema_version": 1,
+                "forces_speech": False,
+                "forces_question": False,
+            },
+        )
+        return path
+
+    def delete(self, user_id: str) -> bool:
+        return self._backend.delete_path(self._path(user_id))
+
+
+class EngagementCandidateStore:
+    """JSON file of proactive engagement candidates per user (Phase 2 step 3).
+
+    File: ``engagement_queue.json`` under users/<user_id>/. Mirrors
+    QueuedAuditStore's shape closely — see ``auditing.engagement_queue`` for
+    the in-memory ``EngagementQueue`` this backs.
+    """
+
+    FILENAME = "engagement_queue.json"
+
+    def __init__(self, backend: JsonFileBackend, privacy: PrivacyFilter) -> None:
+        self._backend = backend
+        self._privacy = privacy
+
+    def _path(self, user_id: str) -> Path:
+        return ensure_user_dir(self._backend.data_root, user_id) / self.FILENAME
+
+    def load(self, user_id: str) -> list[dict[str, Any]]:
+        raw = self._backend.read_json(self._path(user_id))
+        if isinstance(raw, dict) and isinstance(raw.get("candidates"), list):
+            return [r for r in raw["candidates"] if isinstance(r, dict)]
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+        return []
+
+    def save(self, user_id: str, candidates: list[dict[str, Any]]) -> Path:
+        cleaned: list[dict[str, Any]] = []
+        for c in candidates or []:
+            if not isinstance(c, dict):
+                continue
+            item = self._privacy.filter_mapping(dict(c))
+            item["forces_speech"] = False
+            item["forces_question"] = False
+            if "reason" in item:
+                item["reason"] = self._privacy.filter_text(str(item.get("reason") or ""))[
+                    :280
+                ]
+            if "topic" in item:
+                item["topic"] = self._privacy.filter_text(str(item.get("topic") or ""))[
+                    :96
+                ]
+            if item.get("relevance_notes"):
+                item["relevance_notes"] = self._privacy.filter_text(
+                    str(item.get("relevance_notes") or "")
+                )[:280]
+            cleaned.append(item)
+        path = self._path(user_id)
+        self._backend.write_json(
+            path,
+            {
+                "user_id": user_id,
+                "candidates": cleaned,
                 "schema_version": 1,
                 "forces_speech": False,
                 "forces_question": False,
