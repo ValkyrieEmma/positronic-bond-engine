@@ -18,6 +18,10 @@ from .audit_runner import (  # noqa: F401
     AuditRunReport,
     build_runner_from_persistence,
 )
+from .engagement_queue import (  # noqa: F401
+    EngagementCandidate,
+    EngagementQueue,
+)
 from .provenance_stale import (  # noqa: F401
     collect_potentially_stale,
     confidence_dampen_from_stale,
@@ -45,6 +49,12 @@ __all__ = [
     "AuditReport",
     "AuditRunReport",
     "AuditRunner",
+    # EngagementCandidate/EngagementQueue's own STATUS_* constants are not
+    # re-exported here — they'd collide by name (though not by meaning)
+    # with QueuedAudit's STATUS_PENDING / STATUS_CANCELLED above. Import
+    # them from auditing.engagement_queue directly instead.
+    "EngagementCandidate",
+    "EngagementQueue",
     "PRIORITY_ORDINARY",
     "PRIORITY_RELATIONSHIP_HEALTH",
     "PRIORITY_SAFETY",
