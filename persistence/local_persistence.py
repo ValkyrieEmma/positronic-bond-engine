@@ -213,7 +213,11 @@ class LocalPersistence:
         """Return an on-demand ``AuditRunner`` for this user (non-blocking).
 
         Call ``runner.process_next()`` / ``process_batch()`` explicitly —
-        never from the live evaluate() hot path.
+        never from the live evaluate() hot path. ``process_batch()`` also
+        reassesses this user's engagement-candidate queue (age-based expiry
+        only) on the same call — see ``auditing.audit_runner``'s module
+        docstring ("Engagement-queue reassessment") for why that piggybacks
+        on this cadence instead of getting a scheduler of its own.
         """
         from auditing.audit_runner import build_runner_from_persistence
 

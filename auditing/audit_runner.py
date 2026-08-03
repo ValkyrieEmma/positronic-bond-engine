@@ -25,6 +25,24 @@ Does **not**:
 - rewrite bond texture values (only provenance marks)
 
 Dependencies are injected so LocalPersistence / EthicsEngine stay modular.
+
+Engagement-queue reassessment (Phase 2 step 4 — added 2026-08-03)
+--------------------------------------------------------------------
+``process_batch()`` is the one "run maintenance work when there's a
+non-blocking moment" cycle in this system — the project's own design intent
+is exactly one such cycle, not two parallel ones that happen to both exist.
+So rather than giving ``auditing.engagement_queue.EngagementQueue.reassess()``
+its own scheduler, ``process_batch()`` also calls it (best-effort, fail-soft)
+on an ``EngagementQueue`` injected via the optional ``engagement_queue``
+constructor param. ``build_runner_from_persistence()`` wires this up
+automatically from a ``LocalPersistence``-like store the same way it already
+wires ``queue`` from ``get_audit_queue()`` — so any caller going through
+that helper (which is what ``LocalPersistence.get_audit_runner()`` uses)
+gets engagement-candidate reassessment on the same cadence for free, with no
+extra call site to keep in sync. A runner built without an
+``engagement_queue`` (e.g. constructed directly, as several tests do) simply
+skips this step — ``process_batch()``'s return value and existing behavior
+are unchanged for callers who never opt into it.
 """
 
 from __future__ import annotations
@@ -152,6 +170,7 @@ class AuditRunner:
         load_bond_state: Callable[[str], Any] | None = None,
         apply_stale_marks: Callable[..., Any] | None = None,
         media_purge: Callable[[str, dict[str, str]], list[Any]] | None = None,
+        engagement_queue: Any | None = None,
         fail_soft: bool = True,
     ) -> None:
         if queue is None:
@@ -164,6 +183,10 @@ class AuditRunner:
         self._load_bond_state = load_bond_state
         self._apply_stale_marks = apply_stale_marks
         self._media_purge = media_purge
+        # Optional auditing.engagement_queue.EngagementQueue — see module
+        # docstring's "Engagement-queue reassessment" section. None (the
+        # default) means process_batch() simply skips that step.
+        self._engagement_queue = engagement_queue
         self._fail_soft = bool(fail_soft)
 
     # ------------------------------------------------------------------
@@ -177,8 +200,23 @@ class AuditRunner:
             return None
         return self.process_one(nxt.audit_id)
 
-    def process_batch(self, max_items: int | None = 10) -> AuditRunReport:
-        """Process up to ``max_items`` pending audits in priority order."""
+    def process_batch(
+        self, max_items: int | None = 10, *, now: datetime | None = None
+    ) -> AuditRunReport:
+        """Process up to ``max_items`` pending audits in priority order.
+
+        Also reassesses this user's engagement-candidate queue (age-based
+        expiry only — see EngagementQueue.reassess()) on the same call, when
+        one was injected — see module docstring's "Engagement-queue
+        reassessment" section. Purely a side effect: does not change this
+        method's return value or behavior for callers that never pass
+        ``engagement_queue``. ``now`` is forwarded to that reassessment only
+        (real wall-clock time when omitted, the same default
+        EngagementQueue.reassess() itself already has) — a small,
+        test-friendly, purely additive keyword-only param; every existing
+        positional/no-arg call to ``process_batch()`` is unaffected.
+        """
+        self._reassess_engagement_queue(now)
         report = AuditRunReport(user_id=self.user_id)
         cap = 10 if max_items is None else max(0, int(max_items))
         for _ in range(cap):
@@ -370,6 +408,24 @@ class AuditRunner:
     # Internals
     # ------------------------------------------------------------------
 
+    def _reassess_engagement_queue(self, now: datetime | None = None) -> list[Any]:
+        """Best-effort ``EngagementQueue.reassess()`` piggybacked onto this
+        runner's batch cadence (see module docstring). A no-op — cheap, no
+        error — when no ``engagement_queue`` was injected, or for a user
+        whose queue has no candidates yet (the common case for most users
+        for a while): ``reassess()`` itself is just an empty scan in that
+        case. Fail-soft like the rest of this runner; a broken engagement
+        queue must never block audit processing.
+        """
+        if self._engagement_queue is None:
+            return []
+        try:
+            return list(self._engagement_queue.reassess(now) or [])
+        except Exception:
+            if not self._fail_soft:
+                raise
+            return []
+
     def _get_engine(self) -> Any | None:
         if self._ethics_engine is not None:
             return self._ethics_engine
@@ -536,6 +592,14 @@ def build_runner_from_persistence(
 ) -> AuditRunner:
     """Convenience: AuditRunner bound to LocalPersistence-like store."""
     queue = persistence.get_audit_queue(user_id)
+    # Duck-typed like the loaders below: a persistence-like object that
+    # doesn't offer get_engagement_queue (e.g. a minimal test double) just
+    # means the runner skips reassessment, same as passing None directly.
+    engagement_queue = (
+        persistence.get_engagement_queue(user_id)
+        if hasattr(persistence, "get_engagement_queue")
+        else None
+    )
 
     def _load_logs(uid: str) -> list[Any]:
         if hasattr(persistence, "load_decision_logs"):
@@ -561,5 +625,6 @@ def build_runner_from_persistence(
         load_bond_state=_load_bond,
         apply_stale_marks=_stale,
         media_purge=media_purge,
+        engagement_queue=engagement_queue,
         fail_soft=True,
     )
