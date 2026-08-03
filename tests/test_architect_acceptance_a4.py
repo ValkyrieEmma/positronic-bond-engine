@@ -33,6 +33,12 @@ Fixed script (six turns, one continuous session/user):
                             must reflect real subsystem state, not a canned
                             list, and must not be silently withheld.
 
+``build_stack(...)`` below passes ``auto_load_local_model_config=False``
+(added 2026-08-01 alongside ``InteractionSession``'s new opt-out default —
+see api/interaction.py's module docstring) so this fixed acceptance script
+stays deterministic regardless of whatever ``.pbe_model.env`` / Ollama setup
+exists on the machine it runs on.
+
 Run::
 
     $env:PYTHONPATH = "."
@@ -105,7 +111,11 @@ def main() -> int:
 
     tmp = tempfile.mkdtemp(prefix="pbe_a4_")
     try:
-        stack = build_stack(data_root=Path(tmp), user_id="architect")
+        stack = build_stack(
+            data_root=Path(tmp),
+            user_id="architect",
+            auto_load_local_model_config=False,
+        )
 
         # ------------------------------------------------------------
         print("Turn 1: Name grant (maker role + address name)")

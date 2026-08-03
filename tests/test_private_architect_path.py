@@ -83,7 +83,12 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="pbe_arch_"))
     user_id = "architect_test"
     try:
-        stack = build_stack(data_root=tmp, user_id=user_id, auto_enqueue_audits=True)
+        stack = build_stack(
+            data_root=tmp,
+            user_id=user_id,
+            auto_enqueue_audits=True,
+            auto_load_local_model_config=False,
+        )
         check("stack isolated", data_root_is_isolated(stack["data_root"], repo_root=_ROOT))
         check(
             "stack dev version_hint 0.5.0-dev",
@@ -107,7 +112,12 @@ def main() -> int:
         count = int(r.get("bond_interaction_count") or 0)
         check("bond count > 0", count > 0, str(count))
 
-        stack2 = build_stack(data_root=tmp, user_id=user_id, auto_enqueue_audits=True)
+        stack2 = build_stack(
+            data_root=tmp,
+            user_id=user_id,
+            auto_enqueue_audits=True,
+            auto_load_local_model_config=False,
+        )
         check(
             "resume loads bond count",
             stack2["rh"].state.interaction_count == count,

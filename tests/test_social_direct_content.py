@@ -162,7 +162,12 @@ def main() -> int:
     # Live multi-turn private chat
     tmp = Path(tempfile.mkdtemp(prefix="pbe_sd_"))
     try:
-        stack = build_stack(data_root=tmp, user_id="sd_user", auto_enqueue_audits=False)
+        stack = build_stack(
+            data_root=tmp,
+            user_id="sd_user",
+            auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
+        )
         r_h = process_turn("hello", stack=stack, quiet=True)
         check(
             "live hello social_direct",

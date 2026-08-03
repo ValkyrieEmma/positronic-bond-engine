@@ -14,6 +14,8 @@ Offline default: **no model** — deliberated fallback expression only (`NullCon
 
 This supports the ethical core for humanoid robots: models are optional wording layers, not the conscience. Callers use the **public entry** (`api/`); the local CLI harness exercises the same pipeline for testing.
 
+**Update (2026-08-01):** `api.InteractionSession` — the actual public entry — now loads `.pbe_model.env` (if present) by default before resolving the content provider and constructing each user's `EthicsEngine`/`ContextualJudge`, closing a gap where neither the product entry point nor its CLI test harness auto-loaded the config file described below, so a fresh checkout with `.pbe_model.env` set up still ran fully keyword-only until someone manually called `load_local_env_file()` (see `claude/pbe-independent-review-2026-08-01.md` finding 2). Pass `auto_load_local_model_config=False` to opt out (used by the test suite so its offline baseline stays deterministic regardless of the host machine's setup).
+
 ## Architecture
 
 ```
@@ -30,7 +32,7 @@ user message
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
 | HTTP provider (wording) | `core/content_provider.py` |
 | Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — same `PBE_MODEL_*` config, different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` (see `claude/pbe-principle-reasoning-over-rote-2026-07-30.md`) |
-| Optional local config file | `core/local_model_config.py` — explicit opt-in `.pbe_model.env` loader, see below |
+| Optional local config file | `core/local_model_config.py` — `.pbe_model.env` loader, see below. Auto-loaded by default at the public entry (`api.InteractionSession`, since 2026-08-01) and the CLI harness (`examples/private_architect_chat.py`); still explicit opt-in for direct/library use of `content_provider.py` or `contextual_judgment.py` on their own |
 | Wiring | `ResponseGenerator`; public entry and local test harness via `provider_from_env()` |
 
 Context pack includes intent, premises, relationship knowledge (preferred address name, role labels, self-described relation to the system), phase/version, short topics — not arbitrary private dumps.
@@ -63,14 +65,14 @@ from core.response_generator import ResponseGenerator
 responder = ResponseGenerator(content_provider=ollama_provider(model="llama3.2"))
 ```
 
-### Convenience: `.pbe_model.env` instead of shell env vars (2026-07-30)
+### Convenience: `.pbe_model.env` instead of shell env vars (2026-07-30; auto-loaded at the public entry since 2026-08-01)
 
 Setting *persistent* OS environment variables on Windows normally means
 editing System Properties or running `setx` and restarting every terminal —
 friction for something this low-stakes. `core/local_model_config.py`
-provides an optional, explicit, opt-in alternative: a plain
-`.pbe_model.env` file at the repo root (gitignored — see `.gitignore`'s
-"Local model connection config" section), loaded with:
+provides an alternative: a plain `.pbe_model.env` file at the repo root
+(gitignored — see `.gitignore`'s "Local model connection config" section),
+applied via:
 
 ```python
 from core.local_model_config import load_local_env_file
@@ -78,10 +80,27 @@ load_local_env_file()  # applies .pbe_model.env via os.environ.setdefault
 ```
 
 before constructing any provider. A real environment variable with the same
-name always wins over the file. **This is never loaded automatically** —
-importing `content_provider.py` has no side effect on your environment,
-so the test suite's "no model configured" baseline is unaffected whether or
-not `.pbe_model.env` exists. Run `python examples/verify_local_model.py`
+name always wins over the file.
+
+**`content_provider.py` / `contextual_judgment.py` themselves never call this
+automatically** — importing either module has no side effect on your
+environment, which is what keeps a *direct, standalone* use of
+`EthicsEngine()` / `ContentProvider()` (e.g. in your own script, or in a unit
+test) seeing a deterministic "no model configured" baseline regardless of
+whether `.pbe_model.env` exists.
+
+**`api.InteractionSession` — the actual public entry — does call this by
+default** (since 2026-08-01), because a real deployment following this doc's
+Ollama setup should not need a separate manual step to get the
+contextual-judgment layer working; see `api/interaction.py`'s module
+docstring. `examples/private_architect_chat.py`'s CLI harness matches this
+default so the architect's interactive session behaves the same way. Both
+expose `auto_load_local_model_config=False` to opt back out — used by
+`tests/test_public_entry.py` and `tests/test_architect_acceptance_a4.py` so
+the test suite's baseline still doesn't move regardless of what's configured
+on the host machine.
+
+Run `python examples/verify_local_model.py`
 (after `$env:PYTHONPATH = "."`) for a one-command check that both the
 content-generation path *and* the contextual-judgment path (see
 `core/contextual_judgment.py` and

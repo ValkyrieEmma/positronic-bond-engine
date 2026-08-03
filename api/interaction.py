@@ -16,6 +16,24 @@ Invariants (binding):
   - Auditable decisions (decision, path, confidence, principles, notes)
 
 Callers must not invent synthetic group user_ids or override hold/refuse.
+
+Local model config (2026-08-01)
+--------------------------------
+``InteractionSession`` loads ``.pbe_model.env`` (if present at the repo
+root — see ``core/local_model_config.py``) by default before resolving the
+content-generation provider and constructing each user's ``EthicsEngine``
+(and therefore its ``ContextualJudge``). This is the actual product entry
+point per docs/public_entry.md, so an operator who has followed
+docs/model_providers.md's local-Ollama setup gets both gated content
+generation *and* the reasoning-over-rote contextual-judgment layer working
+out of the box, without a separate manual step. A real OS environment
+variable always takes priority (``load_local_env_file`` never overwrites
+one), and this can be disabled via ``auto_load_local_model_config=False``
+for hermetic/offline test runs (see tests/test_public_entry.py and
+tests/test_architect_acceptance_a4.py, which do exactly that so the test
+suite's baseline stays deterministic regardless of what is configured on
+the host machine). See claude/pbe-independent-review-2026-08-01.md finding
+2 for the gap this closes.
 """
 
 from __future__ import annotations
@@ -40,6 +58,7 @@ from core.communicative_deliberation import (
 )
 from core.content_provider import provider_from_env
 from core.development_context import DevelopmentPhaseContext
+from core.local_model_config import load_local_env_file
 from core.session_presence import (
     SessionPresence,
     extract_speaker_id,
@@ -153,7 +172,17 @@ class InteractionSession:
         auto_enqueue_audits: bool = True,
         development_context: DevelopmentPhaseContext | None = None,
         content_provider: Any | None = None,
+        auto_load_local_model_config: bool = True,
     ) -> None:
+        # Applies .pbe_model.env (if present) to os.environ via setdefault —
+        # a no-op when the file is absent, and never overrides a real OS env
+        # var. Must run before provider_from_env() / EthicsEngine() (the
+        # latter constructed per-user in _user_bag) so both the content
+        # provider and the contextual judge see the populated config. Set
+        # auto_load_local_model_config=False for hermetic/offline runs (see
+        # module docstring above).
+        if auto_load_local_model_config:
+            load_local_env_file()
         self.data_root = Path(default_data_root(data_root))
         self.auto_enqueue_audits = bool(auto_enqueue_audits)
         self.dev = development_context or get_default_development_context()

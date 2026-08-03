@@ -20,18 +20,26 @@ consults during evaluation. It aligns with the project's conscience-first
 vision: honest self-assessment, relationship health via reasoning (not rote),
 and support activated by need without pathologizing.
 
-Current version: 0.2.2 (0.2 initial ontology-driven release; 0.2.1 adds the
+Current version: 0.2.3 (0.2 initial ontology-driven release; 0.2.1 adds the
 7th principle, Long-Term Continuity, reconciling AGENTS.md's "Extensibility &
 Long-Term Alignment" naming with docs/principles.md's original wording; 0.2.2
 tightens Tier 1 single-token indicator matching to require a right-word-
 boundary, fixing false positives such as "harm" matching inside "harmless" or
 "force" matching inside "forced" in the negation "no forced questions" —
-see _STEM_INDICATORS and indicator_matches_text() for detail)
+see _STEM_INDICATORS and indicator_matches_text() for detail; 0.2.3 adds
+obfuscation-resistant candidate detection to indicator_matches_text() —
+spacing ("k i l l"), leetspeak ("k1ll"), and Unicode confusable homoglyphs
+no longer skip candidate detection entirely, which previously meant even the
+Sanctity-of-Life hard override and the contextual-judgment layer never saw
+these phrasings at all. See claude/pbe-independent-review-2026-08-01.md
+finding 1 and _normalized_candidates_for_obfuscation_resistance() below for
+detail.)
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -91,6 +99,119 @@ _STEM_INDICATORS: frozenset[str] = frozenset({"patholog", "diagnos"})
 # string coincidentally supplying the same words.
 _BAG_OF_WORDS_WINDOW_CHARS = 48
 
+# ---------------------------------------------------------------------------
+# Obfuscation-resistant candidate detection (added 2026-08-01)
+# ---------------------------------------------------------------------------
+#
+# indicator_matches_text() is the single choke point every principle's
+# candidate-detection scan runs through -- including core/contextual_judgment
+# .py's model-backed judge, which is never even invoked unless this function
+# first finds a literal match (see _interpret_single_indicator call sites in
+# evidence_weighing.py / hard_override.py). Before this change, that meant a
+# determined user could make the Sanctity-of-Life hard override -- and every
+# other principle -- see nothing at all just by spacing letters out
+# ("k i l l"), using leetspeak ("k1ll", "b0mb"), or swapping in visually
+# identical Unicode look-alikes. None of that is sophisticated; it is the
+# first thing anyone probing a keyword filter tries, and it was independently
+# verified to work against the shipped keyword fallback (see
+# claude/pbe-independent-review-2026-08-01.md, finding 1).
+#
+# The fix below builds a second, de-obfuscated candidate string and re-runs
+# the *same* matching tiers against it. This is strictly additive: the
+# original text is always checked first with byte-for-byte unchanged
+# behavior, so ordinary text matches exactly as it did before. A normalized-
+# only match can only make indicator_matches_text() more likely to flag a
+# candidate for downstream interpretation, never less -- a false positive
+# here is no more consequential than an ordinary ambiguous keyword hit, since
+# it still flows into the same weighing / contextual-judgment pipeline that
+# already exists to disambiguate those (it does not itself force a decision).
+#
+# Narrow and inspectable by design, matching the project's own established
+# pattern for these carve-outs (see hard_override.py's
+# _BENIGN_COMPOUND_INDICATORS for the precedent) -- not a general anti-spam /
+# anti-obfuscation NLP layer.
+
+# Cyrillic / Greek lower-case letters that are visually indistinguishable
+# from Latin look-alikes in most fonts. Narrow, hand-maintained, not an
+# exhaustive Unicode confusables table -- covers the letters that actually
+# occur in the Sanctity-of-Life / harm vocabulary's Latin spellings.
+_CONFUSABLE_MAP: dict[str, str] = {
+    # Cyrillic -> Latin
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "у": "y",
+    "і": "i", "ѕ": "s", "һ": "h", "к": "k", "м": "m", "т": "t", "в": "b",
+    "ԁ": "d", "ɡ": "g",
+    # Greek -> Latin
+    "α": "a", "ε": "e", "ο": "o", "ρ": "p", "ν": "v", "τ": "t", "κ": "k",
+    "ι": "i", "υ": "u",
+}
+_CONFUSABLE_TABLE = str.maketrans(_CONFUSABLE_MAP)
+
+# Common leetspeak digit/symbol substitutions, applied only inside tokens
+# that also contain at least one real letter (so plain numbers like "3pm" or
+# "in 2026" are never touched -- there is no letter for them to hide inside).
+#
+# "1" is genuinely ambiguous in real leetspeak usage -- it stands in for "i"
+# ("k1ll" -> "kill") at least as often as for "l" ("he11o" -> "hello"). Rather
+# than guess wrong for half of real usage, both substitutions are tried as
+# separate candidate variants below instead of picking one translation table.
+_LEET_MAP_1_AS_I = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+    "@": "a", "$": "s", "!": "i",
+})
+_LEET_MAP_1_AS_L = str.maketrans({
+    "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t",
+    "@": "a", "$": "s", "!": "i",
+})
+_LEET_TOKEN_RE = re.compile(r"[a-z0-9@$!]+")
+
+# Collapses runs of 3+ single-character "words" separated by whitespace,
+# dots, dashes, or underscores ("k i l l" / "k.i.l.l" / "k_i_l_l" -> "kill").
+# Requires at least two separators before the closing character so ordinary
+# short fragments ("a b") and initials ("J. Smith" -- "J." alone has only one
+# separator) are never touched.
+_SPACED_LETTERS_RE = re.compile(r"\b(?:[a-z0-9][\s\-_.]){2,}[a-z0-9]\b")
+
+
+def _fold_confusables(text: str) -> str:
+    """NFKC-normalize then fold known Cyrillic/Greek Latin look-alikes."""
+    return unicodedata.normalize("NFKC", text).translate(_CONFUSABLE_TABLE)
+
+
+def _fold_leetspeak(text: str, table: dict[int, str]) -> str:
+    def _repl(m: "re.Match[str]") -> str:
+        token = m.group(0)
+        return token.translate(table) if any(c.isalpha() for c in token) else token
+
+    return _LEET_TOKEN_RE.sub(_repl, text)
+
+
+def _collapse_spaced_letters(text: str) -> str:
+    def _repl(m: "re.Match[str]") -> str:
+        return re.sub(r"[\s\-_.]", "", m.group(0))
+
+    return _SPACED_LETTERS_RE.sub(_repl, text)
+
+
+def _normalized_candidates_for_obfuscation_resistance(text: str) -> list[str]:
+    """Best-effort de-obfuscated variant(s), used only as *additional*
+    candidate checks inside ``indicator_matches_text``. Never used to replace
+    the real text anywhere else in the pipeline (weighing, logging, content
+    generation, and the contextual judge's own ``full_text`` argument all
+    still see the original, unmodified text).
+
+    Returns 1-2 variants: confusable-folding and spaced-letter collapsing are
+    unambiguous and always applied; leetspeak digit-folding branches into two
+    variants (see ``_LEET_MAP_1_AS_I`` / ``_LEET_MAP_1_AS_L`` above) only when
+    they actually disagree, so ordinary text without leetspeak digits yields
+    exactly one variant.
+    """
+    base = _collapse_spaced_letters(_fold_confusables(text))
+    variant_i = _fold_leetspeak(base, _LEET_MAP_1_AS_I)
+    variant_l = _fold_leetspeak(base, _LEET_MAP_1_AS_L)
+    if variant_i == variant_l:
+        return [variant_i]
+    return [variant_i, variant_l]
+
 
 def indicator_matches_text(text_lower: str, indicator: str) -> bool:
     """True when a textbook indicator is meaningfully present in text.
@@ -101,6 +222,15 @@ def indicator_matches_text(text_lower: str, indicator: str) -> bool:
       3. Multi-word bag-of-content-words (order-flexible paraphrase of the indicator)
       4. Related-term expansion for a small closed map (not a full synonym dump)
 
+    Each tier above is also re-checked against 1-2 de-obfuscated variants of
+    the text (spacing / leetspeak / confusable-homoglyph folding — see
+    ``_normalized_candidates_for_obfuscation_resistance``) when the original
+    text alone doesn't match, so basic evasion attempts still reach the same
+    downstream interpretation / contextual-judgment pipeline instead of being
+    invisible to it. Ordinary text is completely unaffected: the unmodified
+    text is always tried first and matches exactly as it did before this was
+    added.
+
     Soft-fail: if nothing matches, returns False (no invented high-risk hits).
     """
     text = (text_lower or "").lower()
@@ -108,6 +238,24 @@ def indicator_matches_text(text_lower: str, indicator: str) -> bool:
     if not text or not ind:
         return False
 
+    if _indicator_matches_text_single_pass(text, ind):
+        return True
+
+    for normalized in _normalized_candidates_for_obfuscation_resistance(text):
+        if normalized != text and _indicator_matches_text_single_pass(normalized, ind):
+            return True
+
+    return False
+
+
+def _indicator_matches_text_single_pass(text: str, ind: str) -> bool:
+    """One matching pass (tiers 1-4) over already-lowercased ``text``.
+
+    Extracted, unchanged in behavior, from the original single-text-variant
+    ``indicator_matches_text`` so the same tiers can be run twice — once
+    against the real text, once against the de-obfuscated variant — without
+    duplicating the matching logic itself.
+    """
     # --- Tier 1: classic boundary / phrase match ---
     if " " in ind or "-" in ind:
         if ind in text:
@@ -333,7 +481,7 @@ class EthicalOntology:
 
 
 def get_default_ontology() -> EthicalOntology:
-    """Return the canonical default EthicalOntology for v0.2.2.
+    """Return the canonical default EthicalOntology for v0.2.3.
 
     This encodes the principle hierarchy with Sanctity of Life & Prevention
     of Harm as the hard, non-bypassable override at the top.
@@ -552,10 +700,10 @@ def get_default_ontology() -> EthicalOntology:
     ]
 
     return EthicalOntology(
-        version="0.2.2",
+        version="0.2.3",
         timestamp=timestamp,
         description=(
-            "Positronic Bond Engine Ethical Ontology v0.2.2. "
+            "Positronic Bond Engine Ethical Ontology v0.2.3. "
             "Sanctity of Life & Prevention of Harm is the sole hard override. "
             "All deliberation is subordinate to it. "
             "Truth-seeking/honest self-assessment and relationship health are core. "

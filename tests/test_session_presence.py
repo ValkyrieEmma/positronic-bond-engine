@@ -89,6 +89,7 @@ def test_command_interception() -> None:
             data_root=Path(tmp),
             user_id="alice",
             auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
         )
         mem0 = stack["memory"].count("alice")
         bond0 = stack["rh"].state.interaction_count
@@ -154,6 +155,7 @@ def test_live_single_and_multi() -> None:
             data_root=Path(tmp),
             user_id="alice",
             auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
         )
         r0 = process_turn("hello", stack=stack, quiet=True)
         check(
@@ -209,6 +211,7 @@ def test_live_single_and_multi() -> None:
             data_root=Path(tmp),
             user_id="alice",
             auto_enqueue_audits=False,
+            auto_load_local_model_config=False,
         )
         # Preserve multi presence for completeness
         alice_stack["presence"] = pres

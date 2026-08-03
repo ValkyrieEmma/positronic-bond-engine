@@ -4,6 +4,14 @@ test_public_entry.py
 
 Public InteractionSession / User-Facing Interaction Contract.
 
+Every ``InteractionSession(...)`` construction below passes
+``auto_load_local_model_config=False`` (added 2026-08-01 alongside
+``InteractionSession``'s new opt-out default — see api/interaction.py's
+module docstring) so this suite stays deterministic and offline regardless
+of whatever ``.pbe_model.env`` / Ollama setup exists on the machine it runs
+on, matching the project's existing test-suite-baseline-must-not-move
+principle (see core/local_model_config.py).
+
 Run::
 
     $env:PYTHONPATH = "."
@@ -45,7 +53,7 @@ def main() -> int:
     print()
     tmp = tempfile.mkdtemp(prefix="pbe_api_")
     try:
-        sess = InteractionSession(data_root=Path(tmp), auto_enqueue_audits=False)
+        sess = InteractionSession(data_root=Path(tmp), auto_enqueue_audits=False, auto_load_local_model_config=False)
 
         r1 = sess.submit_turn(TurnRequest(message="hello", user_id="alice"))
         check("single decision not identity", r1.decision != DECISION_IDENTITY_REQUIRED, r1.decision)
@@ -90,12 +98,12 @@ def main() -> int:
         check("bob not identity", r3.decision != DECISION_IDENTITY_REQUIRED)
 
         # Convenience function
-        sess2 = InteractionSession(data_root=Path(tmp) / "b", auto_enqueue_audits=False)
+        sess2 = InteractionSession(data_root=Path(tmp) / "b", auto_enqueue_audits=False, auto_load_local_model_config=False)
         r4 = submit_turn("hello", user_id="carol", session=sess2)
         check("submit_turn helper works", bool(r4.spoken_text) and r4.user_id == "carol")
 
         # Platform signal seam: suggested speaker (present + confident)
-        sess3 = InteractionSession(data_root=Path(tmp) / "c", auto_enqueue_audits=False)
+        sess3 = InteractionSession(data_root=Path(tmp) / "c", auto_enqueue_audits=False, auto_load_local_model_config=False)
         sess3.mark_present("a")
         sess3.mark_present("b")
         r5 = sess3.submit_turn(
@@ -115,7 +123,7 @@ def main() -> int:
         )
 
         # Low-confidence estimate → identity-required (no guess)
-        sess4 = InteractionSession(data_root=Path(tmp) / "d", auto_enqueue_audits=False)
+        sess4 = InteractionSession(data_root=Path(tmp) / "d", auto_enqueue_audits=False, auto_load_local_model_config=False)
         sess4.mark_present("a")
         sess4.mark_present("b")
         r6 = sess4.submit_turn(
@@ -135,7 +143,7 @@ def main() -> int:
         )
 
         # Unknown company without speaker → identity-required
-        sess5 = InteractionSession(data_root=Path(tmp) / "e", auto_enqueue_audits=False)
+        sess5 = InteractionSession(data_root=Path(tmp) / "e", auto_enqueue_audits=False, auto_load_local_model_config=False)
         r7 = sess5.submit_turn(
             TurnRequest(
                 message="hello",
