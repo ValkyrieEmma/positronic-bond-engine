@@ -58,6 +58,7 @@ from core.communicative_deliberation import (
 )
 from core.content_provider import provider_from_env
 from core.development_context import DevelopmentPhaseContext
+from core.engagement_correction import CorrectionJudge, cancel_scope_from_judgment
 from core.local_model_config import load_local_env_file
 from core.session_presence import (
     SessionPresence,
@@ -528,6 +529,37 @@ class InteractionSession:
             kind="user_turn",
             source="api.interaction",
         )
+
+        # Engagement-candidate correction check (Phase 2 step 6): does this
+        # turn, read against the single turn immediately before it, genuinely
+        # ask the system to stop proactively raising something? Contextual-
+        # judgment-backed (core/engagement_correction.py), not phrase
+        # matching — "stop it" said laughing right after a compliment must
+        # not be read as a correction. Cheap no-op when there is nothing
+        # pending to cancel; fail-soft so a broken classifier can never
+        # block ordinary turn handling. Runs live, here, as part of
+        # ordinary turn processing rather than an offline pass.
+        try:
+            engagement_queue = store.get_engagement_queue(user_id)
+            if engagement_queue.list_pending():
+                prev_agent_turns = memory.by_kind(user_id, "agent_turn", limit=1)
+                preceding_turn_text = (
+                    prev_agent_turns[-1].summary if prev_agent_turns else ""
+                )
+                correction_judgment = CorrectionJudge().judge(
+                    current_message=user_text, preceding_turn=preceding_turn_text
+                )
+                cancel_scope = cancel_scope_from_judgment(correction_judgment)
+                if cancel_scope is not None:
+                    engagement_queue.cancel_matching(
+                        cancel_scope,
+                        reason=(
+                            f"genuine correction detected: {correction_judgment.reasoning}"
+                        )[:200],
+                    )
+        except Exception:
+            pass
+
         from core.message_understanding import (
             infer_bond_update_from_understanding,
             propose_agent_action_from_understanding,
