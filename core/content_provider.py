@@ -715,6 +715,65 @@ def provider_from_env() -> ContentProvider:
     return OpenAICompatibleProvider(cfg)
 
 
+def release_vram(config: ProviderConfig | None) -> dict[str, Any]:
+    """Best-effort VRAM release for the configured local model (Phase 2's
+    manual "go to sleep" emergency control — see core/recharge_cycle.py).
+
+    Swappable output-side seam mirroring recharge_cycle.py's trigger-source
+    seam on the input side: today's mechanism unloads the local Ollama
+    model; tomorrow's embodied version is "navigate to dock, or sleep mode
+    if unreachable" — same call shape, different action.
+
+    Today's mechanism, verified against a real local Ollama instance
+    (llama3.1:8b) during development: Ollama's *native* API
+    (``/api/generate``, NOT the OpenAI-compatible ``/v1/chat/completions``
+    endpoint ``ProviderConfig.endpoint_chat()`` builds) accepts
+    ``{"model": ..., "keep_alive": 0}`` with no prompt, which unloads that
+    model from VRAM immediately — confirmed via ``/api/ps`` showing the
+    model resident before the call and no models resident immediately
+    after (``done_reason: "unload"`` in the response). There is no
+    equivalent for a plain ``openai_compatible`` (cloud) profile — this
+    process does not control VRAM for a remote endpoint — so this is a
+    documented no-op there, not a silent failure.
+
+    Fail-soft by construction: missing config, a disabled provider, a
+    non-Ollama profile, or any network error all return a compact result
+    dict (never raise) — this must never block the emergency-sleep command
+    itself, which is why go_to_sleep() calls this only after the durable
+    Asleep state is already saved.
+    """
+    result: dict[str, Any] = {
+        "attempted": False,
+        "ok": False,
+        "profile": None,
+        "error": None,
+    }
+    if config is None or not config.enabled:
+        result["error"] = "no_provider_configured"
+        return result
+    result["profile"] = config.profile
+    if config.profile != "ollama":
+        result["error"] = "no_release_mechanism_for_this_profile"
+        return result
+
+    result["attempted"] = True
+    base = (config.base_url or "").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    url = f"{base}/api/generate"
+    body = {"model": config.model, "keep_alive": 0}
+    data = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=min(10.0, float(config.timeout_s))) as resp:
+            resp.read()
+        result["ok"] = True
+    except Exception as e:  # noqa: BLE001 - fail-soft by design
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
+
+
 def ollama_provider(
     *,
     model: str = OLLAMA_DEFAULT_MODEL,

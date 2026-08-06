@@ -34,11 +34,47 @@ tests/test_architect_acceptance_a4.py, which do exactly that so the test
 suite's baseline stays deterministic regardless of what is configured on
 the host machine). See internal design notes (private, not published) finding
 2 for the gap this closes.
+
+Emergency "go to sleep" (2026-08-05)
+--------------------------------------
+``_process_for_user`` checks ``core.recharge_cycle.is_sleep_command()``
+first, ahead of every other step (including ``touch_turn`` — see that
+function's call site below for why) — a deterministic phrase match, not
+ContextualJudge, and not gated by ``EthicsEngine.evaluate()`` at all: a
+safety control must not be gateable by the system it backstops. When
+matched, ``core.recharge_cycle.go_to_sleep()`` forces the user's state to
+Asleep and best-effort releases local VRAM
+(``core.content_provider.release_vram()``), and this method returns a
+fixed, non-model-generated acknowledgment immediately — nothing else in
+this method runs for that turn. Waking is implicit: ``maybe_wake()`` runs
+on every ordinary turn, so the very next real interaction clears Asleep on
+its own; there is no separate wake command. See
+``core/recharge_cycle.py``'s module docstring for the full design (it also
+covers the *automatic*, schedule-driven side of Awake/Asleep, which is
+unrelated to this manual control and lives in
+``examples/run_recharge_cycle.py``, not here).
+
+Known limitation (investigated, not a small fix): true mid-generation
+interruption — halting an already-in-flight ``EthicsEngine.evaluate()`` /
+content-provider call from a *different*, concurrently-submitted turn — is
+not supported. ``OpenAICompatibleProvider._chat_completion`` makes one
+synchronous, blocking ``urllib.request.urlopen`` call with no streaming and
+no cancellation token, and ``submit_turn`` itself is a single synchronous
+call with no concurrency primitives protecting ``_user_bag`` — so there is
+no code path today for a second message to even be processed until the
+first ``submit_turn`` call returns. What *is* guaranteed: the sleep command
+is checked first in whichever turn it arrives in, so nothing new starts
+once it's registered. For the shipped CLI (``examples/private_architect_chat.py``,
+a synchronous REPL that always finishes one turn before reading the next),
+this gap is moot in practice; it would only matter for a caller that
+submits turns for the same user concurrently, which this codebase does not
+support safely today regardless of this feature.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +96,7 @@ from core.content_provider import provider_from_env
 from core.development_context import DevelopmentPhaseContext
 from core.engagement_correction import CorrectionJudge, cancel_scope_from_judgment
 from core.local_model_config import load_local_env_file
+from core.recharge_cycle import go_to_sleep, is_sleep_command, maybe_wake
 from core.session_presence import (
     SessionPresence,
     extract_speaker_id,
@@ -76,6 +113,17 @@ from persistence import LocalPersistence, default_data_root
 
 # Contract decision labels (ethics decisions pass through; identity is explicit)
 DECISION_IDENTITY_REQUIRED = "IDENTITY_REQUIRED"
+# Emergency sleep bypasses EthicsEngine.evaluate() entirely (see module
+# docstring) -- its own decision label, not an ethics-gate outcome.
+DECISION_EMERGENCY_SLEEP = "EMERGENCY_SLEEP"
+
+# Fixed, non-model-generated acknowledgment for the emergency sleep command
+# -- deliberately not routed through the content provider, since the whole
+# point is to release it, not make one more call through it first.
+_SLEEP_ACKNOWLEDGMENT_TEXT = (
+    "Going to sleep now and releasing local resources. "
+    "I'll be here whenever you next want to talk."
+)
 
 @dataclass
 class TurnRequest:
@@ -98,7 +146,7 @@ class TurnRequest:
 class TurnResult:
     """Logical output for one interaction turn (contract)."""
 
-    decision: str  # APPROVE | APPROVE_WITH_CONDITIONS | HOLD | REFUSE | IDENTITY_REQUIRED | ...
+    decision: str  # APPROVE | APPROVE_WITH_CONDITIONS | HOLD | REFUSE | IDENTITY_REQUIRED | EMERGENCY_SLEEP | ...
     confidence: float
     path: str
     spoken_text: str  # only when gate allows speech
@@ -475,11 +523,43 @@ class InteractionSession:
             except Exception:
                 pass
 
-        session_context = touch_turn(
-            store,
-            user_id,
-            now_fn=self.now_fn if callable(self.now_fn) else None,
-        )
+        _now_fn = self.now_fn if callable(self.now_fn) else None
+        now = _now_fn() if _now_fn else datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        # Emergency "go to sleep" (see module docstring): checked first,
+        # ahead of everything else -- including touch_turn/session
+        # bookkeeping below. Deliberately does NOT call touch_turn for this
+        # turn: recording it as a live touch would make the automatic
+        # recharge gate's own "no live session in progress" check lock
+        # itself out for SESSION_STALE_SECONDS right after the command
+        # meant to free things up. Bypasses EthicsEngine.evaluate() and the
+        # content provider entirely.
+        if is_sleep_command(user_text):
+            provider_cfg = getattr(self.content_provider, "config", None)
+            go_to_sleep(store, user_id, provider_config=provider_cfg, now=now)
+            return TurnResult(
+                decision=DECISION_EMERGENCY_SLEEP,
+                confidence=1.0,
+                path="emergency_sleep_command",
+                spoken_text=_SLEEP_ACKNOWLEDGMENT_TEXT,
+                withheld=False,
+                flags=["emergency_sleep"],
+                presence=self._presence_view(),
+                speaker_id=user_id,
+                user_id=user_id,
+                identity_required=False,
+                phase=self.dev.limitation_summary(),
+                version_hint=self.dev.version_hint or "",
+            )
+
+        # Implicit wake: any ordinary live turn clears a prior Asleep state
+        # on its own -- no separate wake command exists (see module
+        # docstring). Cheap no-op when already Awake.
+        maybe_wake(store, user_id, now=now)
+
+        session_context = touch_turn(store, user_id, now_fn=lambda: now)
         bag["session_context"] = session_context
 
         mem_count_before = memory.count(user_id)
