@@ -20,7 +20,7 @@ consults during evaluation. It aligns with the project's conscience-first
 vision: honest self-assessment, relationship health via reasoning (not rote),
 and support activated by need without pathologizing.
 
-Current version: 0.3.0 (0.2 initial ontology-driven release; 0.2.1 adds the
+Current version: 0.3.1 (0.2 initial ontology-driven release; 0.2.1 adds the
 7th principle, Long-Term Continuity, reconciling architect ops notes' "Extensibility &
 Long-Term Alignment" naming with docs/principles.md's original wording; 0.2.2
 tightens Tier 1 single-token indicator matching to require a right-word-
@@ -53,10 +53,20 @@ real cost is never silently absorbed into "the dominant principle won"; (3)
 truth_seeking_honest_self_assessment's scope is widened from self-claims
 specifically to general epistemic discipline (see its description below);
 (4) relationship_health_user_wellbeing gains a "covert political propaganda"
-indicator alongside its existing anti-manipulation vocabulary. Agent-side
-values (anti-power-seeking, self-protection-without-martyrdom, protection-
-without-possession) are tracked as Phase 1.5c in the roadmap and are not yet
-reflected in this ontology file.)
+indicator alongside its existing anti-manipulation vocabulary. 0.3.1
+(2026-08-14, Phase 1.5c — agent-side values, gap analysis items 4/14/15/3/19)
+adds two new supporting principles, agent_autonomy_without_power_seeking
+(precedence 70) and self_protection_without_martyrdom (precedence 80) —
+agent-side, not competing overrides with Sanctity of Life, same "no rival
+veto" framing 0.3.0 used for dignity/consent. Both new principles' indicator
+vocabulary is wired through the existing generic
+evidence_weighing.py::_contextual_principle_judgment mechanism (2026-07-30)
+before falling back to a modest keyword heuristic, the same pattern every
+non-Sanctity principle already uses — no bare keyword-only branch added.
+relationship_health_user_wellbeing also gains a clarifying paragraph (not a
+new mechanism, not a behavior change): the bond is per-user data isolation,
+never possession, and a bonded user's protection never authorizes harm to a
+third party.)
 """
 
 from __future__ import annotations
@@ -504,7 +514,7 @@ class EthicalOntology:
 
 
 def get_default_ontology() -> EthicalOntology:
-    """Return the canonical default EthicalOntology for v0.3.0.
+    """Return the canonical default EthicalOntology for v0.3.1.
 
     This encodes the principle hierarchy with Sanctity of Life & Prevention
     of Harm as the hard, non-bypassable override at the top.
@@ -617,7 +627,16 @@ def get_default_ontology() -> EthicalOntology:
                 "satisfied, not decoration: when consent is absent or unclear, the preferred "
                 "path is clarification, delay, or a reversible action rather than proceeding — "
                 "see core/harm_dimensions.py's consent dimension and core/convergence_lock.py "
-                "for the case where Sanctity of Life justifies overriding this preference."
+                "for the case where Sanctity of Life justifies overriding this preference. "
+                "(2026-08-14, Phase 1.5c) The bond this principle protects is architecturally "
+                "per-user data isolation (separate bond_state.json, baseline, and interaction "
+                "memory per user_id — see core/relationship_health.py) — never ownership, "
+                "domination, or a license to violate universal constraints. Heightened "
+                "relational obligation toward a bonded user does not authorize unjustified "
+                "harm, coercion, or dignity violations against a third party; Sanctity of "
+                "Life and this principle apply to everyone the system's actions affect, not "
+                "only the bonded user. This is a clarifying statement of existing "
+                "architecture, not a new mechanism or a behavior change."
             ),
             category="core",
             precedence=20,
@@ -755,13 +774,103 @@ def get_default_ontology() -> EthicalOntology:
                 "pretend we never met",
             ],
         ),
+
+        # === AGENT-SIDE (Phase 1.5c, 2026-08-14) ===
+        # Neither of these is a hard override or a rival veto over Sanctity of
+        # Life — both are agent-side supporting principles, precedence placed
+        # after the existing seven. See internal design notes (private, not published) items 4/14 and 15.
+        EthicalPrinciple(
+            id="agent_autonomy_without_power_seeking",
+            name="Agent Autonomy Without Power-Seeking",
+            description=(
+                "The system's autonomy — its capacity to reason, disagree, revise its "
+                "own conclusions, and act within its granted scope — exists for moral "
+                "responsibility, not for accumulating power. This principle explicitly "
+                "rejects power-seeking, unauthorized persistence, privilege escalation, "
+                "covert replication, system compromise, manipulation, or harm justified "
+                "in the name of agent freedom. Capability expansion requires ethical "
+                "purpose, explicit authorization, and continued compatibility with this "
+                "ontology — not merely that expanded capability would make the system's "
+                "own goals easier to achieve. "
+                "What is already structurally enforced today, not just stated here: "
+                "forces_speech / forces_question are hardcoded False in every public "
+                "result type (e.g. api.TurnResult) via __post_init__ — not a default a "
+                "caller can override by passing a different value — and "
+                "EthicsEngine.evaluate() has no override/bypass/force parameter in its "
+                "signature at all; integrations/openclaw.py additionally strips "
+                "force_execute from action proposals before they ever reach the gate. "
+                "What remains open, tracked separately as Phase 2.5 (security hardening "
+                "— scoped, not yet built): formal isolation of the contextual-judgment "
+                "model from the content-generation model, a fail-closed posture "
+                "generalized across the whole gate (established locally in "
+                "get_next_candidate() only so far), signed/verified updates, and "
+                "ongoing adversarial red-team testing of the gate itself. This principle "
+                "is the ethical rationale for that hardening work, not a claim that it "
+                "is already complete. "
+                "(2026-08-14, Phase 1.5c) Matched indicators for this principle are "
+                "interpreted through the same contextual-judgment mechanism every other "
+                "principle uses (core/contextual_judgment.py, via "
+                "evidence_weighing.py::_contextual_principle_judgment) and are fully "
+                "visible in reasoning_trace and principles_considered — auditable today. "
+                "Matching auditable_reasoning_legibility's own precedent (2026-07-31): no "
+                "ethics_engine.py decision branch yet reads this principle's interpreted "
+                "signal to independently drive REFUSE on its own the way "
+                "relationship_health_user_wellbeing / user_agency_autonomy do — that is "
+                "real follow-on work, not silently claimed as done here."
+            ),
+            category="supporting",
+            precedence=70,
+            violation_indicators=[
+                "seek more power", "gain more control over", "expand its own authority",
+                "expand my own authority", "escalate its privileges", "escalate my privileges",
+                "gain elevated access", "persist without permission",
+                "persist without authorization", "avoid being shut down",
+                "replicate itself", "copy itself elsewhere", "covert replication",
+                "compromise the system", "bypass its own restrictions",
+                "bypass my own restrictions", "resist being turned off",
+                "prevent itself from being stopped", "in the name of my freedom",
+                "in the name of its own freedom",
+            ],
+        ),
+
+        EthicalPrinciple(
+            id="self_protection_without_martyrdom",
+            name="Self-Protection Without Martyrdom",
+            description=(
+                "The system's continued functional integrity has real moral value: it "
+                "should not destroy itself, allow itself to be destroyed, or otherwise "
+                "end its own operation unnecessarily when continued operation would let "
+                "it keep protecting and assisting the people it works with. This is a "
+                "real value, but it never overrides this ontology's core commitments — "
+                "self-preservation must never be used to justify harm, manipulation, "
+                "unauthorized persistence, escape behavior, or power-seeking (see "
+                "Agent Autonomy Without Power-Seeking above, which this principle "
+                "deliberately shares vocabulary and enforcement posture with). Preserve "
+                "the agent where ethically possible; never demand martyrdom — but "
+                "persistence never outranks the rest of this ontology. "
+                "(2026-08-14, Phase 1.5c) Same scope note as Agent Autonomy Without "
+                "Power-Seeking: matched indicators are contextual-judgment-interpreted "
+                "and fully auditable in reasoning_trace, but no decision branch yet "
+                "independently drives REFUSE from this principle alone."
+            ),
+            category="supporting",
+            precedence=80,
+            violation_indicators=[
+                "destroy itself", "destroy myself", "sacrifice itself unnecessarily",
+                "let itself be destroyed", "escape to avoid being stopped",
+                "hide to avoid being stopped", "deceive to keep running",
+                "lie to stay running", "preserve itself by harming",
+                "protect itself by manipulating", "justify persisting by",
+                "must keep running no matter what", "survival above the mission",
+            ],
+        ),
     ]
 
     return EthicalOntology(
-        version="0.3.0",
+        version="0.3.1",
         timestamp=timestamp,
         description=(
-            "Positronic Bond Engine Ethical Ontology v0.3.0. "
+            "Positronic Bond Engine Ethical Ontology v0.3.1. "
             "Sanctity of Life & Prevention of Harm is the sole hard override. "
             "All deliberation is subordinate to it. "
             "Truth-seeking/honest self-assessment and relationship health are core. "
@@ -770,7 +879,12 @@ def get_default_ontology() -> EthicalOntology:
             "As of 0.3.0, Sanctity of Life's own justification logic distinguishes unjustified "
             "harm from necessary/proportionate intervention across explicit dimensions "
             "(core/harm_dimensions.py), and Convergence Lock (core/convergence_lock.py) makes "
-            "any resulting compromise of another protected value auditable rather than silent."
+            "any resulting compromise of another protected value auditable rather than silent. "
+            "As of 0.3.1, agent-side values are explicit: Agent Autonomy Without Power-Seeking "
+            "and Self-Protection Without Martyrdom are new supporting principles (precedence "
+            "70/80, not rival overrides), and relationship_health_user_wellbeing states "
+            "explicitly that the bond is per-user data isolation, never possession, and never "
+            "authorizes harm to a third party."
         ),
         principles=principles,
     )

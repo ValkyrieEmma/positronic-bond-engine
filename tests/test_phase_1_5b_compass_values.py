@@ -93,7 +93,16 @@ def main() -> int:
 
     # --- Ontology-level checks ---
     ont = get_default_ontology()
-    check("ontology version bumped to 0.3.0", ont.version == "0.3.0", ont.version)
+    # >= "0.3.0", not pinned to exactly "0.3.0" -- Phase 1.5c (2026-08-14)
+    # correctly bumped this again to 0.3.1 for its own new principles; this
+    # check's job is confirming Phase 1.5b's bump landed and stuck, not
+    # freezing the version number in place against later legitimate bumps.
+    check(
+        "ontology version bumped to 0.3.0 or later (Phase 1.5b landed and stuck)",
+        ont.version not in ("0.2.3", "0.2.2", "0.2.1", "0.2.0")
+        and tuple(int(x) for x in ont.version.split(".")[:2]) >= (0, 3),
+        ont.version,
+    )
 
     rh = ont.get_principle("relationship_health_user_wellbeing")
     check(
