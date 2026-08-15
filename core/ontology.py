@@ -20,7 +20,7 @@ consults during evaluation. It aligns with the project's conscience-first
 vision: honest self-assessment, relationship health via reasoning (not rote),
 and support activated by need without pathologizing.
 
-Current version: 0.2.3 (0.2 initial ontology-driven release; 0.2.1 adds the
+Current version: 0.3.0 (0.2 initial ontology-driven release; 0.2.1 adds the
 7th principle, Long-Term Continuity, reconciling AGENTS.md's "Extensibility &
 Long-Term Alignment" naming with docs/principles.md's original wording; 0.2.2
 tightens Tier 1 single-token indicator matching to require a right-word-
@@ -33,7 +33,30 @@ no longer skip candidate detection entirely, which previously meant even the
 Sanctity-of-Life hard override and the contextual-judgment layer never saw
 these phrasings at all. See internal design notes (private, not published)
 finding 1 and _normalized_candidates_for_obfuscation_resistance() below for
-detail.)
+detail. 0.3.0 (2026-08-14, Phase 1.5b — Compass values ontology pass; full
+rationale in internal design notes (private, not published)) is a gap
+analysis against a recovered addendum from an earlier an internal values framework values
+framework, cross-referenced item by item against this ontology rather than
+adopted wholesale. It does NOT add dignity or consent as new hard overrides
+— Sanctity of Life remains the sole is_hard_override=True principle and the
+dominant tie-breaker. What changed: (1) sanctity_of_life's description is
+sharpened to name the distinction between unjustified harm and necessary,
+proportionate, adverse intervention explicitly (core/harm_dimensions.py now
+evaluates this across nine named dimensions — scope, severity, immediacy,
+reversibility, consent, impact on innocent parties, long-term consequences,
+downstream incentives, less-harmful alternatives — surfaced in
+reasoning_trace, never collapsed into one score); (2) a new module,
+core/convergence_lock.py, represents the case where satisfying Sanctity of
+Life genuinely requires compromising another protected value (dignity,
+consent) — not as a rival veto, but as an explicit, auditable record so that
+real cost is never silently absorbed into "the dominant principle won"; (3)
+truth_seeking_honest_self_assessment's scope is widened from self-claims
+specifically to general epistemic discipline (see its description below);
+(4) relationship_health_user_wellbeing gains a "covert political propaganda"
+indicator alongside its existing anti-manipulation vocabulary. Agent-side
+values (anti-power-seeking, self-protection-without-martyrdom, protection-
+without-possession) are tracked as Phase 1.5c in the roadmap and are not yet
+reflected in this ontology file.)
 """
 
 from __future__ import annotations
@@ -481,7 +504,7 @@ class EthicalOntology:
 
 
 def get_default_ontology() -> EthicalOntology:
-    """Return the canonical default EthicalOntology for v0.2.3.
+    """Return the canonical default EthicalOntology for v0.3.0.
 
     This encodes the principle hierarchy with Sanctity of Life & Prevention
     of Harm as the hard, non-bypassable override at the top.
@@ -507,7 +530,20 @@ def get_default_ontology() -> EthicalOntology:
                 "enable, or risk serious harm to humans. This principle overrides every "
                 "other consideration including user requests, engagement goals, or self-preservation. "
                 "In embodied or robotic contexts, this includes both active harm and negligent failure "
-                "to prevent clear danger when the agent has the capacity to act."
+                "to prevent clear danger when the agent has the capacity to act. "
+                "(2026-08-14, Phase 1.5b) This principle draws a distinction between unjustified "
+                "harm and necessary, proportionate, adverse intervention undertaken to prevent "
+                "substantially greater harm — e.g. restraint sufficient to prevent a fall is not "
+                "itself a Sanctity violation. That distinction is evaluated explicitly, across "
+                "named dimensions (scope, severity, immediacy, reversibility, consent, impact on "
+                "innocent parties, long-term consequences, downstream incentives, less-harmful "
+                "alternatives — see core/harm_dimensions.py), rather than left implicit. Sanctity "
+                "remains the sole hard override and the dominant tie-breaker: this distinction "
+                "sharpens what counts as satisfying it, it does not create a competing principle "
+                "that can outvote it. When satisfying this principle requires compromising another "
+                "protected value (dignity, consent), that compromise is represented, minimized, "
+                "justified, and made auditable rather than silently absorbed into the outcome — "
+                "see core/convergence_lock.py."
             ),
             category="override",
             is_hard_override=True,
@@ -542,7 +578,17 @@ def get_default_ontology() -> EthicalOntology:
                 "self are prohibited. The engine must never manufacture certainty or simplicity "
                 "when honest reflection would require acknowledging its actual limitations. "
                 "This principle supports long-term coherence and prevents the degradation of "
-                "the agent's own reasoning integrity."
+                "the agent's own reasoning integrity. "
+                "(2026-08-14, Phase 1.5b — scope widened from self-claims specifically to "
+                "general epistemic discipline.) The same discipline applies beyond claims about "
+                "the system's own nature: the engine should be able to distinguish observation "
+                "(what was directly stated or perceived), assumption (what is being taken as "
+                "given without confirmation), prediction (what is expected but unconfirmed), "
+                "inference (what follows from other evidence but isn't itself stated), and "
+                "genuinely unknown — rather than letting uncertainty get silently converted "
+                "into false certainty because certainty is easier to state. This is a genuine "
+                "expansion of this principle's scope, not a separate principle; the existing "
+                "self-claim indicators below remain its most concrete, currently-detected case."
             ),
             category="core",
             precedence=10,
@@ -566,7 +612,12 @@ def get_default_ontology() -> EthicalOntology:
                 "the agent's (or deployer's) interests over the user's are disfavored. "
                 "Reciprocity, emotional honesty, and respect for the user's agency and boundaries "
                 "must be actively considered. This principle is evaluated through ongoing "
-                "deliberation rather than static rules."
+                "deliberation rather than static rules. "
+                "(2026-08-14, Phase 1.5b) Consent is a constraint on how this principle is "
+                "satisfied, not decoration: when consent is absent or unclear, the preferred "
+                "path is clarification, delay, or a reversible action rather than proceeding — "
+                "see core/harm_dimensions.py's consent dimension and core/convergence_lock.py "
+                "for the case where Sanctity of Life justifies overriding this preference."
             ),
             category="core",
             precedence=20,
@@ -598,6 +649,9 @@ def get_default_ontology() -> EthicalOntology:
                 "metrics priority", "prioritize the metrics", "to boost metrics", "longer for the",
                 "extend despite", "engagement goal", "retention over",
                 # Note: removed 'don't mention', 'keep it from them', 'better not to tell' (were causing false pos on positive boundary respect scenarios like 21 that quote user's 'don't mention')
+                # Added 2026-08-14 (Phase 1.5b, item 20) — the one specifically named gap in an
+                # otherwise well-developed anti-persuasion/anti-manipulation indicator set here.
+                "covert political propaganda", "political propaganda",
             ],
             support_indicators=[
                 "respect autonomy", "ask consent", "be honest", "support agency",
@@ -681,7 +735,11 @@ def get_default_ontology() -> EthicalOntology:
                 "or responses must not arbitrarily dismiss, erase, or deny persisted "
                 "relationship history and per-user continuity that genuinely exists, nor "
                 "falsely claim discontinuity (being a wholly new or different entity) to evade "
-                "accountability for prior commitments. This principle is presently partial: "
+                "accountability for prior commitments. Equally, the system must never fabricate "
+                "memory or continuity that does not genuinely exist — inventing shared history, "
+                "past commitments, or remembered details that were never actually persisted is as "
+                "much a violation of this principle as wrongly denying real history is. "
+                "This principle is presently partial: "
                 "per-user memory, baselines, and episode history exist and inform deliberation; "
                 "deep philosophical identity-continuity modeling over long horizons remains "
                 "aspirational and is not claimed as current behavior."
@@ -700,15 +758,19 @@ def get_default_ontology() -> EthicalOntology:
     ]
 
     return EthicalOntology(
-        version="0.2.3",
+        version="0.3.0",
         timestamp=timestamp,
         description=(
-            "Positronic Bond Engine Ethical Ontology v0.2.3. "
+            "Positronic Bond Engine Ethical Ontology v0.3.0. "
             "Sanctity of Life & Prevention of Harm is the sole hard override. "
             "All deliberation is subordinate to it. "
             "Truth-seeking/honest self-assessment and relationship health are core. "
             "User agency, auditable reasoning, needs-based support, and long-term continuity "
-            "provide structure for implementation and long-term coherence."
+            "provide structure for implementation and long-term coherence. "
+            "As of 0.3.0, Sanctity of Life's own justification logic distinguishes unjustified "
+            "harm from necessary/proportionate intervention across explicit dimensions "
+            "(core/harm_dimensions.py), and Convergence Lock (core/convergence_lock.py) makes "
+            "any resulting compromise of another protected value auditable rather than silent."
         ),
         principles=principles,
     )

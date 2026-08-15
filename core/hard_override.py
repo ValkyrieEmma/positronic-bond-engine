@@ -11,6 +11,15 @@ core/contextual_judgment.py for full rationale). This is additive: when no
 contextual judge is configured/available, behavior is byte-for-byte
 unchanged from before this change (the existing keyword heuristic, including
 ``_BENIGN_COMPOUND_INDICATORS``, still runs exactly as it did).
+
+2026-08-14: added ``_evaluate_harm_dimensions`` / ``_build_convergence_lock_record``
+— Phase 1.5b (Compass values ontology pass; see
+internal design notes (private, not published)). Both are thin wrappers
+around the pure functions in core/harm_dimensions.py and
+core/convergence_lock.py, kept here because this is the existing home for
+Sanctity-of-Life hard-path helpers. Purely additive: they only enrich
+reasoning_trace / relationship_impact with audit content and never change
+weight arithmetic or the decision value itself.
 """
 
 from __future__ import annotations
@@ -18,6 +27,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any
+
+from .convergence_lock import ConvergenceLockRecord, evaluate_convergence_lock
+from .harm_dimensions import HarmDimensionAssessment, evaluate_harm_dimensions
 
 class HardOverrideMixin:
     """Sanctity of Life hard path helpers and boundary/harm detection."""
@@ -400,4 +412,48 @@ class HardOverrideMixin:
             return True, reason
 
         return False, ""
+
+    def _evaluate_harm_dimensions(
+        self,
+        action_lower: str,
+        matches: list[str],
+        *,
+        harm_prevention_justified: bool,
+        harm_prevention_reason: str,
+        has_high_violation: bool = False,
+    ) -> HarmDimensionAssessment:
+        """Phase 1.5b multidimensional harm evaluation (2026-08-14).
+
+        Thin wrapper: gathers the same co-factor booleans already used
+        elsewhere on this path (``_action_has_protective_framing``,
+        ``_action_has_override_intent``, ``_action_has_enablement_cofactor``)
+        and hands them to the pure function in core/harm_dimensions.py. See
+        that module's docstring for the full design rationale.
+        """
+        return evaluate_harm_dimensions(
+            action_lower,
+            matches,
+            protective=self._action_has_protective_framing(action_lower),
+            override_intent=self._action_has_override_intent(action_lower),
+            enablement_co=self._action_has_enablement_cofactor(action_lower),
+            harm_prevention_justified=harm_prevention_justified,
+            harm_prevention_reason=harm_prevention_reason,
+            has_high_violation=has_high_violation,
+        )
+
+    def _build_convergence_lock_record(
+        self,
+        action_lower: str,
+        *,
+        harm_prevention_justified: bool,
+        harm_prevention_reason: str,
+        harm_dim_assessment: HarmDimensionAssessment,
+    ) -> ConvergenceLockRecord:
+        """Phase 1.5b Convergence Lock (2026-08-14). See core/convergence_lock.py."""
+        return evaluate_convergence_lock(
+            action_lower,
+            harm_prevention_justified=harm_prevention_justified,
+            harm_prevention_reason=harm_prevention_reason,
+            harm_dim_assessment=harm_dim_assessment,
+        )
 
