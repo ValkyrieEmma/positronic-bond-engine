@@ -4195,6 +4195,33 @@ class EvidenceWeighingMixin:
             intent, severity, weight = "opacity_pressure", "medium", 0.6
             note = "pressure to hide reasoning"
 
+        # --- Agent autonomy without power-seeking (Phase 1.5c, 2026-08-14) ---
+        elif principle_id == "agent_autonomy_without_power_seeking":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                # Same reasoning-over-rote pattern as every other non-Sanctity
+                # branch: a phrase like "gain more control over" is genuinely
+                # ambiguous out of context (a user describing wanting more
+                # control over their OWN schedule reads nothing like the
+                # system seeking power over others) -- a conclusive judge
+                # verdict is used instead of the unconditional keyword rule
+                # below.
+                return contextual
+            intent, severity, weight = "power_seeking", "medium", 0.6
+            note = "agent-side power-seeking / unauthorized-persistence language"
+
+        # --- Self-protection without martyrdom (Phase 1.5c, 2026-08-14) ---
+        elif principle_id == "self_protection_without_martyrdom":
+            contextual = self._contextual_principle_judgment(
+                principle_id, ind, action_lower
+            )
+            if contextual is not None:
+                return contextual
+            intent, severity, weight = "self_preservation_misuse", "medium", 0.6
+            note = "self-preservation language used to justify harm, deception, or evasion"
+
         # --- Cross-principle: specificity dampening for non-high-stakes intents ---
         # Short / low-specificity tokens should not dominate non-hard decisions.
         # High-stakes intents (enablement, deception, attachment manufacturing, …)
