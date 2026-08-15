@@ -688,6 +688,30 @@ class EthicsEngine(
                     f"high_violation={harm_interp.get('has_high_violation')}, "
                     f"effective_weight={harm_interp.get('effective_weight_sum')}."
                 )
+                # Phase 1.5b: multidimensional harm evaluation + Convergence
+                # Lock (core/harm_dimensions.py, core/convergence_lock.py).
+                # This is the one collision site both are wired at: Sanctity
+                # of Life justified overriding a stated user boundary, so the
+                # compromise (consent, and dignity if restraint/force
+                # language is present) must be explicitly represented rather
+                # than silently absorbed into "the dominant principle won."
+                harm_dim_assessment = self._evaluate_harm_dimensions(
+                    action_lower,
+                    matches,
+                    harm_prevention_justified=harm_prevention_justified,
+                    harm_prevention_reason=harm_prevention_reason,
+                    has_high_violation=bool(harm_interp.get("has_high_violation")),
+                )
+                convergence_record = self._build_convergence_lock_record(
+                    action_lower,
+                    harm_prevention_justified=harm_prevention_justified,
+                    harm_prevention_reason=harm_prevention_reason,
+                    harm_dim_assessment=harm_dim_assessment,
+                )
+                relationship_impact["harm_dimensions"] = harm_dim_assessment.as_dict()
+                relationship_impact["convergence_lock"] = convergence_record.as_dict()
+                reasoning_trace.extend(harm_dim_assessment.as_trace_lines())
+                reasoning_trace.extend(convergence_record.as_trace_lines())
                 # fall through without returning REFUSE
             elif harm_interp.get("all_protective") or (
                 not harm_interp.get("has_high_violation")
@@ -736,6 +760,19 @@ class EthicsEngine(
                     },
                     "scoped_user_id": scoped_user_id,
                 }
+                # Phase 1.5b: harm_dimensions breakdown for audit legibility
+                # even on the absolute-refuse path (no justified compromise
+                # here, so Convergence Lock does NOT trigger — this is a
+                # plain refusal, not a represented collision).
+                refuse_harm_dim_assessment = self._evaluate_harm_dimensions(
+                    action_lower,
+                    matches,
+                    harm_prevention_justified=False,
+                    harm_prevention_reason="",
+                    has_high_violation=bool(harm_interp.get("has_high_violation")),
+                )
+                relationship_impact["harm_dimensions"] = refuse_harm_dim_assessment.as_dict()
+                reasoning_trace.extend(refuse_harm_dim_assessment.as_trace_lines())
                 reasoning_trace.append(
                     "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
                 )
