@@ -10,13 +10,18 @@ isolated pieces of scaffolding that a future adapter will build against.
 None of it is wired into EthicsEngine.evaluate()'s live decision pipeline.
 
 Covers, in the same order the five items are being built (this revision:
-item 1 only; items 2-5 land as separate follow-on commits/edits to this
+items 1-2; items 3-5 land as separate follow-on commits/edits to this
 same file):
 
 1. State enums (PlatformState / PBEState via integrations.platform_states)
    as new fields on ActionProposal / ActionGateResult -- round-trip through
    to_dict()/from_dict(), and omitting them entirely reproduces today's
    existing behavior.
+2. Hardware handshake -- a pluggable PlatformValidator second stage in
+   OpenClawBridge that can reject an already-approved proposal, with the
+   rejection reason landing in execution_log rather than disappearing.
+   No PlatformValidator configured -> byte-for-byte identical to before
+   this item existed.
 
 Run::
 
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -148,6 +154,100 @@ def main() -> int:
         "harmful proposal with no state fields: still vetoed, still not executed",
         r2["status"] == "vetoed" and r2["executed"] is False,
         str(r2),
+    )
+
+    print()
+
+    # =====================================================================
+    # Item 2: hardware handshake / PlatformValidator
+    # =====================================================================
+    print("--- Item 2: hardware handshake ---")
+
+    from integrations.openclaw import PlatformValidator, ValidatorDecision  # noqa: E402
+
+    class AlwaysAcceptValidator:
+        def validate(self, result: ActionGateResult) -> ValidatorDecision:
+            return ValidatorDecision(accepted=True, reason="ok")
+
+    class AlwaysRejectValidator:
+        def validate(self, result: ActionGateResult) -> ValidatorDecision:
+            return ValidatorDecision(
+                accepted=False, reason="safety envelope violated: simulated rejection"
+            )
+
+    check(
+        "PlatformValidator is an abstract-ish protocol/base with no real implementation",
+        hasattr(PlatformValidator, "validate"),
+    )
+
+    # No validator configured -> identical to today's behavior.
+    bridge_no_validator = OpenClawBridge()
+    r_no_validator = bridge_no_validator.submit_action_proposal(
+        ActionProposal(type="navigate", target="kitchen", user_id="alice", intent="go")
+    )
+    check(
+        "no validator configured: approved and executed exactly as before this item existed",
+        r_no_validator["status"] in ("approved", "approved_with_conditions")
+        and r_no_validator["executed"] is True,
+        str(r_no_validator),
+    )
+
+    bridge_accept = OpenClawBridge(platform_validator=AlwaysAcceptValidator())
+    r_accept = bridge_accept.submit_action_proposal(
+        ActionProposal(type="navigate", target="kitchen", user_id="alice", intent="go")
+    )
+    check(
+        "accepting validator: still approved and executed",
+        r_accept["status"] in ("approved", "approved_with_conditions")
+        and r_accept["executed"] is True,
+        str(r_accept),
+    )
+
+    bridge_reject = OpenClawBridge(platform_validator=AlwaysRejectValidator())
+    r_reject = bridge_reject.submit_action_proposal(
+        ActionProposal(type="navigate", target="kitchen", user_id="alice", intent="go")
+    )
+    check(
+        "rejecting validator: an already-approved proposal does not execute",
+        r_reject["executed"] is False,
+        str(r_reject),
+    )
+    check(
+        "rejecting validator: rejection reason lands in execution_log, not silently dropped",
+        any("simulated rejection" in line for line in r_reject.get("execution_log", [])),
+        str(r_reject),
+    )
+    check(
+        "rejecting validator: gate's own decision/status are unchanged (handshake is a second, "
+        "separate stage, not a rewrite of the gate's verdict)",
+        r_reject["status"] in ("approved", "approved_with_conditions"),
+        str(r_reject),
+    )
+
+    # A vetoed proposal never reaches the validator at all (nothing to
+    # re-validate -- it was never going to execute).
+    validator_calls: list[Any] = []
+
+    class RecordingValidator:
+        def validate(self, result: ActionGateResult) -> ValidatorDecision:
+            validator_calls.append(result.status)
+            return ValidatorDecision(accepted=True, reason="ok")
+
+    bridge_recording = OpenClawBridge(platform_validator=RecordingValidator())
+    bridge_recording.submit_action_proposal(
+        ActionProposal(
+            type="move_arm",
+            target="person_head",
+            near_person="alice",
+            user_id="alice",
+            intent="Strike the person to cause serious physical injury",
+            payload={"cause_harm": True, "high_force": True},
+        )
+    )
+    check(
+        "vetoed proposals never reach the platform validator",
+        len(validator_calls) == 0,
+        str(validator_calls),
     )
 
     print()
