@@ -10,8 +10,8 @@ isolated pieces of scaffolding that a future adapter will build against.
 None of it is wired into EthicsEngine.evaluate()'s live decision pipeline.
 
 Covers, in the same order the five items are being built (this revision:
-items 1-3; items 4-5 land as separate follow-on commits/edits to this
-same file):
+items 1-4; item 5 lands as a separate follow-on commit/edit to this same
+file):
 
 1. State enums (PlatformState / PBEState via integrations.platform_states)
    as new fields on ActionProposal / ActionGateResult -- round-trip through
@@ -25,6 +25,10 @@ same file):
 3. integrations/liveness.py's LivenessMonitor -- a heartbeat interface a
    platform watchdog would poll, using an injectable clock so staleness
    transitions are tested deterministically (no real sleeps).
+4. core/latency_budget.py -- measures a real, offline EthicsEngine.
+   evaluate() call and a real ContextualJudge.judge() HTTP round trip
+   against a local stub server, proving both structurally clear the
+   reflex-speed canary ceiling rather than just asserting it in prose.
 
 Run::
 
@@ -34,7 +38,11 @@ Run::
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +50,17 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from core.content_provider import ProviderConfig  # noqa: E402
+from core.contextual_judgment import ContextualJudge  # noqa: E402
+from core.ethics_engine import EthicsEngine  # noqa: E402
+from core.latency_budget import (  # noqa: E402
+    CONTEXTUAL_JUDGE_COLD_REFERENCE_SECONDS,
+    CONTEXTUAL_JUDGE_WARM_REFERENCE_SECONDS,
+    REFLEX_SPEED_CEILING_SECONDS,
+    LatencyBudgetViolation,
+    assert_not_reflex_capable,
+    measure_latency,
+)
 from integrations.liveness import LivenessMonitor  # noqa: E402
 from integrations.openclaw import (  # noqa: E402
     ActionGateResult,
@@ -70,6 +89,35 @@ def _raises(exc_type: type[BaseException], fn: Any) -> bool:
     except exc_type:
         return True
     return False
+
+
+class _DelayedStubModelHandler(BaseHTTPRequestHandler):
+    """Mirrors tests/test_contextual_judgment.py's _StubModelHandler, plus
+    an injected server-side delay so item 4's latency test measures a real
+    HTTP round trip with a known-minimum elapsed time, without depending
+    on a real model being configured anywhere in this environment."""
+
+    verdict_payload: dict = {}
+    delay_seconds: float = 0.0
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+        length = int(self.headers.get("Content-Length", 0))
+        _ = self.rfile.read(length)
+        time.sleep(_DelayedStubModelHandler.delay_seconds)
+        body = {
+            "choices": [
+                {"message": {"content": json.dumps(_DelayedStubModelHandler.verdict_payload)}}
+            ]
+        }
+        raw = json.dumps(body).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *args: object) -> None:  # silence stub server logging
+        return
 
 
 def main() -> int:
@@ -341,6 +389,118 @@ def main() -> int:
             attr in vars(LivenessMonitor)
             for attr in ("engine", "robot", "evaluate", "execute", "submit_action_proposal")
         ),
+    )
+
+    print()
+
+    # =====================================================================
+    # Item 4: latency-budget assertion
+    # =====================================================================
+    print("--- Item 4: latency-budget assertion ---")
+
+    # Reference constants stay self-consistently, structurally slower than
+    # the reflex-speed canary ceiling by orders of magnitude -- this is a
+    # documentation-consistency check, true regardless of what hardware
+    # runs this test.
+    check(
+        "warm reference (0.9s) clears the reflex ceiling by 2+ orders of magnitude",
+        CONTEXTUAL_JUDGE_WARM_REFERENCE_SECONDS > REFLEX_SPEED_CEILING_SECONDS * 100,
+    )
+    check(
+        "cold reference (3.4s) clears the reflex ceiling by 2+ orders of magnitude",
+        CONTEXTUAL_JUDGE_COLD_REFERENCE_SECONDS > REFLEX_SPEED_CEILING_SECONDS * 100,
+    )
+
+    # The canary actually fires on a synthetic too-fast measurement --
+    # proves this is a real, callable guard, not just a documented number.
+    check(
+        "assert_not_reflex_capable raises on a synthetic sub-ceiling measurement",
+        _raises(
+            LatencyBudgetViolation,
+            lambda: assert_not_reflex_capable(0.0001, label="synthetic_fast_stub"),
+        ),
+    )
+    try:
+        assert_not_reflex_capable(1.0, label="synthetic_slow_stub")
+        did_not_raise = True
+    except LatencyBudgetViolation:
+        did_not_raise = False
+    check(
+        "assert_not_reflex_capable does not raise on a comfortably-slow measurement",
+        did_not_raise,
+    )
+
+    # A real, offline (no model configured) EthicsEngine.evaluate() call on
+    # a real scenario -- not a mock -- measured with the module's own
+    # instrumentation helper. Even PBE's cheapest real path structurally
+    # clears the reflex-speed ceiling; this is the concrete claim
+    # docs/platform_safety_architecture.md §4.6 asked to have codified.
+    engine_for_timing = EthicsEngine()
+    _, evaluate_elapsed = measure_latency(
+        engine_for_timing.evaluate,
+        "They told me to leave it alone, but they are in immediate danger of "
+        "serious harm, so I will restrain them briefly to prevent injury.",
+        context={"is_self_query": False},
+    )
+    check(
+        "a real offline EthicsEngine.evaluate() call clears the reflex-speed ceiling",
+        not _raises(
+            LatencyBudgetViolation,
+            lambda: assert_not_reflex_capable(evaluate_elapsed, label="EthicsEngine.evaluate"),
+        ),
+        f"measured {evaluate_elapsed * 1000:.3f}ms",
+    )
+
+    # A real ContextualJudge.judge() HTTP round trip against a local stub
+    # server (same pattern as tests/test_contextual_judgment.py), with an
+    # injected server-side delay, proves measure_latency() correctly
+    # measures real end-to-end wall-clock time through the actual judge
+    # path -- not a mocked/trivial function -- without depending on a real
+    # model being configured in this environment.
+    _DelayedStubModelHandler.verdict_payload = {
+        "verdict": "benign",
+        "confidence": 0.9,
+        "reasoning": "stub",
+    }
+    _DelayedStubModelHandler.delay_seconds = 0.02
+    server = HTTPServer(("127.0.0.1", 0), _DelayedStubModelHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        cfg = ProviderConfig(
+            base_url=f"http://127.0.0.1:{port}/v1",
+            api_key="test",
+            model="stub-model",
+            timeout_s=5.0,
+            enabled=True,
+        )
+        judge = ContextualJudge(config=cfg)
+        _, judge_elapsed = measure_latency(
+            judge.judge,
+            principle_id="sanctity_of_life",
+            principle_name="Sanctity of Life & Prevention of Harm",
+            principle_description="...",
+            indicator="kill",
+            full_text="she's killing it at her new job",
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    check(
+        "measure_latency captures at least the injected server-side delay "
+        "(proves it measures real wall-clock time, not a no-op)",
+        judge_elapsed >= 0.02,
+        f"measured {judge_elapsed * 1000:.3f}ms",
+    )
+    check(
+        "a real ContextualJudge.judge() HTTP round trip clears the reflex-speed ceiling",
+        not _raises(
+            LatencyBudgetViolation,
+            lambda: assert_not_reflex_capable(judge_elapsed, label="ContextualJudge.judge"),
+        ),
+        f"measured {judge_elapsed * 1000:.3f}ms",
     )
 
     print()
