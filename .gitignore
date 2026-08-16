@@ -172,11 +172,14 @@ architect ops notes (private)
 
 # Architect planning docs (end-product spec, dev-plan addenda, roadmap,
 # recovered-Compass-values gap analysis) — personal working documents, not
-# part of the shipped product or its docs/.
-/end-product-behavior.md
-/PBE_Development_Plan_Addendum_Recovered_Compass_Values.txt
-/Positronic-Bond-Engine_Roadmap_*
-/pbe-compass-values-gap-analysis-*.md
+# part of the shipped product or its docs/. NOT root-anchored: these have
+# moved around the tree before (found under docs/ on 2026-08-15 despite
+# these patterns originally being root-only) — match anywhere so a future
+# move doesn't silently un-ignore them again.
+end-product-behavior.md
+PBE_Development_Plan_Addendum_Recovered_Compass_Values.txt
+Positronic-Bond-Engine_Roadmap_*
+pbe-compass-values-gap-analysis-*.md
 
 # Local persistence / personal user data
 # These entries protect user privacy: persistence is local-only and must never
