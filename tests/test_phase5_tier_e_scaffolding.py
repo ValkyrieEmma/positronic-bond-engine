@@ -10,7 +10,7 @@ isolated pieces of scaffolding that a future adapter will build against.
 None of it is wired into EthicsEngine.evaluate()'s live decision pipeline.
 
 Covers, in the same order the five items are being built (this revision:
-items 1-2; items 3-5 land as separate follow-on commits/edits to this
+items 1-3; items 4-5 land as separate follow-on commits/edits to this
 same file):
 
 1. State enums (PlatformState / PBEState via integrations.platform_states)
@@ -22,6 +22,9 @@ same file):
    rejection reason landing in execution_log rather than disappearing.
    No PlatformValidator configured -> byte-for-byte identical to before
    this item existed.
+3. integrations/liveness.py's LivenessMonitor -- a heartbeat interface a
+   platform watchdog would poll, using an injectable clock so staleness
+   transitions are tested deterministically (no real sleeps).
 
 Run::
 
@@ -39,6 +42,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from integrations.liveness import LivenessMonitor  # noqa: E402
 from integrations.openclaw import (  # noqa: E402
     ActionGateResult,
     ActionProposal,
@@ -58,6 +62,14 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     else:
         _failed += 1
         print(f"  [FAIL] {name}" + (f" — {detail}" if detail else ""))
+
+
+def _raises(exc_type: type[BaseException], fn: Any) -> bool:
+    try:
+        fn()
+    except exc_type:
+        return True
+    return False
 
 
 def main() -> int:
@@ -248,6 +260,87 @@ def main() -> int:
         "vetoed proposals never reach the platform validator",
         len(validator_calls) == 0,
         str(validator_calls),
+    )
+
+    print()
+
+    # =====================================================================
+    # Item 3: watchdog / heartbeat (LivenessMonitor)
+    # =====================================================================
+    print("--- Item 3: watchdog / heartbeat ---")
+
+    check(
+        "stale_after_seconds must be positive",
+        _raises(ValueError, lambda: LivenessMonitor(stale_after_seconds=0)),
+    )
+
+    fake_now = [0.0]
+
+    def fake_clock() -> float:
+        return fake_now[0]
+
+    monitor = LivenessMonitor(stale_after_seconds=5.0, clock=fake_clock)
+    check(
+        "never-beaten monitor: seconds_since_last_beat is None",
+        monitor.seconds_since_last_beat() is None,
+    )
+    check("never-beaten monitor: is_stale() is True", monitor.is_stale() is True)
+    status_before = monitor.status()
+    check(
+        "never-beaten monitor: status() reports alive=False, "
+        "pbe_state=unavailable_failed_closed",
+        status_before.alive is False
+        and status_before.pbe_state == PBEState.UNAVAILABLE_FAILED_CLOSED,
+        str(status_before),
+    )
+
+    monitor.beat()
+    check(
+        "immediately after beat(): not stale",
+        monitor.is_stale() is False,
+    )
+    check(
+        "immediately after beat(): seconds_since_last_beat is ~0",
+        monitor.seconds_since_last_beat() == 0.0,
+    )
+
+    fake_now[0] += 3.0  # within the 5s budget
+    check(
+        "3s after beat() with a 5s budget: still not stale",
+        monitor.is_stale() is False,
+    )
+    check(
+        "3s after beat(): seconds_since_last_beat reflects elapsed fake time",
+        monitor.seconds_since_last_beat() == 3.0,
+    )
+
+    fake_now[0] += 3.0  # now 6s total, past the 5s budget
+    check(
+        "6s after beat() with a 5s budget: now stale",
+        monitor.is_stale() is True,
+    )
+    status_after = monitor.status()
+    check(
+        "stale monitor: status() reports alive=False, pbe_state=unavailable_failed_closed "
+        "(the vocabulary a platform watchdog would act on independently of PBE)",
+        status_after.alive is False
+        and status_after.pbe_state == PBEState.UNAVAILABLE_FAILED_CLOSED,
+        str(status_after),
+    )
+
+    monitor.beat()
+    check(
+        "a fresh beat() after going stale recovers is_stale() to False",
+        monitor.is_stale() is False,
+    )
+
+    check(
+        "LivenessMonitor never touches OpenClawBridge / EthicsEngine / SimulatedRobot "
+        "(pure bookkeeping, no execution or decision path referenced)",
+        not any(
+            attr in vars(LivenessMonitor)
+            for attr in ("engine", "robot", "evaluate", "execute", "submit_action_proposal")
+        ),
     )
 
     print()
