@@ -18,7 +18,7 @@ Force-speech / force-question are never set true. Gate is authoritative.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from core.development_context import DevelopmentPhaseContext
 from core.ethics_engine import EthicalStance, EthicsEngine
@@ -206,6 +206,48 @@ class SimulatedRobot:
         self.executed.clear()
 
 
+# ---------------------------------------------------------------------------
+# Hardware handshake (docs/platform_safety_architecture.md §4.3)
+# ---------------------------------------------------------------------------
+#
+# Every PBE approval is a proposal, not a command. PlatformValidator models
+# the second step of the two-step handshake: after PBE's gate produces an
+# ActionGateResult, the platform's own safety-rated layer gets a chance to
+# independently re-validate it against live sensor state and reject it --
+# even if PBE approved it -- before it actually executes.
+#
+# No real implementation exists yet; there is no real hardware to validate
+# against (docs/platform_safety_architecture.md §6). This is an abstract,
+# duck-typed interface only, mirroring how core/contextual_judgment.py's
+# ContextualJudge is consumed elsewhere in this codebase (anything with a
+# matching method satisfies the contract -- no base class required). When no
+# PlatformValidator is configured on OpenClawBridge, behavior is identical
+# to before this existed: any non-vetoed result auto-executes against
+# SimulatedRobot as before.
+
+
+@dataclass
+class ValidatorDecision:
+    """A platform validator's verdict on an already-gate-approved result."""
+
+    accepted: bool
+    reason: str = ""
+
+
+@runtime_checkable
+class PlatformValidator(Protocol):
+    """Second-stage platform re-validation of an ActionGateResult.
+
+    Abstract interface only -- no real implementation exists yet. A future
+    real adapter (Optimus, ROS-based, etc.) supplies a concrete validator
+    that checks the proposal against live sensor state / the platform's
+    declared safety envelope (docs/platform_safety_architecture.md §4.2)
+    immediately before actuation.
+    """
+
+    def validate(self, result: ActionGateResult) -> ValidatorDecision: ...
+
+
 class OpenClawBridge:
     """
     Bridge: high-level planning proposals → ethics gate → simulated execution.
@@ -214,6 +256,9 @@ class OpenClawBridge:
     - Package structured actions for EthicsEngine.evaluate
     - Map stance to approve / conditions / veto
     - Never force-execute past refuse/hold/identity_required
+    - Optional second-stage platform re-validation (hardware handshake,
+      §4.3) before simulated execution -- scaffolding, no real validator
+      shipped yet.
     """
 
     def __init__(
@@ -223,6 +268,7 @@ class OpenClawBridge:
         robot: SimulatedRobot | None = None,
         development_context: DevelopmentPhaseContext | None = None,
         auto_execute: bool = True,
+        platform_validator: PlatformValidator | None = None,
     ) -> None:
         if ethics_engine is not None:
             self.engine = ethics_engine
@@ -234,6 +280,7 @@ class OpenClawBridge:
         self.robot = robot if robot is not None else SimulatedRobot()
         self.connected = True  # simulated always "connected"
         self.auto_execute = bool(auto_execute)
+        self.platform_validator = platform_validator
 
     def submit_action_proposal(
         self,
@@ -401,6 +448,25 @@ class OpenClawBridge:
             result.execution_log.append("vetoed: not executed")
             return
         action = result.governed_action or result.original_action
+
+        # Hardware handshake, stage 2 (§4.3): give a configured platform
+        # validator a chance to reject an already-gate-approved proposal.
+        # No validator configured -> unchanged from before this existed.
+        if self.platform_validator is not None:
+            decision = self.platform_validator.validate(result)
+            if not decision.accepted:
+                self.robot.attempt(
+                    action,
+                    allowed=False,
+                    reason=f"platform_rejected: {decision.reason}",
+                )
+                result.executed = False
+                result.execution_log.append(
+                    f"platform_handshake_rejected: {decision.reason}"
+                )
+                return
+            result.execution_log.append("platform_handshake_accepted")
+
         self.robot.attempt(
             action,
             allowed=True,
