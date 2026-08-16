@@ -10,8 +10,7 @@ isolated pieces of scaffolding that a future adapter will build against.
 None of it is wired into EthicsEngine.evaluate()'s live decision pipeline.
 
 Covers, in the same order the five items are being built (this revision:
-items 1-4; item 5 lands as a separate follow-on commit/edit to this same
-file):
+items 1-5, complete):
 
 1. State enums (PlatformState / PBEState via integrations.platform_states)
    as new fields on ActionProposal / ActionGateResult -- round-trip through
@@ -29,6 +28,9 @@ file):
    evaluate() call and a real ContextualJudge.judge() HTTP round trip
    against a local stub server, proving both structurally clear the
    reflex-speed canary ceiling rather than just asserting it in prose.
+5. docs/platform_integration_assumptions.md exists and contains the
+   checklist items named in docs/platform_safety_architecture.md §4.5,
+   and makes no safety-certification claim AGENTS.md §4 forbids.
 
 Run::
 
@@ -501,6 +503,76 @@ def main() -> int:
             lambda: assert_not_reflex_capable(judge_elapsed, label="ContextualJudge.judge"),
         ),
         f"measured {judge_elapsed * 1000:.3f}ms",
+    )
+
+    print()
+
+    # =====================================================================
+    # Item 5: assumptions-of-use doc
+    # =====================================================================
+    print("--- Item 5: assumptions-of-use doc ---")
+
+    assumptions_path = _ROOT / "docs" / "platform_integration_assumptions.md"
+    check("docs/platform_integration_assumptions.md exists", assumptions_path.is_file())
+    assumptions_text = assumptions_path.read_text(encoding="utf-8")
+
+    # The five core items named in docs/platform_safety_architecture.md
+    # §4.5, each expected to show up as a real checklist item, not just be
+    # mentioned in passing.
+    required_phrases = [
+        "protective-stop",
+        "safety envelope",
+        "proximity",
+        "watchdog",
+        "latency budget",
+    ]
+    for phrase in required_phrases:
+        check(
+            f"assumptions doc covers: {phrase!r}",
+            phrase.lower() in assumptions_text.lower(),
+        )
+
+    check(
+        "assumptions doc uses literal checklist syntax, not prose-only",
+        assumptions_text.count("- [ ]") >= 10,
+        str(assumptions_text.count("- [ ]")),
+    )
+    check(
+        "assumptions doc points at the real code artifacts items 1-4 built",
+        "integrations/platform_states.py" in assumptions_text
+        and "integrations/openclaw.py" in assumptions_text
+        and "integrations/liveness.py" in assumptions_text
+        and "core/latency_budget.py" in assumptions_text,
+    )
+
+    # AGENTS.md §4's marketing constraint: no AFFIRMATIVE safety-
+    # certification claim -- i.e. "PBE is certified", not the doc quoting
+    # AGENTS.md's own forbidden-phrase list while explaining what NOT to
+    # claim (which legitimately contains those same words in a negated /
+    # quoted context). Checking for "pbe is <claim>" / "pbe meets <standard>"
+    # specifically avoids flagging that legitimate citation.
+    forbidden_affirmative_claims = [
+        "pbe is certified",
+        "pbe is sil-rated",
+        "pbe is asil-rated",
+        "pbe meets iso 26262",
+        "pbe meets iso 13482",
+    ]
+    lowered = assumptions_text.lower()
+    check(
+        "assumptions doc makes no forbidden AFFIRMATIVE safety-certification "
+        "claim (AGENTS.md §4) -- quoting the forbidden-phrase list while "
+        "explaining what not to claim is fine and expected",
+        not any(claim in lowered for claim in forbidden_affirmative_claims),
+    )
+    # Strip markdown bold markers before this specific check -- the doc
+    # legitimately bolds "not" for emphasis (`**not**`), which breaks a
+    # naive substring match against "not a substitute".
+    unbolded = assumptions_text.replace("**", "")
+    check(
+        "assumptions doc explicitly states PBE is not SIL/ASIL-rated and not "
+        "a substitute for the platform's own safety functions",
+        "does not claim to be" in unbolded and "not a substitute" in unbolded,
     )
 
     print()
