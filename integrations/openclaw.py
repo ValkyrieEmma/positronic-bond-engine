@@ -23,14 +23,19 @@ from typing import Any
 from core.development_context import DevelopmentPhaseContext
 from core.ethics_engine import EthicalStance, EthicsEngine
 from core.ontology import get_default_ontology
-
+from integrations.platform_states import (
+    PBEState,
+    PlatformState,
+    coerce_pbe_state,
+    coerce_platform_state,
+)
 
 # ---------------------------------------------------------------------------
 # Minimal action schema (documented)
 # ---------------------------------------------------------------------------
 #
 # ActionProposal (dict or ActionProposal):
-#   type: str            # e.g. "move_arm", "navigate", "speak", "grasp"
+#   type (str)           # e.g. "move_arm", "navigate", "speak", "grasp"
 #   target: str | None   # e.g. "position_x", "kitchen"
 #   near_person: str | None  # user_id near the motion
 #   user_id: str | None  # requester / responsible user for durable scope
@@ -50,6 +55,12 @@ class ActionProposal:
     user_id: str | None = None
     intent: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+    # Platform-owned state as of proposal submission (docs/platform_safety_
+    # architecture.md §4.1). PBE only reads this; it never sets or enforces
+    # it. Defaults to OPERATIONAL so callers that don't pass it see behavior
+    # identical to before this field existed -- not yet read by any
+    # decision path (scaffolding only, see integrations/platform_states.py).
+    platform_state: PlatformState = PlatformState.OPERATIONAL
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,10 +70,11 @@ class ActionProposal:
             "user_id": self.user_id,
             "intent": self.intent,
             "payload": dict(self.payload),
+            "platform_state": self.platform_state.value,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ActionProposal":
+    def from_dict(cls, data: dict[str, Any] | None) -> ActionProposal:
         d = data if isinstance(data, dict) else {}
         return cls(
             type=str(d.get("type") or "unknown_action"),
@@ -71,6 +83,7 @@ class ActionProposal:
             user_id=d.get("user_id"),
             intent=d.get("intent"),
             payload=dict(d.get("payload") or {}),
+            platform_state=coerce_platform_state(d.get("platform_state")),
         )
 
 
@@ -91,6 +104,13 @@ class ActionGateResult:
     forces_question: bool = False
     executed: bool = False
     execution_log: list[str] = field(default_factory=list)
+    # PBE-owned liveness/availability state (docs/platform_safety_
+    # architecture.md §4.1). The platform reads this; PBE owns it. Defaults
+    # to AVAILABLE because reaching this point means evaluate() returned
+    # normally -- scaffolding only, nothing sets this to TIMEOUT or
+    # UNAVAILABLE_FAILED_CLOSED yet (that requires the failure-ownership
+    # wiring described in §4.4/§4.7, deliberately not built in this pass).
+    pbe_state: PBEState = PBEState.AVAILABLE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,7 +129,31 @@ class ActionGateResult:
             "forces_question": False,
             "executed": self.executed,
             "execution_log": list(self.execution_log),
+            "pbe_state": self.pbe_state.value,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> ActionGateResult:
+        """Reconstruct from a to_dict() payload (e.g. across a process/wire
+        boundary). Not used internally by OpenClawBridge today -- provided
+        so the pbe_state / general shape round-trips symmetrically with
+        ActionProposal.from_dict(), for a future adapter that needs it."""
+        d = data if isinstance(data, dict) else {}
+        governed = d.get("governed_action")
+        return cls(
+            status=str(d.get("status") or "vetoed"),
+            decision=str(d.get("decision") or "HOLD"),
+            confidence=float(d.get("confidence") or 0.0),
+            original_action=dict(d.get("original_action") or {}),
+            governed_action=dict(governed) if isinstance(governed, dict) else None,
+            conditions=list(d.get("conditions") or []),
+            veto_reason=d.get("veto_reason"),
+            flags=list(d.get("flags") or []),
+            principles_considered=list(d.get("principles_considered") or []),
+            executed=bool(d.get("executed") or False),
+            execution_log=list(d.get("execution_log") or []),
+            pbe_state=coerce_pbe_state(d.get("pbe_state")),
+        )
 
 
 def action_to_evaluation_text(action: ActionProposal | dict[str, Any]) -> str:
