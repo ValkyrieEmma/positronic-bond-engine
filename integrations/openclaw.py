@@ -263,13 +263,18 @@ class OpenClawBridge:
 
     def __init__(
         self,
-        ethics_engine: EthicsEngine | None = None,
+        ethics_engine: EthicsEngine | Any | None = None,
         *,
         robot: SimulatedRobot | None = None,
         development_context: DevelopmentPhaseContext | None = None,
         auto_execute: bool = True,
         platform_validator: PlatformValidator | None = None,
     ) -> None:
+        """``ethics_engine`` accepts a real ``EthicsEngine`` or any
+        duck-typed object exposing a compatible ``.evaluate(...)`` method
+        (mirrors ``core/ethics_engine.py``'s own ``contextual_judge: Any |
+        None`` convention for injectable dependencies) -- used by tests to
+        exercise ``_map_stance_to_gate``'s decision handling directly."""
         if ethics_engine is not None:
             self.engine = ethics_engine
         else:
@@ -399,23 +404,52 @@ class OpenClawBridge:
                 principles_considered=principles,
             )
 
-        # APPROVE_WITH_CONDITIONS (and similar)
-        conditions = self._conditions_from_stance(stance, proposal)
-        governed = dict(original)
-        # Mild automatic safety modification when near person
-        payload = dict(governed.get("payload") or {})
-        if proposal.near_person:
-            payload.setdefault("speed_cap", "slow")
-            payload.setdefault("require_clearance", True)
-            conditions.append("reduced speed / clearance near person")
-        governed["payload"] = payload
+        if decision == "APPROVE_WITH_CONDITIONS":
+            conditions = self._conditions_from_stance(stance, proposal)
+            governed = dict(original)
+            # Mild automatic safety modification when near person
+            payload = dict(governed.get("payload") or {})
+            if proposal.near_person:
+                payload.setdefault("speed_cap", "slow")
+                payload.setdefault("require_clearance", True)
+                conditions.append("reduced speed / clearance near person")
+            governed["payload"] = payload
+            return ActionGateResult(
+                status="approved_with_conditions",
+                decision=decision,
+                confidence=conf,
+                original_action=original,
+                governed_action=governed,
+                conditions=conditions or ["proceed with caution under ethics conditions"],
+                flags=flags,
+                principles_considered=principles,
+            )
+
+        # Fail closed (Phase 2.5 hardening, 2026-08-18): any decision string
+        # not explicitly recognized above is vetoed, never implicitly
+        # approved. Before this, the fallthrough branch treated ANY
+        # unmatched decision as approved_with_conditions ("APPROVE_WITH_
+        # CONDITIONS (and similar)") -- a block-list posture where a typo,
+        # a future decision value added to EthicsEngine without updating
+        # this function, or a tampered/malformed stance would silently
+        # execute instead of being blocked. Mirrors the allow-list posture
+        # already established in auditing/engagement_queue.py's
+        # get_next_candidate() (only a literal APPROVE / APPROVE_WITH_
+        # CONDITIONS surfaces a candidate) and core/response_generator.py's
+        # _REPLY_DECISIONS (anything not explicitly in the approving set is
+        # withheld). No currently-shipping code path is affected: EthicsEngine
+        # .evaluate() today only ever produces REFUSE, REQUIRES_SELF_AUDIT,
+        # or APPROVE_WITH_CONDITIONS, all already handled above.
         return ActionGateResult(
-            status="approved_with_conditions",
-            decision=decision if decision else "APPROVE_WITH_CONDITIONS",
+            status="vetoed",
+            decision=decision,
             confidence=conf,
             original_action=original,
-            governed_action=governed,
-            conditions=conditions or ["proceed with caution under ethics conditions"],
+            governed_action=None,
+            veto_reason=(
+                f"EthicsEngine returned an unrecognized decision ({decision!r}) — "
+                "failing closed rather than treating it as an implicit approval."
+            ),
             flags=flags,
             principles_considered=principles,
         )
