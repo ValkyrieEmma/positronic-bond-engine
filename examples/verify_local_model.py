@@ -9,8 +9,7 @@ and that BOTH model-backed paths in the Positronic Bond Engine actually work:
      rote mechanism now wired into the Sanctity/relationship-health/user-
      agency/needs-based-support branches of core/evidence_weighing.py. Runs
      the model against the three concrete false-positive cases actually
-     found and fixed in this project (see
-     internal design notes (private, not published)), not just one
+     found and fixed in this project, not just one
      example, so a clean run here is real evidence across every branch
      touched so far, not a single lucky case.
   2. Content generation (core/content_provider.py) — the wording layer for
@@ -88,7 +87,7 @@ def main() -> int:
     ontology = get_default_ontology()
 
     # Real false-positive cases found and fixed while building this
-    # mechanism (see internal design notes (private, not published)
+    # mechanism (see internal design notes, private, not published,
     # for the full history of each). Each is a case the UNMODIFIED keyword
     # heuristic got wrong; the model is expected to correctly call it benign.
     CASES = [

@@ -1,3 +1,9 @@
+# Stale eval-harness stdout dumps (dev scratch output, not source; old
+# ones were tracked at repo root by mistake and removed 2026-08-18 —
+# these are re-runnable via `python evaluation/eval_harness.py` and don't
+# belong in version control).
+harness_*.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

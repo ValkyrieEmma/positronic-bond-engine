@@ -72,9 +72,8 @@ pattern also exists in the relationship-health / user-agency branches of
 "ref_only" / phrase-list style interpretation) and is NOT yet replaced here
 — that is real remaining work, intentionally out of scope for this change so
 it can be reviewed and tested incrementally rather than rewritten wholesale
-in one pass on safety-critical code. See
-``internal design notes (private, not published)`` in the project
-docs for the full design rationale.
+in one pass on safety-critical code. See internal design notes (private,
+not published) for the full design rationale.
 """
 
 from __future__ import annotations

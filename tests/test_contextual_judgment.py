@@ -8,8 +8,8 @@ core/evidence_weighing.py::_interpret_single_indicator).
 
 What these tests prove, and what they don't
 --------------------------------------------
-1. The concrete generalization gap named in
-   internal design notes (private, not published): a benign idiom NOT
+1. The concrete generalization gap named in internal design notes
+   (private, not published): a benign idiom NOT
    present in ``_BENIGN_COMPOUND_INDICATORS`` ("she's killing it at her new
    job") is hard-flagged as high-severity harm by TODAY's keyword-only path
    (test_baseline_keyword_path_still_over_flags_novel_benign_idiom), and is

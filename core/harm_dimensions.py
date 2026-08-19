@@ -4,11 +4,11 @@ harm_dimensions.py
 
 Phase 1.5b — multidimensional harm evaluation (added 2026-08-14).
 
-Source: recovered an internal values framework addendum, item 7 ("Multidimensional Harm and
-Consequence Evaluation") and item 10 ("Reversibility as an Ethical
-Preference"), cross-referenced in
-``internal design notes (private, not published)``. Per that analysis
-(Part 2), this module is the actual substantive center of Phase 1.5b: it is
+Source: a recovered addendum from an earlier internal values framework,
+item 7 ("Multidimensional Harm and Consequence Evaluation") and item 10
+("Reversibility as an Ethical Preference"), cross-referenced in internal
+design notes (private, not published). Per that analysis (Part 2), this
+module is the actual substantive center of Phase 1.5b: it is
 what turns ``sanctity_of_life``'s implicit "harm-prevention justification"
 logic (``hard_override.py``'s ``_BENIGN_COMPOUND_INDICATORS`` allowlist and
 the contextual judge's benign/violation verdict) into an explicit,
@@ -170,8 +170,7 @@ class HarmDimensionAssessment:
         lines = [
             "Multidimensional harm evaluation "
             f"({len(self.dimensions)} dimensions, kept separate — not "
-            "collapsed into one opaque score; see "
-            "internal design notes (private, not published) item 7):"
+            "collapsed into one opaque score):"
         ]
         for d in self.dimensions:
             lines.append(f"  - {d.name}: {d.level} — {d.note}")
@@ -405,7 +404,7 @@ def evaluate_harm_dimensions(
             "Facts read as incomplete and the action leans irreversible or of unclear "
             "reversibility, with no active/immediate emergency established — prefer delay, "
             "clarification, containment, a reversible action, or non-action over forcing an "
-            "irreversible outcome (Compass values gap analysis item 10)."
+            "irreversible outcome."
         )
 
     return HarmDimensionAssessment(

@@ -22,8 +22,7 @@ Real assertions for Phase 1.5b — Compass values ontology pass (added
   gets neither key; the absolute-REFUSE path still gets a harm_dimensions
   breakdown for full audit legibility.
 
-Full design rationale: internal design notes (private, not published)
-and internal design notes (private, not published).
+Full design rationale: internal design notes (private, not published).
 
 Run::
 

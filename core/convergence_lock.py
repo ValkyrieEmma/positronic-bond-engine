@@ -4,9 +4,10 @@ convergence_lock.py
 
 Phase 1.5b — Convergence Lock (added 2026-08-14).
 
-Source: recovered an internal values framework addendum item 6, cross-referenced and
-corrected in ``internal design notes (private, not published)`` (Part
-2). The corrected framing, which this module implements:
+Source: a recovered addendum from an earlier internal values framework,
+item 6, cross-referenced and corrected in internal design notes (private,
+not published) (Part 2). The corrected framing, which this module
+implements:
 
 - Convergence Lock is NOT a mechanism for promoting dignity, consent, or any
   other value into a rival hard override that can outvote Sanctity of Life.

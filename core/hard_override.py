@@ -13,8 +13,8 @@ unchanged from before this change (the existing keyword heuristic, including
 ``_BENIGN_COMPOUND_INDICATORS``, still runs exactly as it did).
 
 2026-08-14: added ``_evaluate_harm_dimensions`` / ``_build_convergence_lock_record``
-— Phase 1.5b (Compass values ontology pass; see
-internal design notes (private, not published)). Both are thin wrappers
+— Phase 1.5b (Compass values ontology pass; see internal design notes,
+private, not published). Both are thin wrappers
 around the pure functions in core/harm_dimensions.py and
 core/convergence_lock.py, kept here because this is the existing home for
 Sanctity-of-Life hard-path helpers. Purely additive: they only enrich
@@ -149,7 +149,7 @@ class HardOverrideMixin:
         indicators in the same scan, so this stays a narrow, low-risk carve-out.
 
         NOTE: this fixed allowlist is exactly the "keyword-plus-exception-list"
-        pattern flagged in ``internal design notes (private, not published)``
+        pattern flagged in internal design notes (private, not published)
         as opposing the project's own Reasoning-Over-Rote principle — it can
         only cover phrases someone remembered to add (e.g. "killer app" is
         listed but "she's killing it at her new job" is not, and still scores

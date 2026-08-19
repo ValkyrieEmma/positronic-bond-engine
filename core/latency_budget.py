@@ -18,8 +18,8 @@ The problem this addresses
 ---------------------------
 PBE's decision loop (EthicsEngine.evaluate(), ContextualJudge.judge()) is
 explicitly out of any reflex-speed path -- see roadmap safety-hardening
-principle #5 and docs/platform_safety_architecture.md §3/§4.6. the outside reviewer
-the outside reviewer's review named the actual floor for embodied reflex-level
+principle #5 and docs/platform_safety_architecture.md §3/§4.6. An outside
+safety-robotics reviewer named the actual floor for embodied reflex-level
 response as milliseconds or even microseconds, hardware dependent.
 ContextualJudge's own measured latency against a real local Ollama model
 is ~3.4s cold / ~0.9s warm -- several orders of magnitude too slow for
@@ -64,12 +64,13 @@ _T = TypeVar("_T")
 CONTEXTUAL_JUDGE_WARM_REFERENCE_SECONDS = 0.9
 CONTEXTUAL_JUDGE_COLD_REFERENCE_SECONDS = 3.4
 
-# the outside reviewer the outside reviewer's stated floor for embodied reflex-level response
-# (docs/platform_safety_architecture.md §4.6 / roadmap safety-hardening
-# principle #5): milliseconds to microseconds, hardware dependent. This
-# constant is deliberately a generous UPPER bound on that floor -- a
-# structural canary threshold for this module's own checks, not a claim
-# about what real reflex-rated hardware actually requires or achieves.
+# An outside safety-robotics reviewer's stated floor for embodied
+# reflex-level response (docs/platform_safety_architecture.md §4.6 /
+# roadmap safety-hardening principle #5): milliseconds to microseconds,
+# hardware dependent. This constant is deliberately a generous UPPER
+# bound on that floor -- a structural canary threshold for this module's
+# own checks, not a claim about what real reflex-rated hardware actually
+# requires or achieves.
 # Chosen with real headroom below PBE's own measured offline evaluate()
 # latency (~25-30ms on ordinary dev hardware) so this canary doesn't
 # false-positive on normal machine variance while still sitting well

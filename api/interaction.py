@@ -32,8 +32,8 @@ one), and this can be disabled via ``auto_load_local_model_config=False``
 for hermetic/offline test runs (see tests/test_public_entry.py and
 tests/test_architect_acceptance_a4.py, which do exactly that so the test
 suite's baseline stays deterministic regardless of what is configured on
-the host machine). See internal design notes (private, not published) finding
-2 for the gap this closes.
+the host machine). See internal review notes (private, not published),
+finding 2, for the gap this closes.
 
 Emergency "go to sleep" (2026-08-05)
 --------------------------------------
