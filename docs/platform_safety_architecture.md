@@ -2,7 +2,7 @@
 
 **Status:** design/documentation artifact. No production code shipped with this doc — the concrete code work it specifies is scoped as new Phase 5 sub-items in the roadmap, left for a Claude Code session with real shell/test access rather than done through the read-only-except-file-write device bridge this doc was written through.
 
-**Origin:** this is the concrete artifact `internal design notes (private, not published)`'s Phase 5 / Tier E section already flagged as needed ("Architecture guidance ... proposed as the concrete artifact this guidance should turn into once Tier E work actually starts") and the specific research the outside reviewer the outside reviewer's 2026-08-04 review asked for ("study established standards ... the outside reviewer pointed to ROS, ISO, and IETF safety work specifically"). Written 2026-08-15, ahead of Tier E actually starting, at Emma's request.
+**Origin:** this is the concrete artifact the project roadmap's Phase 5 / Tier E section already flagged as needed ("Architecture guidance ... proposed as the concrete artifact this guidance should turn into once Tier E work actually starts") and the specific research an outside safety-robotics reviewer's 2026-08-04 review asked for ("study established standards ... pointed to ROS, ISO, and IETF safety work specifically"). Written 2026-08-15, ahead of Tier E actually starting, at the architect's request.
 
 **Scope note, stated up front so it can't get lost in the detail below:** none of this changes what PBE governs. PBE remains a deliberation/decision layer — approve, approve-with-conditions, hold, refuse, identity-required — never a hardware safety function. Every standard summarized here exists to protect people from a robot's *physical* failure modes (motion, force, collision), which is not what PBE does or claims to do. What this doc adds is standard vocabulary, testable structure, and an honest list of what a platform integrator must supply for PBE's decisions to mean anything once a real embodiment exists.
 
@@ -86,7 +86,7 @@ Following the SEooC pattern in Section 1: rather than claim PBE is safety-rated,
 4. A watchdog or heartbeat mechanism on PBE's own liveness (Section 4.6), owned by the platform.
 5. A characterized latency budget for PBE's decision loop specific to that platform's sensor/actuation cadence (Section 4.7), confirmed before PBE's output is wired into anything time-sensitive.
 
-**Gap:** none of this is written down anywhere as an explicit contract today — it lives across roadmap prose, this doc, and the outside reviewer's review notes. Worth its own short published doc once a real integration target exists (Optimus or otherwise), reusing this list as the seed.
+**Gap:** none of this is written down anywhere as an explicit contract today — it lives across roadmap prose, this doc, and the outside reviewer's notes. Worth its own short published doc once a real integration target exists (Optimus or otherwise), reusing this list as the seed.
 
 ### 4.6 Latency targets / benchmarks
 
@@ -125,9 +125,9 @@ This doc is documentation only, written through a read/write-capable but shell-l
 
 ## References
 
-- `internal design notes (private, not published)` — Phase 5 / Tier E section, safety-hardening principle #5.
-- `internal design notes (private, not published)` — 2026-08-04 update, the outside reviewer the outside reviewer's review.
-- `internal design notes (private, not published)` — Awake/Asleep state design (conceptually adjacent to, but distinct from, the platform `maintenance_mode` state in 4.1).
+- Internal project roadmap — Phase 5 / Tier E section, safety-hardening principle #5. (Private planning doc, not published.)
+- Internal project status notes — 2026-08-04 update, outside safety-robotics reviewer's review. (Private, not published.)
+- Internal recharge-cycle design notes — Awake/Asleep state design (conceptually adjacent to, but distinct from, the platform `maintenance_mode` state in 4.1). (Private, not published.)
 - IEC 61508, ISO 26262, ISO 13482:2014, ISO 10218-1/2, ISO/TS 15066 — public standard summaries (full citations in the accompanying research doc).
 - ros-safety/safety_working_group (GitHub) — Safety Patterns Catalogue, Safety-Critical ROS Cookbook, watchdog library.
 - Fernandes et al., *ISO26262 SEooC Compliance of a ROS Based Architecture*, WSEAS Transactions on Systems, 2017.

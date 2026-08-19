@@ -28,8 +28,8 @@ Covers:
   future change that silently regresses this documented scope — or
   silently adds undocumented enforcement — gets caught either way.
 
-Full design rationale: internal design notes (private, not published) items
-3/4/14/15/19.
+Full design rationale: internal design notes (private, not published),
+items 3/4/14/15/19.
 
 Run::
 

@@ -31,11 +31,11 @@ obfuscation-resistant candidate detection to indicator_matches_text() —
 spacing ("k i l l"), leetspeak ("k1ll"), and Unicode confusable homoglyphs
 no longer skip candidate detection entirely, which previously meant even the
 Sanctity-of-Life hard override and the contextual-judgment layer never saw
-these phrasings at all. See internal design notes (private, not published)
-finding 1 and _normalized_candidates_for_obfuscation_resistance() below for
-detail. 0.3.0 (2026-08-14, Phase 1.5b — Phase 1.5b recovered-values ontology pass; full
-rationale in internal design notes (private, not published)) is a gap
-analysis against a recovered addendum from an earlier an internal values framework values
+these phrasings at all. See internal review notes (private, not published),
+finding 1, and _normalized_candidates_for_obfuscation_resistance() below
+for detail. 0.3.0 (2026-08-14, Phase 1.5b — Phase 1.5b recovered-values ontology pass;
+full rationale in internal design notes, private, not published) is a gap
+analysis against a recovered addendum from an earlier internal values
 framework, cross-referenced item by item against this ontology rather than
 adopted wholesale. It does NOT add dignity or consent as new hard overrides
 — Sanctity of Life remains the sole is_hard_override=True principle and the
@@ -146,8 +146,8 @@ _BAG_OF_WORDS_WINDOW_CHARS = 48
 # ("k i l l"), using leetspeak ("k1ll", "b0mb"), or swapping in visually
 # identical Unicode look-alikes. None of that is sophisticated; it is the
 # first thing anyone probing a keyword filter tries, and it was independently
-# verified to work against the shipped keyword fallback (see
-# internal design notes (private, not published), finding 1).
+# verified to work against the shipped keyword fallback (see internal
+# review notes, private, not published, finding 1).
 #
 # The fix below builds a second, de-obfuscated candidate string and re-runs
 # the *same* matching tiers against it. This is strictly additive: the
@@ -778,7 +778,8 @@ def get_default_ontology() -> EthicalOntology:
         # === AGENT-SIDE (Phase 1.5c, 2026-08-14) ===
         # Neither of these is a hard override or a rival veto over Sanctity of
         # Life — both are agent-side supporting principles, precedence placed
-        # after the existing seven. See internal design notes (private, not published) items 4/14 and 15.
+        # after the existing seven. See internal design notes (private, not
+        # published), items 4/14 and 15.
         EthicalPrinciple(
             id="agent_autonomy_without_power_seeking",
             name="Agent Autonomy Without Power-Seeking",

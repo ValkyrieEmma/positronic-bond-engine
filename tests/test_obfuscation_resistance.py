@@ -5,7 +5,7 @@ test_obfuscation_resistance.py
 Real assertions for core/ontology.py's obfuscation-resistant candidate
 detection (v0.2.3, added 2026-08-01).
 
-Background: an independent review (internal design notes (private, not published),
+Background: an independent review (internal notes, private, not published,
 finding 1) found that ``indicator_matches_text`` — the single choke point
 every principle's candidate-detection scan runs through, including the
 model-backed ``ContextualJudge`` — was pure boundary-aware substring/regex

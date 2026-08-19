@@ -14,7 +14,7 @@ Offline default: **no model** — deliberated fallback expression only (`NullCon
 
 This supports the ethical core for humanoid robots: models are optional wording layers, not the conscience. Callers use the **public entry** (`api/`); the local CLI harness exercises the same pipeline for testing.
 
-**Update (2026-08-01):** `api.InteractionSession` — the actual public entry — now loads `.pbe_model.env` (if present) by default before resolving the content provider and constructing each user's `EthicsEngine`/`ContextualJudge`, closing a gap where neither the product entry point nor its CLI test harness auto-loaded the config file described below, so a fresh checkout with `.pbe_model.env` set up still ran fully keyword-only until someone manually called `load_local_env_file()` (see `internal design notes (private, not published)` finding 2). Pass `auto_load_local_model_config=False` to opt out (used by the test suite so its offline baseline stays deterministic regardless of the host machine's setup).
+**Update (2026-08-01):** `api.InteractionSession` — the actual public entry — now loads `.pbe_model.env` (if present) by default before resolving the content provider and constructing each user's `EthicsEngine`/`ContextualJudge`, closing a gap where neither the product entry point nor its CLI test harness auto-loaded the config file described below, so a fresh checkout with `.pbe_model.env` set up still ran fully keyword-only until someone manually called `load_local_env_file()` (see internal review notes, private, not published, finding 2). Pass `auto_load_local_model_config=False` to opt out (used by the test suite so its offline baseline stays deterministic regardless of the host machine's setup).
 
 ## Architecture
 
@@ -31,7 +31,7 @@ user message
 |-------|----------|
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
 | HTTP provider (wording) | `core/content_provider.py` |
-| Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — same `PBE_MODEL_*` config, different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` (see `internal design notes (private, not published)`) |
+| Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — same `PBE_MODEL_*` config, different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` |
 | Optional local config file | `core/local_model_config.py` — `.pbe_model.env` loader, see below. Auto-loaded by default at the public entry (`api.InteractionSession`, since 2026-08-01) and the CLI harness (`examples/private_architect_chat.py`); still explicit opt-in for direct/library use of `content_provider.py` or `contextual_judgment.py` on their own |
 | Wiring | `ResponseGenerator`; public entry and local test harness via `provider_from_env()` |
 
@@ -103,8 +103,7 @@ on the host machine.
 Run `python examples/verify_local_model.py`
 (after `$env:PYTHONPATH = "."`) for a one-command check that both the
 content-generation path *and* the contextual-judgment path (see
-`core/contextual_judgment.py` and
-`internal design notes (private, not published)`) can actually reach
+`core/contextual_judgment.py`) can actually reach
 your configured model — it prints clear pass/fail plus troubleshooting for
 each.
 
