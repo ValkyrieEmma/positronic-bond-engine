@@ -180,6 +180,21 @@ end-product-behavior.md
 PBE_Development_Plan_Addendum_Recovered_Compass_Values.txt
 Positronic-Bond-Engine_Roadmap_*
 pbe-compass-values-gap-analysis-*.md
+pbe-roadmap-update-*.md
+pbe-ahmed-followup-concerns-check-*.md
+
+# claude/ — cloud-side knowledge-base exports (design/audit docs the
+# roadmap cites by bare relative path, e.g. claude/pbe-full-status-report-
+# 2026-08-03.md). Same "personal planning doc, not shipped product" category
+# as the entries above; the three filename patterns above already happen to
+# catch a few files that were placed here (pbe-roadmap-update-*.md etc.),
+# but most of this directory's contents don't match any per-file pattern.
+# Whole-directory entry added 2026-08-18 so nothing under here needs its own
+# pattern going forward, including any future point-in-time code snapshots
+# (e.g. claude/pbe-fixes-2026-08-01/*) that should never be mistaken for
+# real source under core/ or api/.
+claude/
+**/claude/
 
 # Local persistence / personal user data
 # These entries protect user privacy: persistence is local-only and must never
