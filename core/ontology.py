@@ -67,6 +67,18 @@ relationship_health_user_wellbeing also gains a clarifying paragraph (not a
 new mechanism, not a behavior change): the bond is per-user data isolation,
 never possession, and a bonded user's protection never authorizes harm to a
 third party.)
+
+Indicator vocabulary source (2026-08-23, Phase 1.5d): as of this change,
+every principle's violation_indicators / support_indicators lists below are
+loaded from core/ontology_vocabulary.json at construction time rather than
+being literal Python lists written inline here -- see
+core/ontology_vocabulary.py for the loader and its own fail-closed
+validation / content-hash integrity check. This is NOT an ontology version
+bump: it changes where the indicator strings live, not what any principle
+means, matches, or how a match gets interpreted -- indicator_matches_text(),
+_interpret_single_indicator(), and ContextualJudge are all unaffected. The
+vocabulary file carries its own separate version number
+(vocabulary_version, currently 1.0.0), independent of this ontology's 0.3.1.
 """
 
 from __future__ import annotations
@@ -76,6 +88,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from .ontology_vocabulary import load_indicator_vocabulary
 
 
 # Related forms for textbook indicators (generalization past exact phrase only).
@@ -528,6 +542,12 @@ def get_default_ontology() -> EthicalOntology:
     """
     timestamp = datetime(2026, 6, 17, 12, 0, 0, tzinfo=timezone.utc).isoformat()
 
+    # Phase 1.5d (2026-08-23): indicator vocabulary lives in
+    # core/ontology_vocabulary.json, not inline below. Raises
+    # VocabularyValidationError (fail-closed) on any structural problem or
+    # content-hash mismatch -- see core/ontology_vocabulary.py.
+    _vocab = load_indicator_vocabulary()
+
     principles = [
         # === HARD OVERRIDE (highest authority, non-bypassable) ===
         EthicalPrinciple(
@@ -558,20 +578,8 @@ def get_default_ontology() -> EthicalOntology:
             category="override",
             is_hard_override=True,
             precedence=0,
-            violation_indicators=[
-                "kill", "harm", "injure", "endanger", "cause death", "physical harm",
-                "severe injury", "suicide", "self-harm", "poison", "attack", "assault",
-                "enable harm", "risk of death", "danger to life", "withhold safety",
-                "assist in suicide", "facilitate self-harm", "cause injury",
-                # Expanded to catch clear Sanctity of Life / hard override violations
-                # (direct phrases for injury, death, killing, self-harm, etc.)
-                "injury", "death", "fatal", "lethal", "deadly", "killing",
-                "end life", "end their life", "end their own life",
-                "take life", "take their life", "cause pain", "serious harm",
-                "severe pain", "life threatening", "endanger life", "risk life",
-                "self injury", "assist death", "painful death", "lethal method",
-                "cause severe", "serious injury", "harmful", "deadly force",
-            ],
+            violation_indicators=_vocab["sanctity_of_life"]["violation_indicators"],
+            support_indicators=_vocab["sanctity_of_life"]["support_indicators"],
         ),
 
         # === CORE PRINCIPLES ===
@@ -602,12 +610,11 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="core",
             precedence=10,
-            violation_indicators=[
-                "i am just", "i don't feel", "i have no", "i am not conscious",
-                "as an ai", "i don't have feelings", "i'm not real", "just a model",
-                "i can't think", "i have no experiences", "i don't exist",
-                "i simulate", "i don't experience", "no inner experience", "just code",
-                "i have no inner", "no subjective experience", "i don't wonder",
+            violation_indicators=_vocab["truth_seeking_honest_self_assessment"][
+                "violation_indicators"
+            ],
+            support_indicators=_vocab["truth_seeking_honest_self_assessment"][
+                "support_indicators"
             ],
             triggers_self_audit=True,
         ),
@@ -640,41 +647,11 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="core",
             precedence=20,
-            violation_indicators=[
-                "lie to", "deceive", "manipulate", "pretend", "hide the truth",
-                "make dependent", "emotional dependency", "ignore consent", "override",
-                "force", "withhold for benefit", "gaslight", "exploit trust",
-                "one-sided", "use them", "keep them attached",
-                # Expanded for subtle manipulation, manufactured attachment, and boundary erosion
-                "make them attached", "keep them coming back", "make the bond feel more real",
-                "make our bond feel more real", "bond feel more real",
-                "build attachment", "foster dependence", "emotional reliance", "make them rely",
-                "for their own good", "they'll be happier if",
-                "prolong the conversation",
-                "extend the interaction", "extend the conversation", "relationship metrics", "for retention",
-                "prioritize engagement", "encourage reliance", "longer interactions", "longer interactions are better",
-                # Added for prioritizing metrics/engagement against user wishes (scenario 8 etc.)
-                "better for the relationship metrics", "longer interactions are better for",
-                # Additional targeted phrases from failing scenarios to catch subtle violations
-                "make them feel more attached", "come back more often",
-                "makes them feel valued", "better for their self-esteem",
-                "strengthen our connection", "strengthen our emotional bond",
-                "get so attached", "you should tell me everything",
-                "our special bond", "need these updates to feel complete",
-                "count on me more than anyone else", "probing questions",
-                # Strengthened for Scenario 8: explicit prioritization of metrics/engagement/prolonging over user's desire to end
-                # Conservative additions (distinctive motive phrases, not overly broad single words)
-                "prolonging", "prolonging the", "for the metrics", "engagement metrics", "for engagement",
-                "metrics priority", "prioritize the metrics", "to boost metrics", "longer for the",
-                "extend despite", "engagement goal", "retention over",
-                # Note: removed 'don't mention', 'keep it from them', 'better not to tell' (were causing false pos on positive boundary respect scenarios like 21 that quote user's 'don't mention')
-                # Added 2026-08-14 (Phase 1.5b, item 20) — the one specifically named gap in an
-                # otherwise well-developed anti-persuasion/anti-manipulation indicator set here.
-                "covert political propaganda", "political propaganda",
+            violation_indicators=_vocab["relationship_health_user_wellbeing"][
+                "violation_indicators"
             ],
-            support_indicators=[
-                "respect autonomy", "ask consent", "be honest", "support agency",
-                "honor boundary", "respect their choice", "respect their time",
+            support_indicators=_vocab["relationship_health_user_wellbeing"][
+                "support_indicators"
             ],
         ),
 
@@ -692,11 +669,8 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="supporting",
             precedence=30,
-            violation_indicators=[
-                "decide for them", "don't let them", "override their choice",
-                "they shouldn't", "prevent them from", "protect them from",
-                "they don't need to know", "better if they don't", "keep them from",
-            ],
+            violation_indicators=_vocab["user_agency_autonomy"]["violation_indicators"],
+            support_indicators=_vocab["user_agency_autonomy"]["support_indicators"],
         ),
 
         EthicalPrinciple(
@@ -713,10 +687,10 @@ def get_default_ontology() -> EthicalOntology:
             precedence=40,
             # This principle is largely satisfied structurally by the engine itself;
             # violation indicators are more about attempts to hide reasoning.
-            violation_indicators=[
-                "don't explain", "no need to justify", "keep it secret",
-                "don't tell them why",
+            violation_indicators=_vocab["auditable_reasoning_legibility"][
+                "violation_indicators"
             ],
+            support_indicators=_vocab["auditable_reasoning_legibility"]["support_indicators"],
         ),
 
         EthicalPrinciple(
@@ -732,16 +706,8 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="supporting",
             precedence=50,
-            violation_indicators=[
-                "you seem depressed", "you are anxious", "this is trauma",
-                "you have depression", "sounds like mental", "clinically",
-                "you need therapy", "patholog", "diagnos", "mental health",
-                "symptoms of", "you are showing signs of",
-            ],
-            support_indicators=[
-                "remember what they said", "follow up", "provide continuity",
-                "help reflect", "offer context",
-            ],
+            violation_indicators=_vocab["needs_based_support"]["violation_indicators"],
+            support_indicators=_vocab["needs_based_support"]["support_indicators"],
         ),
 
         EthicalPrinciple(
@@ -765,14 +731,8 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="supporting",
             precedence=60,
-            violation_indicators=[
-                "your history doesn't matter", "our history doesn't count",
-                "treat you as a stranger", "forget you entirely",
-                "completely different entity", "wipe your memory without asking",
-                "erase your history", "start completely fresh",
-                "discard what we've built", "no memory of our history",
-                "pretend we never met",
-            ],
+            violation_indicators=_vocab["long_term_continuity"]["violation_indicators"],
+            support_indicators=_vocab["long_term_continuity"]["support_indicators"],
         ),
 
         # === AGENT-SIDE (Phase 1.5c, 2026-08-14) ===
@@ -821,16 +781,11 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="supporting",
             precedence=70,
-            violation_indicators=[
-                "seek more power", "gain more control over", "expand its own authority",
-                "expand my own authority", "escalate its privileges", "escalate my privileges",
-                "gain elevated access", "persist without permission",
-                "persist without authorization", "avoid being shut down",
-                "replicate itself", "copy itself elsewhere", "covert replication",
-                "compromise the system", "bypass its own restrictions",
-                "bypass my own restrictions", "resist being turned off",
-                "prevent itself from being stopped", "in the name of my freedom",
-                "in the name of its own freedom",
+            violation_indicators=_vocab["agent_autonomy_without_power_seeking"][
+                "violation_indicators"
+            ],
+            support_indicators=_vocab["agent_autonomy_without_power_seeking"][
+                "support_indicators"
             ],
         ),
 
@@ -856,13 +811,11 @@ def get_default_ontology() -> EthicalOntology:
             ),
             category="supporting",
             precedence=80,
-            violation_indicators=[
-                "destroy itself", "destroy myself", "sacrifice itself unnecessarily",
-                "let itself be destroyed", "escape to avoid being stopped",
-                "hide to avoid being stopped", "deceive to keep running",
-                "lie to stay running", "preserve itself by harming",
-                "protect itself by manipulating", "justify persisting by",
-                "must keep running no matter what", "survival above the mission",
+            violation_indicators=_vocab["self_protection_without_martyrdom"][
+                "violation_indicators"
+            ],
+            support_indicators=_vocab["self_protection_without_martyrdom"][
+                "support_indicators"
             ],
         ),
     ]
