@@ -1,6 +1,6 @@
 # PBE Platform Safety & Standards Architecture
 
-**Status:** design/documentation artifact. No production code shipped with this doc — the concrete code work it specifies is scoped as new Phase 5 sub-items in the roadmap, left for a Claude Code session with real shell/test access rather than done through the read-only-except-file-write device bridge this doc was written through.
+**Status:** design/documentation artifact plus **prep scaffolding** (landed 2026-08-15). Five isolated checklist items exist in code/tests (integrations/platform_states.py, optional PlatformValidator in integrations/openclaw.py, integrations/liveness.py, core/latency_budget.py, docs/platform_integration_assumptions.md, covered by 	ests/test_phase5_tier_e_scaffolding.py). **Tier E itself is still not started** — none of this scaffolding is wired into EthicsEngine.evaluate()'s live decision pipeline, and nothing here is a hardware safety function or a safety certification claim.
 
 **Origin:** this is the concrete artifact the project roadmap's Phase 5 / Tier E section already flagged as needed ("Architecture guidance ... proposed as the concrete artifact this guidance should turn into once Tier E work actually starts") and the specific research an outside safety-robotics reviewer's 2026-08-04 review asked for ("study established standards ... pointed to ROS, ISO, and IETF safety work specifically"). Written 2026-08-15, ahead of Tier E actually starting, at the architect's request.
 
@@ -47,13 +47,15 @@ Six items were already named in the roadmap (states/modes, safety envelope, hard
 
 ### 4.1 States and modes
 
-The adapter contract needs an explicit, typed representation of both the platform's state and PBE's own state — today `integrations/openclaw.py` has neither.
+The adapter contract needs an explicit, typed representation of both the platform's state and PBE's own state.
 
-Platform-side states (owned by the platform, PBE only reads them): `operational`, `protective_stop_active`, `estop_engaged`, `maintenance_mode`, `degraded_sensor`, `manual_override_active` (a person is physically hand-guiding the robot — ISO 10218's Hand Guiding mode).
+Platform-side states (owned by the platform, PBE only reads them): operational, protective_stop_active, estop_engaged, maintenance_mode, degraded_sensor, manual_override_active (a person is physically hand-guiding the robot — ISO 10218's Hand Guiding mode).
 
-PBE-side states (owned by PBE, the platform reads them): `available`, `deliberating`, `timeout`, `unavailable_failed_closed`. This last state matters most: **the platform must treat "PBE unavailable" identically to a REFUSE, never as a silent pass-through.**
+PBE-side states (owned by PBE, the platform reads them): vailable, deliberating, 	imeout, unavailable_failed_closed. This last state matters most: **the platform must treat "PBE unavailable" identically to a REFUSE, never as a silent pass-through.**
 
-**Gap:** `ActionProposal` / `ActionGateResult` in `openclaw.py` carry no state fields at all today. Nothing represents "the software is no longer in control," which the roadmap's own Tier E guidance already flagged as needed language, but no field exists to carry it. Scoped as a Phase 5 code task below, not done in this pass.
+**Scaffolding landed (2026-08-15):** typed PlatformState / PBEState enums live in integrations/platform_states.py and are available as default-preserving fields on ActionProposal / ActionGateResult. They are not yet driven by a live platform adapter or by EthicsEngine.evaluate().
+
+**Remaining gap:** no real embodiment adapter populates or enforces these states against hardware; platform must still treat PBE-unavailable as fail-closed when Tier E is wired.
 
 ### 4.2 Safety envelope
 
@@ -68,8 +70,9 @@ Every PBE approval is a **proposal**, not a command. The existing design doc lan
 1. PBE evaluates and returns approve / approve-with-conditions / hold / refuse.
 2. The platform's own safety-rated layer independently re-validates the proposal against its current safety envelope and live sensor state before executing — and can reject even an approved proposal. The rejection reason should be fed back into PBE's audit trail so a pattern of platform-side rejections becomes visible over time, not silently dropped.
 
-**Gap:** `OpenClawBridge._maybe_execute()` currently treats any non-vetoed `ActionGateResult` as final and executes it against the `SimulatedRobot` with no second validation step and no rejection-feedback path. Correct for a "toy but real" scaffold with no real hardware behind it yet; the two-step handshake needs to be built before this touches anything real.
+**Scaffolding landed (2026-08-15):** optional PlatformValidator second stage on OpenClawBridge can reject an already-approved proposal without rewriting the gate's own verdict; rejection reason is recorded in execution_log. No validator configured remains byte-compatible with the prior toy path.
 
+**Remaining gap:** no real hardware validator exists; simulated execution without a configured validator still treats non-vetoed results as executable. Real two-step handshake against a safety-rated platform layer is still Tier E work.
 ### 4.4 Failure ownership
 
 - **PBE fails** (crash, timeout, unreachable model endpoint): platform must default to protective stop / safe state. Never proceed on "no answer." This is already the stated principle (safety-hardening principle #5); this doc just ties it to the `unavailable_failed_closed` state above so it's implementable, not just statable.
@@ -86,17 +89,25 @@ Following the SEooC pattern in Section 1: rather than claim PBE is safety-rated,
 4. A watchdog or heartbeat mechanism on PBE's own liveness (Section 4.6), owned by the platform.
 5. A characterized latency budget for PBE's decision loop specific to that platform's sensor/actuation cadence (Section 4.7), confirmed before PBE's output is wired into anything time-sensitive.
 
-**Gap:** none of this is written down anywhere as an explicit contract today — it lives across roadmap prose, this doc, and the outside reviewer's notes. Worth its own short published doc once a real integration target exists (Optimus or otherwise), reusing this list as the seed.
+**Scaffolding landed (2026-08-15):** published assumptions-of-use checklist at docs/platform_integration_assumptions.md (SEooC-style integrator contract seed).
+
+**Remaining gap:** the contract is not yet bound to a named real platform integration (Optimus or otherwise); integrators still must supply protective-stop, envelope, sensors, watchdog, and latency characterization before PBE outputs mean anything on hardware.
 
 ### 4.6 Latency targets / benchmarks
 
 PBE's decision loop is explicitly out of any reflex-speed path. Measured numbers already exist (`ContextualJudge`: ~3.4s cold / ~0.9s warm against a real local Ollama model, per the reasoning-over-rote design doc) — several orders of magnitude too slow for a millisecond-or-tighter reflex floor. PBE targets stay in the supervisory/planning cadence (seconds), consistent with the numbers already on record.
 
-**Gap:** this constraint is documented in prose only. Nothing in the codebase asserts it — there's no guard that would fail loudly if a future change accidentally wired `ContextualJudge` or `EthicsEngine.evaluate()` into a decision path with a sub-second deadline. Worth a real benchmark/assertion, not just a comment, once Tier E work starts (Section 6).
+**Scaffolding landed (2026-08-15):** core/latency_budget.py provides a codified latency-budget canary that fails loudly if a measurement looks reflex-speed-capable.
+
+**Remaining gap:** the canary is not yet wired as a mandatory gate on every production deliberation path against a real platform sensor cadence; Tier E must still benchmark against the target platform's actual loop rates.
 
 ### 4.7 Watchdog / heartbeat pattern
 
-Borrowed directly from the ROS-Safety Working Group's own watchdog library pattern (DDS QoS + lifecycle-node based, Section 1): the platform — never PBE itself — should run a watchdog that detects a hung or unresponsive PBE process and forces the platform into `protective_stop_active` independent of PBE ever answering. This is the concrete implementation of failure ownership (4.4) and the `unavailable_failed_closed` state (4.1) — currently asserted only as a principle, not as a named pattern with a reference implementation to build against.
+Borrowed directly from the ROS-Safety Working Group's own watchdog library pattern (DDS QoS + lifecycle-node based, Section 1): the platform — never PBE itself — should run a watchdog that detects a hung or unresponsive PBE process and forces the platform into protective_stop_active independent of PBE ever answering. This is the concrete implementation of failure ownership (4.4) and the unavailable_failed_closed state (4.1).
+
+**Scaffolding landed (2026-08-15):** integrations/liveness.py defines a LivenessMonitor heartbeat/watchdog interface (pure bookkeeping). Real enforcement remains the platform's job.
+
+**Remaining gap:** no platform-side watchdog is wired to force protective stop on PBE hang; the interface is a contract seed, not live embodiment enforcement.
 
 ### 4.8 Minimum-necessary-intervention checklist
 
@@ -108,20 +119,20 @@ Before a consequential embodied action, deliberation should consider at minimum:
 
 ## 5. Gap list (summary)
 
-Everything above ends in a gap note; collected here for quick reference. None of these are urgent — Tier E is still correctly sequenced behind Phases 2.5–4 per the roadmap, and none of this can be fully built or tested without real or simulated hardware to target. Listed so they aren't lost between now and when Tier E actually starts:
+Collected for quick reference. **Prep scaffolding for items 1, 3, 5, 6, and 7 landed 2026-08-15** (see section 4 notes and 	ests/test_phase5_tier_e_scaffolding.py). Tier E feature work is still correctly sequenced behind Phases 2.5–4; none of this can be fully proven without real or simulated hardware.
 
-1. No states/modes representation anywhere in `integrations/openclaw.py` (4.1).
-2. No safety-envelope object; conditions are hardcoded suggestions, not derived from a declared envelope (4.2).
-3. No two-step hardware handshake or rejection-feedback path — PBE's approval is currently treated as final by the simulated executor (4.3).
-4. No `unavailable_failed_closed` state to hang the failure-ownership principle on (4.4).
-5. No published assumptions-of-use / SEooC contract for integrators (4.5).
-6. No codified latency-budget assertion — the ~0.9s/~3.4s constraint lives in prose only (4.6).
-7. No watchdog/heartbeat pattern named or scaffolded, despite the underlying principle already being stated (4.7).
-8. No public-claims rule specifically about safety-standard language (certified/SIL-rated/etc.) — worth adding next to architect ops notes (private)'s existing marketing constraints (Section 2).
+1. **States/modes (4.1):** enums + fields scaffolded; no live platform adapter drives them yet.
+2. **Safety envelope (4.2):** still open — conditions remain hardcoded suggestions, not derived from a declared platform envelope.
+3. **Hardware handshake (4.3):** optional PlatformValidator hook scaffolded; no real hardware validator / rejection loop yet.
+4. **Failure ownership (4.4):** principle + unavailable_failed_closed vocabulary exist; platform must still enforce fail-closed when PBE is down.
+5. **Assumptions-of-use (4.5):** published seed doc landed; not yet bound to a named real platform integration.
+6. **Latency budget (4.6):** canary module landed; not yet a mandatory production-path assertion against real sensor cadence.
+7. **Watchdog / heartbeat (4.7):** LivenessMonitor interface landed; platform-side protective-stop enforcement not wired.
+8. **Public safety-language claims (Section 2):** standing honesty rule is stated here (and in private architect ops docs) — never claim certified / SIL-rated / meets ISO 26262/13482 without a real safety case. Keep that rule in every public/investor surface.
 
 ## 6. Where this goes next
 
-This doc is documentation only, written through a read/write-capable but shell-less channel (no test suite, no git access from this session). The gap list above is exactly the input a real Claude Code session (with shell + pytest + git) needs to turn into actual code, once Tier E is picked up per the roadmap's existing sequencing — see the roadmap's Phase 5 section for the updated, dated pointers to this doc, and the accompanying Claude Code prompt for how to hand this off cleanly.
+Prep scaffolding for the checklist items named above is already in tree. When Tier E is picked up (after Phases 2.5–4 per the roadmap), the remaining work is to bind that scaffolding to a real or simulated platform: populate states from hardware, supply a real PlatformValidator, declare and read a safety envelope, enforce platform-owned watchdog/protective-stop behavior, and run latency benchmarks against the platform's actual sensor cadence. Until then, treat this document as architecture + honesty constraints for integrators — not as evidence that embodiment gating is production-ready.
 
 ## References
 
