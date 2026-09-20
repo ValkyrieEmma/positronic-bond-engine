@@ -48,15 +48,16 @@ Secondary software use (interactive validation harnesses, companion-style demos)
 Approximate public progress (package **v0.5.0-dev** is still experimental; not stable):
 
 - **Phase 0** — Scaffolding and principles — *landed*
-- **Phase 1** — Core ethics engine + basic self-audit loop — *largely landed* (harness, Sanctity override, audit honesty scaffolding)
-- **Phase 2** — Relationship health model + memory substrate — *in progress* (bond texture, baselines, episodic memory, session time, relationship knowledge + communicative deliberation)
-- **Phase 2b** — Gated speech under conscience — *in progress* (speech postures, deliberated intent, optional ContentProvider / Ollama or BYO; not production dialogue)
-- **Phase 3** — Sensor fusion and contextual activation for embodied contexts
+- **Phase 1** — Core ethics engine + basic self-audit loop — *largely landed* (harness, Sanctity override, audit honesty scaffolding; later foundation hardening through Phase 1.5d is also landed)
+- **Phase 2** — Relationship health model + memory substrate + proactive engagement queue — *largely landed* (bond texture, baselines, episodic memory, session time, communicative deliberation, engagement window/queue; recharge-cycle trigger still open)
+- **Phase 2b** — Gated speech under conscience — *largely landed* (speech postures, deliberated intent, optional ContentProvider / Ollama or BYO; not production dialogue; live local-model acceptance still a validation bar)
+- **Phase 2.5** — Security hardening of the gate — *in progress* (fail-closed mapping and vocabulary integrity started; remaining isolation / adversarial work still open). Active engineering gate before Phase 3.
+- **Phase 3** — Interest-based advisory growth / sensor fusion and contextual activation for embodied contexts — *not started* (gated behind Phase 2.5)
 - **Phase 4** — Integration layer (embodiment/control hooks; LLM backends as wording only under the gate; high-level robotics planning gate)
-- **Phase 5** — Reference deployments + rigorous evaluation (ethics harness exists; robot product and full companion product do not)
+- **Phase 5 / Tier E** — Embodiment adapter + rigorous evaluation — *prep scaffolding only* (states, handshake hook, liveness, latency canary, assumptions-of-use doc); real Tier E feature work not started. Ethics harness exists; robot product does not.
 - **Phase 6** — Multi-person household bond networks and long-term continuity studies
 
-Known near-term engineering direction: deepen **meaning → knowledge → intent → wording** without template menus; live local-model acceptance for validation; clearer tester-facing install later; embodiment gates as the long-term home for physical action. Voice remains deferred.
+Known near-term engineering direction: finish Phase 2.5 hardening; keep **meaning → knowledge → intent → wording** free of template menus; live local-model acceptance for validation; clearer tester-facing install later; embodiment gates as the long-term home for physical action. Voice remains deferred.
 
 ## Non-Goals (for now)
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "positronic-bond-engine"
 version = "0.5.0.dev0"
-description = "Conscience-first ethical governance layer for AI companions and in-home robotics"
+description = "Conscience-first ethical governance layer for embodied humanoid robots (Optimus-class), with software validation as a secondary path"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "AGPL-3.0-only"}
@@ -48,12 +48,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/positronic-bond-engine"
-Documentation = "https://github.com/example/positronic-bond-engine/blob/main/docs/"
-Repository = "https://github.com/example/positronic-bond-engine"
+Homepage = "https://github.com/ValkyrieEmma/positronic-bond-engine"
+Documentation = "https://github.com/ValkyrieEmma/positronic-bond-engine/blob/main/docs/"
+Repository = "https://github.com/ValkyrieEmma/positronic-bond-engine"
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "auditing", "memory", "persistence", "sensors", "integrations", "deployment"]
+packages = ["api", "core", "auditing", "memory", "persistence", "sensors", "integrations", "deployment"]
 
 [tool.ruff]
 line-length = 100
