@@ -86,7 +86,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from core.content_provider import ProviderConfig, config_from_env
+from core.content_provider import ProviderConfig, judge_config_from_env
 
 JudgmentVerdict = Literal["violation", "benign", "ambiguous", "unavailable"]
 
@@ -193,11 +193,12 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 class ContextualJudge:
     """Calls the configured base model to judge one candidate hit in context.
 
-    Reuses the exact ``PBE_MODEL_*`` environment configuration
-    ``content_provider.py`` already documents and uses for wording, so a
-    deployer configures their base model in exactly one place. This class
-    never produces user-facing speech — only an internal judgment plus a
-    reasoning-trace-ready explanation.
+    Uses ``judge_config_from_env()`` (Phase 2.5): prefers ``PBE_JUDGE_*``
+    when set, otherwise falls back to the wording ``PBE_MODEL_*`` config so
+    single-model setups keep working. Deployers who want gate isolation can
+    point judgment at a distinct endpoint/model from content generation.
+    This class never produces user-facing speech — only an internal judgment
+    plus a reasoning-trace-ready explanation.
 
     Fail-soft by construction: any missing config, network error, timeout,
     or unparseable response yields an ``"unavailable"`` verdict rather than
@@ -205,7 +206,7 @@ class ContextualJudge:
     """
 
     def __init__(self, config: ProviderConfig | None = None) -> None:
-        self.config = config if config is not None else config_from_env()
+        self.config = config if config is not None else judge_config_from_env()
 
     @property
     def available(self) -> bool:
@@ -228,7 +229,7 @@ class ContextualJudge:
                 confidence=0.0,
                 reasoning=(
                     "No contextual judgment model configured "
-                    "(PBE_MODEL_BASE_URL unset / provider disabled) — "
+                    "(PBE_JUDGE_* / PBE_MODEL_* unset or judge disabled) — "
                     "falling back to the keyword heuristic. This is a "
                     "degraded mode, not a reasoning conclusion."
                 ),

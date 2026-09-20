@@ -73,6 +73,17 @@ ENV_MAX_CTX = "PBE_MODEL_MAX_CONTEXT_CHARS"
 ENV_ENABLED = "PBE_MODEL_ENABLED"
 ENV_PROFILE = "PBE_MODEL_PROFILE"  # "ollama" | "openai_compatible" | "off"
 
+# Phase 2.5 — optional separate config for ContextualJudge (gate isolation).
+# When unset, judge_config_from_env() falls back to the wording PBE_MODEL_* vars
+# for backward compatibility. Set these to run judgment on a distinct endpoint
+# or model from content generation.
+ENV_JUDGE_BASE_URL = "PBE_JUDGE_BASE_URL"
+ENV_JUDGE_API_KEY = "PBE_JUDGE_API_KEY"
+ENV_JUDGE_MODEL = "PBE_JUDGE_MODEL_NAME"
+ENV_JUDGE_TIMEOUT = "PBE_JUDGE_TIMEOUT_S"
+ENV_JUDGE_ENABLED = "PBE_JUDGE_ENABLED"
+ENV_JUDGE_PROFILE = "PBE_JUDGE_PROFILE"
+
 
 @dataclass
 class ProviderConfig:
@@ -713,6 +724,72 @@ def provider_from_env() -> ContentProvider:
     if cfg is None:
         return NullContentProvider()
     return OpenAICompatibleProvider(cfg)
+
+
+def judge_config_from_env() -> ProviderConfig | None:
+    """Load ContextualJudge config, optionally distinct from wording config.
+
+    Phase 2.5 gate isolation: prefer ``PBE_JUDGE_*`` variables when any of
+    the core judge keys are set (base URL, model name, profile, or an
+    explicit enabled flag). Otherwise fall back to ``config_from_env()`` so
+    existing single-config deployments keep working unchanged.
+
+    Explicit ``PBE_JUDGE_ENABLED=0`` / ``PBE_JUDGE_PROFILE=off`` disables the
+    judge even when a wording model remains configured — forcing the
+    offline keyword heuristic for boundary judgments.
+    """
+    enabled_raw = (os.environ.get(ENV_JUDGE_ENABLED) or "").strip().lower()
+    profile = (os.environ.get(ENV_JUDGE_PROFILE) or "").strip().lower()
+    base = (os.environ.get(ENV_JUDGE_BASE_URL) or "").strip()
+    model = (os.environ.get(ENV_JUDGE_MODEL) or "").strip()
+    key = (os.environ.get(ENV_JUDGE_API_KEY) or "").strip()
+
+    judge_keys_present = any([enabled_raw, profile, base, model, key])
+    if not judge_keys_present:
+        # Backward compatible: same model as wording / content provider.
+        return config_from_env()
+
+    if enabled_raw in ("0", "false", "off", "no") or profile in ("off", "none", "null"):
+        return None
+
+    if profile == "ollama":
+        base = base or OLLAMA_DEFAULT_BASE_URL
+        model = model or OLLAMA_DEFAULT_MODEL
+        key = key or OLLAMA_DEFAULT_API_KEY
+    elif not base:
+        return None
+
+    if not model:
+        model = OLLAMA_DEFAULT_MODEL
+
+    def _float(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+
+    # Timeouts / token caps: judge-specific if set, else wording defaults.
+    timeout_s = _float(ENV_JUDGE_TIMEOUT, _float(ENV_TIMEOUT, DEFAULT_TIMEOUT_S))
+    max_tokens = _int(ENV_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+    max_ctx = _int(ENV_MAX_CTX, DEFAULT_MAX_CONTEXT_CHARS)
+
+    return ProviderConfig(
+        base_url=base,
+        api_key=key,
+        model=model,
+        timeout_s=max(5.0, timeout_s),
+        max_tokens=max(32, min(1024, max_tokens)),
+        max_context_chars=max(500, min(16000, max_ctx)),
+        max_concurrent=DEFAULT_MAX_CONCURRENT,
+        enabled=True,
+        profile=profile or "openai_compatible",
+    )
 
 
 def release_vram(config: ProviderConfig | None) -> dict[str, Any]:

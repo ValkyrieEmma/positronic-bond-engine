@@ -31,9 +31,36 @@ user message
 |-------|----------|
 | Deliberation + knowledge | `core/communicative_deliberation.py` |
 | HTTP provider (wording) | `core/content_provider.py` |
-| Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — same `PBE_MODEL_*` config, different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` |
+| Contextual judgment (reasoning-over-rote) | `core/contextual_judgment.py` — uses `judge_config_from_env()` (optional `PBE_JUDGE_*`, else `PBE_MODEL_*`); different job: judges whether an ontology-flagged indicator hit is a genuine principle violation from full context, used by `EthicsEngine`'s `contextual_judge=` |
 | Optional local config file | `core/local_model_config.py` — `.pbe_model.env` loader, see below. Auto-loaded by default at the public entry (`api.InteractionSession`, since 2026-08-01) and the CLI harness (`examples/private_architect_chat.py`); still explicit opt-in for direct/library use of `content_provider.py` or `contextual_judgment.py` on their own |
 | Wiring | `ResponseGenerator`; public entry and local test harness via `provider_from_env()` |
+
+## Gate isolation (Phase 2.5): judge vs wording config
+
+`ContextualJudge` (boundary judgment) and `ContentProvider` (allowed speech wording) are **different jobs**. They may share one local Ollama process for convenience, but they should not be forced to share one config forever.
+
+| Role | Env prefix | Loader |
+|------|------------|--------|
+| Wording / content generation | `PBE_MODEL_*` | `config_from_env()` / `provider_from_env()` |
+| Contextual judgment (gate) | `PBE_JUDGE_*` (optional) | `judge_config_from_env()` |
+
+Behavior:
+
+1. If **no** `PBE_JUDGE_*` keys are set → judge uses the same config as wording (`PBE_MODEL_*`). Backward compatible.
+2. If any core `PBE_JUDGE_*` key is set (`PBE_JUDGE_BASE_URL`, `PBE_JUDGE_MODEL_NAME`, `PBE_JUDGE_PROFILE`, `PBE_JUDGE_API_KEY`, or `PBE_JUDGE_ENABLED`) → judge uses that config alone.
+3. `PBE_JUDGE_ENABLED=0` or `PBE_JUDGE_PROFILE=off` → judge is inert (keyword heuristic) even when a wording model is configured.
+
+Example — same Ollama host, different models::
+
+```powershell
+$env:PBE_MODEL_PROFILE = "ollama"
+$env:PBE_MODEL_NAME = "llama3.1:8b"          # wording
+$env:PBE_JUDGE_PROFILE = "ollama"
+$env:PBE_JUDGE_MODEL_NAME = "llama3.1:8b"     # or a smaller/pinned judge model
+# optional: $env:PBE_JUDGE_BASE_URL = "http://127.0.0.1:11434/v1"
+```
+
+Or in `.pbe_model.env` (gitignored), add the `PBE_JUDGE_*` lines alongside `PBE_MODEL_*`.
 
 Context pack includes intent, premises, relationship knowledge (preferred address name, role labels, self-described relation to the system), phase/version, short topics — not arbitrary private dumps.
 
