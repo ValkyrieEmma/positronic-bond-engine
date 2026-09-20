@@ -168,8 +168,8 @@ temp/
 
 # Private architect design / agent context — NEVER publish to public remotes.
 # Conceptual end-product design lives only on the architect machine.
-architect ops notes (private)
-**/architect ops notes (private)
+AGENTS.md
+**/AGENTS.md
 .agents/
 **/.agents/
 *.agents.private.md

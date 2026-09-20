@@ -26,7 +26,7 @@ Stated explicitly because architect ops notes (private) already requires public 
 - PBE **is not, and does not claim to be**, a SIL-rated or ASIL-rated safety function. No formal safety case, hazard analysis, or third-party assessment has been performed against any of the standards above.
 - PBE **is not** a substitute for a platform's own protective-stop, SSM, PFL, or e-stop implementation. Those must exist, be independently rated, and function whether or not PBE is running, reachable, or fast enough.
 - What PBE **can honestly claim**: it reduces the likelihood that an unsafe or ethically-unsound command is *proposed* in the first place, and it refuses to *authorize* actions its deliberation flags — a supervisory/planning-layer contribution, not a reflex-layer guarantee. This matches the product's own 2026-08-04 marketing pivot decision ("can't be manipulated into harm," carefully scoped) — this doc gives that scoping a standards-grounded boundary rather than just an internal judgment call.
-- Any future public or investor-facing material that uses words like "certified," "SIL-rated," "meets ISO 26262," or similar must not be used unless a real, documented safety case and assessment exists. Worth adding as a standing rule alongside architect ops notes (private)'s existing marketing constraints.
+- Any future public or investor-facing material that uses words like "certified," "SIL-rated," "meets ISO 26262," or similar must not be used unless a real, documented safety case and assessment exists. Worth adding as a standing rule alongside architect ops notes' existing marketing constraints.
 
 ## 3. Layered architecture, restated in standards vocabulary
 

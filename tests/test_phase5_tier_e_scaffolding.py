@@ -4,7 +4,7 @@ test_phase5_tier_e_scaffolding.py
 
 Real assertions for Phase 5's Tier E platform-safety scaffolding (added
 2026-08-15). This is PREP WORK ONLY -- see docs/platform_safety_
-architecture.md and architect ops notes (private)'s Tier E bullet. Tier E itself (the real
+architecture.md and architect ops notes' Tier E bullet. Tier E itself (the real
 embodiment adapter) is not started; this file tests five additive,
 isolated pieces of scaffolding that a future adapter will build against.
 None of it is wired into EthicsEngine.evaluate()'s live decision pipeline.
@@ -545,7 +545,7 @@ def main() -> int:
         and "core/latency_budget.py" in assumptions_text,
     )
 
-    # architect ops notes (private)'s marketing constraint: no AFFIRMATIVE safety-
+    # architect ops notes' marketing constraint: no AFFIRMATIVE safety-
     # certification claim -- i.e. "PBE is certified", not the doc quoting
     # architect ops notes' own forbidden-phrase list while explaining what NOT to
     # claim (which legitimately contains those same words in a negated /

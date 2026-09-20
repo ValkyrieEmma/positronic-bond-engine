@@ -5,7 +5,7 @@ contextual_judgment.py
 Reasoning-over-rote: contextual/semantic judgment for principle-violation
 calls, implementing docs/principles.md's Principle 4 ("Reasoning Over Rote":
 "Boundaries, refusals, and care responses must emerge from deliberative
-processes, not static scripts") and architect ops notes (private)'s architectural
+processes, not static scripts") and architect ops notes' architectural
 non-negotiable ("Reasoning over rote ... never canned denials") for the
 ontology/evidence-weighing/hard-override pipeline specifically.
 

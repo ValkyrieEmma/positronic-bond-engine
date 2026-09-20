@@ -9,7 +9,7 @@ variables.
 Why this exists: ``core/content_provider.py``'s ``config_from_env()`` (and
 ``core/contextual_judgment.py``'s default ``ContextualJudge()``) read the
 base-model connection details purely from ``os.environ`` — that's the
-documented mechanism (see ``docs/model_providers.md`` and architect ops notes (private)).
+documented mechanism (see ``docs/model_providers.md`` and architect ops notes).
 On Windows, setting a *persistent* environment variable normally means
 either editing System Properties, or running ``setx`` and then restarting
 every terminal/IDE that should see it — annoying friction for something as
