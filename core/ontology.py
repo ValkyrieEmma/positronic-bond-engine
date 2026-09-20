@@ -21,7 +21,7 @@ vision: honest self-assessment, relationship health via reasoning (not rote),
 and support activated by need without pathologizing.
 
 Current version: 0.3.1 (0.2 initial ontology-driven release; 0.2.1 adds the
-7th principle, Long-Term Continuity, reconciling architect ops notes' "Extensibility &
+7th principle, Long-Term Continuity, reconciling architect ops notes's "Extensibility &
 Long-Term Alignment" naming with docs/principles.md's original wording; 0.2.2
 tightens Tier 1 single-token indicator matching to require a right-word-
 boundary, fixing false positives such as "harm" matching inside "harmless" or

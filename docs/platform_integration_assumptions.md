@@ -20,7 +20,7 @@ deliberation/decision layer — approve, approve-with-conditions, hold,
 refuse, identity-required. It is **not**, and does not claim to be, a
 SIL-rated or ASIL-rated safety function, and it is **not** a substitute
 for a platform's own protective-stop, Speed & Separation Monitoring,
-Power & Force Limiting, or e-stop implementation. Per `architect ops notes (private)` §4, no
+Power & Force Limiting, or e-stop implementation. Per architect ops notes (private), no
 public or investor-facing material may describe PBE as "certified,"
 "SIL-rated," "meets ISO 26262/13482," or similar unless a real, documented
 safety case and third-party assessment exists. None does today, and

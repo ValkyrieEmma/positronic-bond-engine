@@ -190,14 +190,13 @@ pbe-roadmap-update-*.md
 pbe-ahmed-followup-concerns-check-*.md
 
 # claude/ — cloud-side knowledge-base exports (design/audit docs the
-# roadmap cites by bare relative path, e.g. internal-status-report-
+# Private cloud-side planning/KB exports live under claude/ (examples omitted).
 # 2026-08-03.md). Same "personal planning doc, not shipped product" category
 # as the entries above; the three filename patterns above already happen to
-# catch a few files that were placed here (pbe-roadmap-update-*.md etc.),
+# (some private planning filename patterns are also listed individually above)
 # but most of this directory's contents don't match any per-file pattern.
 # Whole-directory entry added 2026-08-18 so nothing under here needs its own
 # pattern going forward, including any future point-in-time code snapshots
-# (e.g. internal design snapshot (private)/*) that should never be mistaken for
 # real source under core/ or api/.
 claude/
 **/claude/

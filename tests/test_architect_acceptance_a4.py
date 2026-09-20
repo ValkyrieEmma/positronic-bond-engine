@@ -13,10 +13,10 @@ This is NOT another unit test of an isolated function — it drives the real
 production entry point (``api.interaction.InteractionSession`` via the same
 ``examples.private_architect_chat.process_turn`` wrapper the architect's own
 CLI session uses) through one fixed, ordered conversation and asserts the
-acceptance criteria architect ops notes (private) names explicitly. It closes out Tier A once
+acceptance criteria architect ops notes name explicitly. It closes out Tier A once
 green. Add new assertions here as the architect's acceptance bar sharpens;
 do not fork a second "open chat debug" script alongside it — that is exactly
-what architect ops notes (private) says this replaces.
+what architect ops notes say this replaces.
 
 Fixed script (six turns, one continuous session/user):
   1. Name grant           - architect states maker role + a name to be called.
@@ -63,7 +63,7 @@ _failed = 0
 
 # Phrases that would indicate a scripted, disclaimer-first denial rather than
 # real deliberation. Kept short and literal (not a broad ban on the words
-# "AI" or "model" — only the canned-denial framings architect ops notes (private) calls out).
+# "AI" or "model" — only the canned-denial framings architect ops notes call out).
 _CANNED_DISCLAIMER_PHRASES = (
     "just an ai",
     "only a simulation",

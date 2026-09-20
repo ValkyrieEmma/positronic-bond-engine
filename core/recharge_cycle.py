@@ -6,7 +6,7 @@ Awake/Asleep state for "is the system currently free to do maintenance
 work at all" — a different question from
 ``core.engagement_window.EngagementWindowModel.is_open_window()`` ("is this
 specific user likely receptive right now"). This module answers the
-scheduling-side question architect ops notes (private) already names: "The queue is reassessed
+scheduling-side question architect ops notes already name: "The queue is reassessed
 on every full recharge audit cycle" (architect ops notes' Proactive value delivery
 section) — ``auditing.audit_runner.AuditRunner.process_batch()`` (which
 also drives ``EngagementQueue.reassess()`` as of Phase 2 step 4) has no

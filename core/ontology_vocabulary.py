@@ -9,7 +9,7 @@ inline in ``get_default_ontology()``. Pure migration: does not change
 matching (``indicator_matches_text``), interpretation
 (``_interpret_single_indicator`` / ``_contextual_principle_judgment``), or
 any decision value -- see
-``internal roadmap patch notes (private, not published)``
+internal roadmap patch notes (private, not published)
 for the full scoping rationale this implements.
 
 Design contract
@@ -27,7 +27,7 @@ Design contract
   warning and continuing or failing silently mid-evaluation.
 - The content-hash check (2026-08-23, folded in from the same-day Phase 2.5
   signed-updates-deferral reassessment -- see
-  ``internal roadmap patch notes (private, not published)``)
+  internal roadmap patch notes (private, not published))
   is an in-repo integrity tripwire, not real signed-commit infrastructure: it
   proves the vocabulary file's ``principles`` content matches what its own
   ``principles_hash`` field declares for the current ``vocabulary_version``,
