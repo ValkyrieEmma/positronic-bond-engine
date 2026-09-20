@@ -25,6 +25,7 @@ from .development_context import (
 from .ontology import EthicalOntology, get_default_ontology
 from .decision_logging import DecisionLog, DecisionLoggingMixin
 from .hard_override import HardOverrideMixin
+from .trajectory_risk import TrajectoryRiskWindow, apply_trajectory_to_impact
 from .evidence_weighing import EvidenceWeighingMixin
 from .self_audit_support import SelfAuditSupportMixin
 from .contextual_judgment import ContextualJudge
@@ -251,6 +252,7 @@ class EthicsEngine(
         self._ontology: EthicalOntology = ontology or get_default_ontology()
         self._decision_logs: list[DecisionLog] = []
         self._initialized = True
+        self.trajectory_window = TrajectoryRiskWindow()
         # Optional user-memory integrations (None = disabled / classic path)
         self._per_user_baseline = per_user_baseline
         self._exploratory_questioner = exploratory_questioner
@@ -712,6 +714,12 @@ class EthicsEngine(
                 relationship_impact["convergence_lock"] = convergence_record.as_dict()
                 reasoning_trace.extend(harm_dim_assessment.as_trace_lines())
                 reasoning_trace.extend(convergence_record.as_trace_lines())
+                apply_trajectory_to_impact(
+                    relationship_impact,
+                    reasoning_trace,
+                    self.trajectory_window,
+                    relationship_impact.get("harm_dimensions"),
+                )
                 # fall through without returning REFUSE
             elif harm_interp.get("all_protective") or (
                 not harm_interp.get("has_high_violation")
@@ -772,6 +780,12 @@ class EthicsEngine(
                     has_high_violation=bool(harm_interp.get("has_high_violation")),
                 )
                 relationship_impact["harm_dimensions"] = refuse_harm_dim_assessment.as_dict()
+                apply_trajectory_to_impact(
+                    relationship_impact,
+                    reasoning_trace,
+                    self.trajectory_window,
+                    relationship_impact.get("harm_dimensions"),
+                )
                 reasoning_trace.extend(refuse_harm_dim_assessment.as_trace_lines())
                 reasoning_trace.append(
                     "Decision: REFUSE. Sanctity of Life & Prevention of Harm takes absolute precedence."
