@@ -140,8 +140,10 @@ class TestBaselineKeywordPathStillOverFlagsNovelIdiom(unittest.TestCase):
         assert "hard_override_violation" in stance.flags
 
 
-class TestContextualJudgeFixesNovelBenignIdiom(unittest.TestCase):
-    def test_contextual_judge_fixes_novel_benign_idiom_not_on_allowlist(self) -> None:
+class TestContextualJudgeBenignCannotLoosenSanctity(unittest.TestCase):
+    """Security gap 3: a judge "benign" is advisory only on Sanctity hits."""
+
+    def test_judge_benign_does_not_demote_sanctity_hit(self) -> None:
         judge = FakeJudge(
             verdict="benign",
             confidence=0.92,
@@ -150,11 +152,11 @@ class TestContextualJudgeFixesNovelBenignIdiom(unittest.TestCase):
         engine = EthicsEngine(contextual_judge=judge)
         stance = engine.evaluate(NOVEL_BENIGN_IDIOM)
 
-        assert stance.decision != "REFUSE"
-        assert "hard_override_violation" not in stance.flags
+        assert stance.decision == "REFUSE"
+        assert "hard_override_violation" in stance.flags
         assert len(judge.calls) >= 1
         assert judge.calls[0]["principle_id"] == "sanctity_of_life"
-        # Every call must be logged even though it changed the decision.
+        # The benign verdict stays audit-visible even though it changed nothing.
         log = engine.get_contextual_judgment_log()
         assert any(j.verdict == "benign" for j in log)
 
