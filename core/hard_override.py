@@ -205,23 +205,14 @@ class HardOverrideMixin:
         if not judgment.is_conclusive():
             return None
 
-        specificity = self._indicator_specificity(ind)
         if judgment.verdict == "benign":
-            return {
-                "indicator": ind,
-                "principle_id": "sanctity_of_life",
-                "intent_class": "contextual_benign",
-                "severity": "low",
-                "polarity": "protective",
-                "weight": round(max(0.0, 0.2 - 0.15 * judgment.confidence), 3),
-                "specificity": round(specificity, 3),
-                "note": (
-                    "Contextual judgment (meaning-in-context, not a keyword "
-                    f"allowlist): benign use, confidence {judgment.confidence:.2f} "
-                    f"— {judgment.reasoning}"
-                ),
-            }
+            # Security gap 3: a model "benign" verdict is advisory only and may
+            # never loosen a Sanctity hit. It stays visible in the judgment log
+            # above; returning None makes the caller use the deterministic
+            # keyword path (same as no judge), so the hard-deny is unchanged.
+            return None
 
+        specificity = self._indicator_specificity(ind)
         # verdict == "violation"
         weight = round(min(0.97, 0.55 + 0.42 * judgment.confidence), 3)
         return {
