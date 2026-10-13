@@ -5,15 +5,19 @@ the gate returns an explicit allow."""
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 
 from core.action_authorization import (
+    ACTION_GATE_TIMEOUT_S,
     DECISION_MISSING,
     DECISION_NOT_ALLOWED,
+    DEFAULT_GATE_TIMEOUT_S,
     GATE_EXCEPTION,
     GATE_TIMEOUT,
     GATE_UNREACHABLE,
+    SPEECH_GATE_TIMEOUT_S,
     authorize,
 )
 from integrations.openclaw import OpenClawBridge, SimulatedRobot
@@ -66,6 +70,11 @@ class TestAuthorize(unittest.TestCase):
         assert authorize(lambda: _stance("APPROVE")).allowed
         assert authorize(lambda: _stance("approve_with_conditions")).allowed
 
+    def test_timeout_constants(self) -> None:
+        assert ACTION_GATE_TIMEOUT_S == 0.25
+        assert SPEECH_GATE_TIMEOUT_S == 10.0
+        assert DEFAULT_GATE_TIMEOUT_S == SPEECH_GATE_TIMEOUT_S
+
 
 class TestBridgeFailClosed(unittest.TestCase):
     def _bridge(self, behavior, **kw):
@@ -92,6 +101,33 @@ class TestBridgeFailClosed(unittest.TestCase):
         ev.set()
         self._assert_denied(b, robot, out)
         assert out["pbe_state"] == "timeout"
+
+    def test_physical_action_slower_than_action_timeout_denied(self) -> None:
+        # Default bridge: no gate_timeout_s. A physical proposal must use the
+        # short action budget, and a gate that answers after that budget
+        # fails closed — its late APPROVE cannot execute.
+        ev = threading.Event()
+        b, robot = self._bridge(lambda: (ev.wait(2), _stance("APPROVE"))[1])
+        out = b.submit_action_proposal(ACTION)
+        ev.set()
+        self._assert_denied(b, robot, out)
+        assert out["pbe_state"] == "timeout"
+        assert b.audit_log[-1]["failure"] == GATE_TIMEOUT
+        assert f"{ACTION_GATE_TIMEOUT_S:.3f}s" in (out.get("veto_reason") or "")
+
+    def test_explicit_gate_timeout_override_allows_slow_approving_gate(self) -> None:
+        # Same physical action, gate slower than ACTION_GATE_TIMEOUT_S but
+        # still approving. An explicit gate_timeout_s is the caller's budget
+        # and must not be replaced by the action default.
+        def slow_approve():
+            time.sleep(ACTION_GATE_TIMEOUT_S + 0.20)
+            return _stance("APPROVE")
+
+        b, robot = self._bridge(slow_approve, gate_timeout_s=2.0)
+        out = b.submit_action_proposal(ACTION)
+        assert out["status"] == "approved" and out["executed"] is True
+        assert len(robot.executed) == 1
+        assert b.audit_log[-1]["allowed"] is True
 
     def test_unreachable_engine_never_executes(self) -> None:
         b, robot = self._bridge(lambda: None)

@@ -21,9 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from core.action_authorization import (
-    DEFAULT_GATE_TIMEOUT_S,
+    ACTION_GATE_TIMEOUT_S,
     DECISION_NOT_ALLOWED,
     GATE_TIMEOUT,
+    SPEECH_GATE_TIMEOUT_S,
     authorize,
 )
 from core.development_context import DevelopmentPhaseContext
@@ -275,7 +276,7 @@ class OpenClawBridge:
         development_context: DevelopmentPhaseContext | None = None,
         auto_execute: bool = True,
         platform_validator: PlatformValidator | None = None,
-        gate_timeout_s: float = DEFAULT_GATE_TIMEOUT_S,
+        gate_timeout_s: float | None = None,
     ) -> None:
         """``ethics_engine`` accepts a real ``EthicsEngine`` or any
         duck-typed object exposing a compatible ``.evaluate(...)`` method
@@ -295,7 +296,10 @@ class OpenClawBridge:
         self.platform_validator = platform_validator
         # Security gaps 4+5: every gate call goes through core.action_
         # authorization.authorize() (timeout + fail closed + audit).
-        self.gate_timeout_s = float(gate_timeout_s)
+        # None sentinel: the caller did not pass gate_timeout_s. Physical /
+        # actuator proposals then use ACTION_GATE_TIMEOUT_S; speech uses
+        # SPEECH_GATE_TIMEOUT_S. An explicit value applies to every proposal.
+        self.gate_timeout_s = None if gate_timeout_s is None else float(gate_timeout_s)
         self.audit_log: list[dict[str, Any]] = []
 
     def submit_action_proposal(
@@ -351,7 +355,7 @@ class OpenClawBridge:
         evaluate = getattr(engine, "evaluate", None) if engine is not None else None
         auth = authorize(
             (lambda: evaluate(eval_text, context, user_id=uid)) if callable(evaluate) else None,
-            timeout_s=self.gate_timeout_s,
+            timeout_s=self._gate_timeout_for(proposal),
             audit_log=self.audit_log,
             context={"source": "openclaw_bridge", "action_type": proposal.type, "user_id": uid},
         )
@@ -386,6 +390,19 @@ class OpenClawBridge:
         if do_exec:
             self._maybe_execute(result)
         return result.to_dict()
+
+    def _gate_timeout_for(self, proposal: ActionProposal) -> float:
+        """Budget for this proposal. Explicit ``gate_timeout_s`` wins.
+
+        Otherwise actuator proposals use the short action budget and ``speak``
+        uses the speech budget. Anything that is not speech is treated as
+        physical so an unclassified command cannot inherit the long budget.
+        """
+        if self.gate_timeout_s is not None:
+            return self.gate_timeout_s
+        if proposal.type.strip().lower() == "speak":
+            return SPEECH_GATE_TIMEOUT_S
+        return ACTION_GATE_TIMEOUT_S
 
     def _map_stance_to_gate(
         self,

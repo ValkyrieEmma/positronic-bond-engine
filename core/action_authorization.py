@@ -28,7 +28,16 @@ from typing import Any, Callable
 logger = logging.getLogger("pbe.action_authorization")
 
 ALLOW_DECISIONS: frozenset[str] = frozenset({"APPROVE", "APPROVE_WITH_CONDITIONS"})
-DEFAULT_GATE_TIMEOUT_S: float = 10.0
+
+# Physical/actuator action proposals.
+# Placeholder, to be set per reversibility class / stop-time budget later.
+ACTION_GATE_TIMEOUT_S: float = 0.25
+
+# Speech/non-physical.
+SPEECH_GATE_TIMEOUT_S: float = 10.0
+
+# Compatibility alias of the speech/non-physical budget.
+DEFAULT_GATE_TIMEOUT_S: float = SPEECH_GATE_TIMEOUT_S
 
 # Failure reasons (stable strings for audit consumers)
 GATE_UNREACHABLE = "gate_unreachable"
