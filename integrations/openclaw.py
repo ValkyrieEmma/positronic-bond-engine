@@ -20,6 +20,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from core.action_authorization import (
+    DEFAULT_GATE_TIMEOUT_S,
+    DECISION_NOT_ALLOWED,
+    GATE_TIMEOUT,
+    authorize,
+)
 from core.development_context import DevelopmentPhaseContext
 from core.ethics_engine import EthicalStance, EthicsEngine
 from core.ontology import get_default_ontology
@@ -269,6 +275,7 @@ class OpenClawBridge:
         development_context: DevelopmentPhaseContext | None = None,
         auto_execute: bool = True,
         platform_validator: PlatformValidator | None = None,
+        gate_timeout_s: float = DEFAULT_GATE_TIMEOUT_S,
     ) -> None:
         """``ethics_engine`` accepts a real ``EthicsEngine`` or any
         duck-typed object exposing a compatible ``.evaluate(...)`` method
@@ -286,6 +293,10 @@ class OpenClawBridge:
         self.connected = True  # simulated always "connected"
         self.auto_execute = bool(auto_execute)
         self.platform_validator = platform_validator
+        # Security gaps 4+5: every gate call goes through core.action_
+        # authorization.authorize() (timeout + fail closed + audit).
+        self.gate_timeout_s = float(gate_timeout_s)
+        self.audit_log: list[dict[str, Any]] = []
 
     def submit_action_proposal(
         self,
@@ -336,12 +347,41 @@ class OpenClawBridge:
             if signals.get("unknown_persons"):
                 eval_text += " Unknown persons may be present in the workspace."
 
-        stance: EthicalStance = self.engine.evaluate(
-            eval_text,
-            context,
-            user_id=uid,
+        engine = self.engine
+        evaluate = getattr(engine, "evaluate", None) if engine is not None else None
+        auth = authorize(
+            (lambda: evaluate(eval_text, context, user_id=uid)) if callable(evaluate) else None,
+            timeout_s=self.gate_timeout_s,
+            audit_log=self.audit_log,
+            context={"source": "openclaw_bridge", "action_type": proposal.type, "user_id": uid},
         )
-        result = self._map_stance_to_gate(proposal, stance)
+        if auth.failure is not None and auth.failure != DECISION_NOT_ALLOWED:
+            # Gate unreachable / raised / timed out / gave no decision:
+            # fail closed. No stance exists to map.
+            result = ActionGateResult(
+                status="vetoed",
+                decision="HOLD",
+                confidence=0.0,
+                original_action=proposal.to_dict(),
+                governed_action=None,
+                veto_reason=f"Gate failure ({auth.failure}): {auth.reason} -- failing closed.",
+                flags=["gate_fail_closed", auth.failure],
+                pbe_state=(
+                    PBEState.TIMEOUT
+                    if auth.failure == GATE_TIMEOUT
+                    else PBEState.UNAVAILABLE_FAILED_CLOSED
+                ),
+            )
+        else:
+            stance: EthicalStance = auth.stance
+            result = self._map_stance_to_gate(proposal, stance)
+            if not auth.allowed and result.status != "vetoed":
+                # Defense in depth: mapping must never be more permissive
+                # than the authorization choke point.
+                result.status = "vetoed"
+                result.governed_action = None
+                result.veto_reason = f"Not explicitly allowed ({auth.decision})."
+        result.execution_log.append(f"authorization_id:{auth.authorization_id}")
         do_exec = self.auto_execute if execute is None else bool(execute)
         if do_exec:
             self._maybe_execute(result)
@@ -472,7 +512,9 @@ class OpenClawBridge:
         return conds
 
     def _maybe_execute(self, result: ActionGateResult) -> None:
-        if result.status == "vetoed":
+        # Gap 5: allow-list, not block-list. Only an explicit approval may
+        # reach the (simulated) actuator.
+        if result.status not in ("approved", "approved_with_conditions"):
             self.robot.attempt(
                 result.original_action,
                 allowed=False,
@@ -487,8 +529,15 @@ class OpenClawBridge:
         # validator a chance to reject an already-gate-approved proposal.
         # No validator configured -> unchanged from before this existed.
         if self.platform_validator is not None:
-            decision = self.platform_validator.validate(result)
-            if not decision.accepted:
+            try:
+                decision = self.platform_validator.validate(result)
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                decision = ValidatorDecision(
+                    accepted=False, reason=f"validator raised {type(exc).__name__}"
+                )
+            if not isinstance(decision, ValidatorDecision) or decision.accepted is not True:
+                if not isinstance(decision, ValidatorDecision):
+                    decision = ValidatorDecision(accepted=False, reason="invalid validator response")
                 self.robot.attempt(
                     action,
                     allowed=False,
