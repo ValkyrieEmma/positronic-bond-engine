@@ -1,0 +1,2 @@
+# Verified ethics core: bytes are pinned by sha256; never rewrite line endings.
+core/ethics_core/** -text

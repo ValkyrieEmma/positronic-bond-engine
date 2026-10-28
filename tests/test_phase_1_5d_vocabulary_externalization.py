@@ -68,7 +68,7 @@ from core.ontology_vocabulary import (  # noqa: E402
 )
 
 _SNAPSHOT_PATH = Path(__file__).resolve().parent / "phase_1_5d_pre_change_snapshot.json"
-_REAL_VOCAB_PATH = _ROOT / "core" / "ontology_vocabulary.json"
+_REAL_VOCAB_PATH = _ROOT / "core" / "ethics_core" / "ontology_vocabulary.json"
 
 # Frozen pre-change precedence/category/hard-override table, captured the
 # same way and at the same time as the indicator snapshot (see

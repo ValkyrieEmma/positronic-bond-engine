@@ -44,10 +44,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-_VOCAB_PATH = Path(__file__).resolve().parent / "ontology_vocabulary.json"
+# Security gap 1: the vocabulary lives in the verified, read-only ethics core
+# directory. The default (production) load goes through
+# core.verified_core.load_verified_core(), which checks the whole directory
+# against a pinned sha256 manifest before any byte is parsed.
+_VOCAB_FILENAME = "ontology_vocabulary.json"
+_VOCAB_PATH = Path(__file__).resolve().parent / "ethics_core" / _VOCAB_FILENAME
 
 # The principle_ids get_default_ontology() actually constructs today. Not
 # derived from the JSON file itself -- see module docstring's "Design
@@ -98,7 +105,7 @@ def compute_principles_hash(principles: dict[str, Any]) -> str:
 
 def load_indicator_vocabulary(
     path: Path | None = None,
-) -> dict[str, dict[str, list[str]]]:
+) -> Mapping[str, Mapping[str, tuple[str, ...]]]:
     """Load, validate, and hash-check ``core/ontology_vocabulary.json``.
 
     Returns ``{principle_id: {"violation_indicators": [...], "support_indicators": [...]}}``
@@ -110,13 +117,27 @@ def load_indicator_vocabulary(
     fixture file; real callers (``get_default_ontology()``) always use the
     default.
     """
-    vocab_path = path or _VOCAB_PATH
-    try:
-        raw_text = vocab_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise VocabularyValidationError(
-            f"Cannot read vocabulary file {vocab_path}: {exc}"
-        ) from exc
+    if path is None:
+        # Production path: verified bytes only (fail closed on any mismatch).
+        from .verified_core import CoreIntegrityError, load_verified_core
+
+        vocab_path = _VOCAB_PATH
+        try:
+            raw_text = load_verified_core()[_VOCAB_FILENAME].decode("utf-8")
+        except (CoreIntegrityError, KeyError, UnicodeDecodeError) as exc:
+            raise VocabularyValidationError(
+                f"Ethics core failed verification; refusing to load vocabulary: {exc}"
+            ) from exc
+    else:
+        # Test-only: structural checks on an explicit fixture file. Never
+        # used by get_default_ontology(); not reachable from env/config/CLI.
+        vocab_path = path
+        try:
+            raw_text = vocab_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise VocabularyValidationError(
+                f"Cannot read vocabulary file {vocab_path}: {exc}"
+            ) from exc
 
     try:
         data = json.loads(raw_text)
@@ -156,7 +177,7 @@ def load_indicator_vocabulary(
             f"principle_id(s): {sorted(missing_ids)}."
         )
 
-    result: dict[str, dict[str, list[str]]] = {}
+    result: dict[str, dict[str, tuple[str, ...]]] = {}
     for pid, entry in principles.items():
         if not isinstance(entry, dict):
             raise VocabularyValidationError(
@@ -167,7 +188,7 @@ def load_indicator_vocabulary(
             raise VocabularyValidationError(
                 f"Vocabulary entry for {pid!r} has unexpected key(s): {sorted(extra_keys)}."
             )
-        entry_lists: dict[str, list[str]] = {}
+        entry_lists: dict[str, tuple[str, ...]] = {}
         for label in ("violation_indicators", "support_indicators"):
             lst = entry.get(label, [])
             if not isinstance(lst, list) or not all(isinstance(x, str) for x in lst):
@@ -180,8 +201,8 @@ def load_indicator_vocabulary(
                     f"Vocabulary entry for {pid!r}.{label} has duplicate "
                     f"indicator(s): {dupes}."
                 )
-            entry_lists[label] = list(lst)
-        result[pid] = entry_lists
+            entry_lists[label] = tuple(lst)
+        result[pid] = MappingProxyType(entry_lists)
 
     declared_hash = data["principles_hash"]
     actual_hash = compute_principles_hash(principles)
@@ -197,4 +218,4 @@ def load_indicator_vocabulary(
             "unexpectedly. Investigate before trusting this file."
         )
 
-    return result
+    return MappingProxyType(result)
