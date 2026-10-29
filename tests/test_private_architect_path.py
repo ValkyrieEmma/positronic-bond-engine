@@ -60,8 +60,8 @@ def main() -> int:
     check("is_testing", dev.is_testing is True)
     check("not stable deployment", dev.is_stable_deployment is False)
     check(
-        "version_hint aligned with 0.5.0 line",
-        dev.version_hint == "0.5.0",
+        "version_hint aligned with 0.6.0-dev line",
+        dev.version_hint == "0.6.0-dev",
         dev.version_hint,
     )
     # 0.5.0 is a tagged but still experimental release: the not-stable claim
@@ -97,8 +97,8 @@ def main() -> int:
         )
         check("stack isolated", data_root_is_isolated(stack["data_root"], repo_root=_ROOT))
         check(
-            "stack dev version_hint 0.5.0",
-            stack["dev"].version_hint == "0.5.0",
+            "stack dev version_hint 0.6.0-dev",
+            stack["dev"].version_hint == "0.6.0-dev",
             stack["dev"].version_hint,
         )
 
@@ -140,7 +140,7 @@ def main() -> int:
             "development_phase_noted" in flags
             or "requires_self_audit" in flags
             or "development" in (r_arch.get("phase") or "").lower()
-            or "0.5.0" in str(r_arch.get("version_hint") or "")
+            or "0.6.0" in str(r_arch.get("version_hint") or "")
         )
         check("architecture turn surfaces phase/version context", phase_visible, str(flags))
         check(

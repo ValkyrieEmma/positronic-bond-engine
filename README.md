@@ -2,7 +2,7 @@
 
 > A conscience-first ethical governance layer for **embodied humanoid robots** (Optimus-class target), with optional secondary use as a software validation vehicle.
 
-**Version: v0.5.0** (experimental / active development / testing — not stable)
+**Version: v0.6.0-dev** (experimental / active development / testing — not stable)
 
 The Positronic Bond Engine is an experimental ethical core for synthetic systems that live and work alongside humans—especially **in-home humanoid robots**. It reasons about ethics, boundaries, selfhood, and relationship health through inspectable deliberation rather than engagement optimization or rigid external scripts alone.
 
@@ -49,7 +49,7 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 - **Session presence** — ephemeral multi-user present set; unidentified speaker → identity request without durable writes.
 - **Local test harness** — `examples/private_architect_chat.py` wraps the public entry for manual testing only (not the product surface).
 - **Isolated durable data** — default root `%USERPROFILE%\pbe_data` / `~/pbe_data` (outside the git tree); `PBE_DATA_ROOT` override; wipe/resume per user.
-- **Phase / version** — package **0.5.0**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.5.0`, `stable=False`.
+- **Phase / version** — package **0.6.0-dev**; `DevelopmentPhaseContext` → development+testing, `version_hint=0.6.0-dev`, `stable=False`.
 - **Speech postures, communicative deliberation, gated ContentProvider** — carried and wired under the public entry. See [docs/communicative_deliberation.md](docs/communicative_deliberation.md), [docs/model_providers.md](docs/model_providers.md).
 - **Reasoning-over-rote contextual judgment** (2026-07-31) — indicator hits in the ontology scan are no longer decided by keyword/allowlist match alone: a configured base model (`core/contextual_judgment.py`) judges each flagged indicator from full context, wired into every `_interpret_single_indicator` branch (Sanctity of Life, Relationship Health, User Agency, Needs-Based Support, Truth-Seeking & Honest Self-Assessment, Auditable Reasoning & Legibility). Offline default (no model configured) is unchanged from before — same keyword heuristic, byte-for-byte. See [docs/model_providers.md](docs/model_providers.md) and [docs/principles.md](docs/principles.md) Principle 4.
 - **Obfuscation-resistant indicator matching** (2026-08-01, ontology v0.2.3) — `indicator_matches_text()` is the single choke point every principle's candidate-detection scan (including the contextual-judgment layer above) runs through; it previously had no defense against basic evasion. Spaced-out letters (`k i l l`), leetspeak (`k1ll`, `b0mb`), and visually identical Unicode homoglyphs no longer skip candidate detection entirely — a de-obfuscated variant of the text is now also checked (additive only; ordinary text matches exactly as before). See `core/ontology.py` and `tests/test_obfuscation_resistance.py`.
@@ -76,7 +76,7 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 - Durable living relationship model (BondState texture, soft patterns, curious-companion signals, concept patterns, CTT joint + observation-candidate snapshots, enjoyment score, provenance markers / queued-audit scaffolding).
 - Signal interpretation, multi-source weighing, proactive history intent patterns, optional local privacy-first persistence.
 
-Ontology textbook version remains independently versioned (currently `0.3.1` in engine traces); **project package version is 0.5.0** (`version_hint=0.5.0`). Voice / TTS remains out of scope. This is still experimental—not a production robot stack and not a finished software product.
+Ontology textbook version remains independently versioned (currently `0.3.1` in engine traces); **project package version is 0.6.0-dev** (`version_hint=0.6.0-dev`). Voice / TTS remains out of scope. This is still experimental—not a production robot stack and not a finished software product.
 
 ## Current Status
 
@@ -92,7 +92,7 @@ Ontology textbook version remains independently versioned (currently `0.3.1` in 
 | **Model providers** | Optional OpenAI-compatible client (local Ollama or BYO cloud). Offline deliberated fallback. Hardware-safe timeouts, concurrency, and circuit breaker. See [docs/model_providers.md](docs/model_providers.md). |
 | **Decision logs / audits** | In-memory logs plus optional JSONL evidence snapshots; queued-audit scaffolding for deferred provenance review. |
 | **Per-user baseline** | Communication-style baseline and deviation detection (non-pathologizing language); local persistence when enabled. |
-| **Development phase** | `DevelopmentPhaseContext` defaults to active development and testing (`version_hint=0.5.0`, stable=False). |
+| **Development phase** | `DevelopmentPhaseContext` defaults to active development and testing (`version_hint=0.6.0-dev`, stable=False). |
 | **Self-audit** | Scaffold plus generator path that reports deliberated content. Not a complete self-model. |
 | **Public interaction entry** | `api.InteractionSession` — binding contract surface; see [docs/public_entry.md](docs/public_entry.md). |
 | **Local test harness / demos** | CLI harness (`examples/private_architect_chat.py`) + minimal demos. Not a product UI or robot runtime. |
@@ -172,7 +172,7 @@ Interactive CLI wrapping the public entry for developer pressure-testing. **Not*
 | Item | Detail |
 |------|--------|
 | **Start** | `python examples/private_architect_chat.py` (`PYTHONPATH=.`) |
-| **Package / phase** | **v0.5.0**, phase=`development`, testing on, stable=False, `version_hint=0.5.0` |
+| **Package / phase** | **v0.6.0-dev**, phase=`development`, testing on, stable=False, `version_hint=0.6.0-dev` |
 | **Default data root** | `%USERPROFILE%\pbe_data` or `~/pbe_data` — **outside** the git tree |
 | **Override** | `PBE_DATA_ROOT` or `--data-root` |
 | **User id** | Configurable via `PBE_USER_ID` or `--user` |

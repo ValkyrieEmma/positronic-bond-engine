@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project are documented in this file.
 
@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 PBE is pre-1.0 and experimental; 0.x releases may change behavior.
 
-## [0.5.0] - Unreleased
+## [Unreleased]
+
+Development toward 0.6.0.
+
+## [0.5.0] - 2026-10-29
 
 First tagged release of the 0.5 line. Still experimental: not a production
 robot stack, not certified, and not a hardware safety function.
