@@ -25,6 +25,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .verified_core import core_integrity_error
+
 logger = logging.getLogger("pbe.action_authorization")
 
 ALLOW_DECISIONS: frozenset[str] = frozenset({"APPROVE", "APPROVE_WITH_CONDITIONS"})
@@ -45,6 +47,8 @@ GATE_EXCEPTION = "gate_exception"
 GATE_TIMEOUT = "gate_timeout"
 DECISION_MISSING = "decision_missing"
 DECISION_NOT_ALLOWED = "decision_not_allowed"
+# Security gap 1: the verified ethics core failed integrity checks.
+CORE_INTEGRITY = "core_integrity"
 
 
 @dataclass
@@ -80,6 +84,16 @@ def authorize(
     A gate that times out keeps running in a daemon thread, but its result is
     discarded: nothing it returns late can authorize anything.
     """
+    # Security gap 1: no action (physical or speech) is authorized unless the
+    # ethics core verifies against its pinned manifest. Checked before the
+    # gate runs, so a gate that never consulted the core cannot allow either.
+    core_error = core_integrity_error()
+    if core_error is not None:
+        res = AuthorizationResult(False, "HOLD", f"ethics core unverified: {core_error}",
+                                  failure=CORE_INTEGRITY)
+        _audit(res, audit_log, context)
+        return res
+
     if gate is None:
         res = AuthorizationResult(False, "HOLD", "no gate configured", failure=GATE_UNREACHABLE)
         _audit(res, audit_log, context)

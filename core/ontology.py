@@ -422,17 +422,21 @@ class EthicalPrinciple:
     is_hard_override: bool = False
     precedence: int = 100  # Lower number = evaluated earlier, higher authority
     # Textbook scan strings for find_violations(); engine interprets severity/intent.
-    violation_indicators: list[str] = field(default_factory=list)
-    support_indicators: list[str] = field(default_factory=list)
+    # Security gap 1: stored as tuples so the loaded core cannot be mutated
+    # in memory (lists passed by callers are converted in __post_init__).
+    violation_indicators: tuple[str, ...] = field(default_factory=tuple)
+    support_indicators: tuple[str, ...] = field(default_factory=tuple)
     triggers_self_audit: bool = False
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "violation_indicators", tuple(self.violation_indicators))
+        object.__setattr__(self, "support_indicators", tuple(self.support_indicators))
         # Ensure override principles have very high authority
         if self.is_hard_override and self.precedence > 5:
             object.__setattr__(self, "precedence", 0)
 
 
-@dataclass
+@dataclass(frozen=True)
 class EthicalOntology:
     """Versionable, queryable container for the ethical principles.
 
@@ -452,7 +456,11 @@ class EthicalOntology:
     version: str
     timestamp: str
     description: str
-    principles: list[EthicalPrinciple] = field(default_factory=list)
+    principles: tuple[EthicalPrinciple, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        # Security gap 1: freeze the principle set once constructed.
+        object.__setattr__(self, "principles", tuple(self.principles))
 
     def get_principle(self, principle_id: str) -> EthicalPrinciple | None:
         """Retrieve a principle by its stable identifier."""
