@@ -61,10 +61,16 @@ def main() -> int:
     check("not stable deployment", dev.is_stable_deployment is False)
     check(
         "version_hint aligned with 0.5.0 line",
-        "0.5.0" in (dev.version_hint or "") and str(dev.version_hint).endswith("-dev"),
+        dev.version_hint == "0.5.0",
         dev.version_hint,
     )
-    check("version_hint is -dev (not stable claim)", str(dev.version_hint).endswith("-dev"))
+    # 0.5.0 is a tagged but still experimental release: the not-stable claim
+    # is carried by phase/is_stable_deployment, not by a -dev suffix.
+    check(
+        "0.5.0 release still makes no stable claim",
+        dev.phase != "stable" and dev.is_stable_deployment is False
+        and "stable=False" in dev.limitation_summary().replace(" ", ""),
+    )
 
     # --- data isolation ---
     root = default_data_root()
