@@ -38,6 +38,11 @@ Core commitments (detail in [docs/principles.md](docs/principles.md); guidelines
 
 ## What's New in v0.5.0
 
+**Security (see [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md)):**
+
+- **Governor runs in its own process** - `OpenClawBridge()` sends each physical action proposal to a separate governor process (`core/governor.py`) over a strict, versioned, size-limited JSON pipe protocol. The governor verifies and loads the ethics core itself and accepts no rules, paths or flags from the caller. If the governor is not running, still starting, crashes, times out, or replies with anything malformed, the action is denied and audited. Nothing to configure: the governor starts on first use (a second or two on Windows) and is stopped at exit.
+- **Speech is audited through `authorize()`** - public-entry turns and `ResponseGenerator.generate_from_evaluate` go through the same authorization choke point as physical actions (10 s speech budget); a gate failure withholds speech.
+
 **Public interaction entry** and session presence under active development/testing (not stable):
 
 - **Public entry (`api/`)** — `InteractionSession` / `submit_turn` implement the binding turn contract (isolation, gate authority, multi-user identity-required, no force flags). See [docs/public_entry.md](docs/public_entry.md).
