@@ -299,7 +299,7 @@ class OpenAICompatibleProvider:
         data = json.dumps(body).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "positronic-bond-engine/0.5.0-dev",
+            "User-Agent": "positronic-bond-engine/0.5.0",
         }
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"

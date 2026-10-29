@@ -15,7 +15,7 @@ Override: env PBE_DATA_ROOT or --data-root. Outside the git tree by default.
 
 Phase / version
 ---------------
-Uses DevelopmentPhaseContext (development + testing, version_hint 0.5.0-dev).
+Uses DevelopmentPhaseContext (development + testing, version_hint 0.5.0).
 Not a stable deployment.
 
 Run from project root::

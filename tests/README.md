@@ -6,7 +6,7 @@ Integration and smoke tests for the Positronic Bond Engine. These are **standalo
 $env:PYTHONPATH = "."
 ```
 
-## v0.5.0-dev — public entry, presence, harness, speech, providers
+## v0.5.0 — public entry, presence, harness, speech, providers
 
 ```powershell
 python tests/test_public_entry.py
