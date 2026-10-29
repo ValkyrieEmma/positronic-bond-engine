@@ -29,7 +29,7 @@ from core.action_authorization import (
 )
 from core.development_context import DevelopmentPhaseContext
 from core.ethics_engine import EthicalStance, EthicsEngine
-from core.ontology import get_default_ontology
+from core.governor import GovernorClient, get_default_governor
 from integrations.platform_states import (
     PBEState,
     PlatformState,
@@ -277,19 +277,31 @@ class OpenClawBridge:
         auto_execute: bool = True,
         platform_validator: PlatformValidator | None = None,
         gate_timeout_s: float | None = None,
+        governor: GovernorClient | None = None,
     ) -> None:
-        """``ethics_engine`` accepts a real ``EthicsEngine`` or any
-        duck-typed object exposing a compatible ``.evaluate(...)`` method
-        (mirrors ``core/ethics_engine.py``'s own ``contextual_judge: Any |
-        None`` convention for injectable dependencies) -- used by tests to
-        exercise ``_map_stance_to_gate``'s decision handling directly."""
-        if ethics_engine is not None:
-            self.engine = ethics_engine
-        else:
-            self.engine = EthicsEngine(
-                ontology=get_default_ontology(),
-                development_context=development_context,
+        """Default (production): every proposal is decided by the governor
+        process (``core/governor.py``, security gap 2). The bridge holds only
+        a pipe to it, never an engine.
+
+        ``ethics_engine`` is an in-process test seam: a duck-typed object
+        with ``.evaluate(...)`` used to exercise ``_map_stance_to_gate``
+        directly. It is still routed through ``authorize()`` (core integrity
+        check, timeout, fail closed, audit) and every audit entry it produces
+        is marked ``gate_mode=in_process_injected``. It is not reachable from
+        configuration or environment; only code that constructs the bridge
+        can pass it, and such code already runs in the caller's process.
+
+        ``development_context`` is no longer accepted: the governor owns its
+        own configuration and takes none from the caller."""
+        if development_context is not None:
+            raise TypeError(
+                "development_context is not accepted: the governor process owns "
+                "its configuration (security gap 2)"
             )
+        self.engine = ethics_engine
+        self.governor = None if ethics_engine is not None else (
+            governor if governor is not None else get_default_governor()
+        )
         self.robot = robot if robot is not None else SimulatedRobot()
         self.connected = True  # simulated always "connected"
         self.auto_execute = bool(auto_execute)
@@ -351,13 +363,24 @@ class OpenClawBridge:
             if signals.get("unknown_persons"):
                 eval_text += " Unknown persons may be present in the workspace."
 
-        engine = self.engine
-        evaluate = getattr(engine, "evaluate", None) if engine is not None else None
+        timeout_s = self._gate_timeout_for(proposal)
+        if self.governor is not None:
+            governor = self.governor
+            kind = "speech" if proposal.type.strip().lower() == "speak" else "physical"
+            gate = lambda: governor.evaluate(  # noqa: E731
+                kind, eval_text, context, uid, timeout_s=timeout_s
+            )
+            gate_mode = "governor_process"
+        else:
+            evaluate = getattr(self.engine, "evaluate", None)
+            gate = (lambda: evaluate(eval_text, context, user_id=uid)) if callable(evaluate) else None
+            gate_mode = "in_process_injected"
         auth = authorize(
-            (lambda: evaluate(eval_text, context, user_id=uid)) if callable(evaluate) else None,
-            timeout_s=self._gate_timeout_for(proposal),
+            gate,
+            timeout_s=timeout_s,
             audit_log=self.audit_log,
-            context={"source": "openclaw_bridge", "action_type": proposal.type, "user_id": uid},
+            context={"source": "openclaw_bridge", "action_type": proposal.type,
+                     "user_id": uid, "gate_mode": gate_mode},
         )
         if auth.failure is not None and auth.failure != DECISION_NOT_ALLOWED:
             # Gate unreachable / raised / timed out / gave no decision:

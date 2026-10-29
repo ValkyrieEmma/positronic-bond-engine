@@ -87,6 +87,11 @@ from core import (
     ResponseGenerator,
     get_default_development_context,
 )
+from core.action_authorization import (
+    SPEECH_GATE_TIMEOUT_S,
+    authorize,
+    speech_stance_from_authorization,
+)
 from core.communicative_deliberation import (
     deliberate_and_persist,
     knowledge_is_blank,
@@ -239,6 +244,8 @@ class InteractionSession:
             content_provider if content_provider is not None else provider_from_env()
         )
         self.presence = SessionPresence()
+        # Security gap 2: every speech authorization is audited here.
+        self.authorization_audit_log: list[dict[str, Any]] = []
         self._store = LocalPersistence(self.data_root)
         # Per-user component bags (isolated) — never a group bag
         self._users: dict[str, dict[str, Any]] = {}
@@ -701,12 +708,23 @@ class InteractionSession:
             **self.dev.as_context(),
             **memory.as_ethics_context(user_id, limit=8),
         }
-        stance = engine.evaluate(
-            proposed,
-            context,
-            relationship_health=rh.as_context(),
-            user_id=user_id,
+        # Security gap 2: speech goes through the same authorization choke
+        # point as physical actions (core integrity, speech budget, fail
+        # closed, audit). A non-allow decision such as REQUIRES_SELF_AUDIT
+        # keeps its stance (the speech posture layer handles it); a gate
+        # failure becomes a HOLD that withholds speech.
+        auth = authorize(
+            lambda: engine.evaluate(
+                proposed,
+                context,
+                relationship_health=rh.as_context(),
+                user_id=user_id,
+            ),
+            timeout_s=SPEECH_GATE_TIMEOUT_S,
+            audit_log=self.authorization_audit_log,
+            context={"source": "api.interaction", "kind": "speech", "user_id": user_id},
         )
+        stance = speech_stance_from_authorization(auth)
         deviation = baseliner.detect_deviation(user_id, {"text": user_text})
         reply = responder.generate_from_stance(
             stance,

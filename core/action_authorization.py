@@ -165,3 +165,24 @@ def _audit(
         logger.info("action authorized: %s", entry)
     else:
         logger.warning("action denied (fail closed): %s", entry)
+
+
+def speech_stance_from_authorization(auth: AuthorizationResult) -> Any:
+    """Stance for speech callers after ``authorize()``.
+
+    A real gate decision (allowed or not) returns the gate's own stance so
+    speech posture logic (e.g. REQUIRES_SELF_AUDIT, REFUSE) is unchanged.
+    Any gate failure (core unverified, unreachable, raised, timed out, no
+    decision) returns a HOLD stance, which every speech path withholds.
+    """
+    if auth.failure in (None, DECISION_NOT_ALLOWED) and auth.stance is not None:
+        return auth.stance
+    from .ethics_engine import EthicalStance  # local: avoid import cycle
+
+    return EthicalStance(
+        decision="HOLD",
+        confidence=0.0,
+        reasoning_trace=[f"authorization failed closed: {auth.reason}"],
+        flags=["gate_fail_closed", str(auth.failure or "unknown")],
+        self_audit_notes=[f"authorization_id:{auth.authorization_id}"],
+    )

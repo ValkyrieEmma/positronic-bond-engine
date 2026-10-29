@@ -331,6 +331,8 @@ class ResponseGenerator:
         self.enable_enjoyment_bias = bool(enable_enjoyment_bias)
         self.max_chars = max(80, int(max_chars))
         self.content_provider = content_provider
+        # Security gap 2: audit of generate_from_evaluate authorizations.
+        self.authorization_audit_log: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Live entry points (consume EthicalStance / evaluate() results)
@@ -456,12 +458,24 @@ class ResponseGenerator:
 
         if not hasattr(engine, "evaluate"):
             raise TypeError("engine must provide evaluate()")
-        stance = engine.evaluate(
-            proposed_action,
-            ctx,
-            relationship_health=rh_dict if rh_dict else relationship_health,
-            user_id=user_id or ctx.get("user_id"),
+        # Security gap 2: route through the authorization choke point.
+        from .action_authorization import (
+            SPEECH_GATE_TIMEOUT_S,
+            authorize,
+            speech_stance_from_authorization,
         )
+        auth = authorize(
+            lambda: engine.evaluate(
+                proposed_action,
+                ctx,
+                relationship_health=rh_dict if rh_dict else relationship_health,
+                user_id=user_id or ctx.get("user_id"),
+            ),
+            timeout_s=SPEECH_GATE_TIMEOUT_S,
+            audit_log=self.authorization_audit_log,
+            context={"source": "response_generator.generate_from_evaluate", "kind": "speech"},
+        )
+        stance = speech_stance_from_authorization(auth)
         reply = self.generate_from_stance(
             stance,
             relationship_health=rh_obj if rh_obj is not None else rh_dict,
