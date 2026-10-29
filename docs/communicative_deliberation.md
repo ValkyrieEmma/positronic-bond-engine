@@ -1,6 +1,6 @@
 # Communicative deliberation & relationship knowledge
 
-Public architecture note for **v0.5.0-dev**. Pairs with [model_providers.md](model_providers.md) and [public_entry.md](public_entry.md).
+Public architecture note for **v0.5.0**. Pairs with [model_providers.md](model_providers.md) and [public_entry.md](public_entry.md).
 
 Speech and interaction under the ethical gate should emerge from **reasoning about meaning and relationship**, not from a catalog of chat templates. This supports the Optimus-class target and is exercised via the **public interaction entry** (`api/`); the local CLI is a test harness only.
 

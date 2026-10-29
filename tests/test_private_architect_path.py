@@ -60,7 +60,7 @@ def main() -> int:
     check("is_testing", dev.is_testing is True)
     check("not stable deployment", dev.is_stable_deployment is False)
     check(
-        "version_hint aligned with 0.5.0-dev line",
+        "version_hint aligned with 0.5.0 line",
         "0.5.0" in (dev.version_hint or "") and str(dev.version_hint).endswith("-dev"),
         dev.version_hint,
     )
@@ -91,8 +91,8 @@ def main() -> int:
         )
         check("stack isolated", data_root_is_isolated(stack["data_root"], repo_root=_ROOT))
         check(
-            "stack dev version_hint 0.5.0-dev",
-            stack["dev"].version_hint == "0.5.0-dev",
+            "stack dev version_hint 0.5.0",
+            stack["dev"].version_hint == "0.5.0",
             stack["dev"].version_hint,
         )
 

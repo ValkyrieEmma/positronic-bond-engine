@@ -1,6 +1,6 @@
 # Public interaction entry (binding contract)
 
-Installer-facing product surface (**v0.5.0-dev**, active development/testing, not stable): submit one logical turn → receive one logical result.
+Installer-facing product surface (**v0.5.0**, active development/testing, not stable): submit one logical turn → receive one logical result.
 
 | Item | Location |
 |------|----------|

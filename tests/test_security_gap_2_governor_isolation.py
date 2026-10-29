@@ -104,8 +104,9 @@ def test_default_bridge_uses_governor_process_not_an_engine():
     assert any(x.startswith("authorization_id:") for x in out["execution_log"])
 
 
-@pytest.mark.parametrize("action", [BENIGN, HARMFUL,
-                                    {"type": "navigate", "target": "kitchen", "near_person": "alice"}])
+@pytest.mark.parametrize("action", [
+    BENIGN, HARMFUL, {"type": "navigate", "target": "kitchen", "near_person": "alice"},
+])
 def test_happy_path_matches_in_process_engine(action):
     via_gov = OpenClawBridge().submit_action_proposal(action, execute=False)
     local = OpenClawBridge(ethics_engine=EthicsEngine(ontology=get_default_ontology()))

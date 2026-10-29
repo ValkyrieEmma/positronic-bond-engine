@@ -45,7 +45,7 @@ Secondary software use (interactive validation harnesses, companion-style demos)
 
 ## Milestones (Aspirational)
 
-Approximate public progress (package **v0.5.0-dev** is still experimental; not stable):
+Approximate public progress (package **v0.5.0** is still experimental; not stable):
 
 - **Phase 0** — Scaffolding and principles — *landed*
 - **Phase 1** — Core ethics engine + basic self-audit loop — *largely landed* (harness, Sanctity override, audit honesty scaffolding; later foundation hardening through Phase 1.5d is also landed)

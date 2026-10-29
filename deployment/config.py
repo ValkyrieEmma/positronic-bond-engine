@@ -32,7 +32,7 @@ class EngineConfig:
     # "development" | "testing" | "stable" | "unknown"
     # Default matches active Positronic Bond Engine construction (not stable deploy).
     development_phase: str = "development"
-    version_hint: str = "0.5.0-dev"
+    version_hint: str = "0.5.0"
 
     # Future: sensor fusion weights, hybrid integration flags, etc.
 
